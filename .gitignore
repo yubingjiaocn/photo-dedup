@@ -37,3 +37,6 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
+
+# Real-GPU smoke test workspace
+/tmp/photo-dedup-smoke-*
