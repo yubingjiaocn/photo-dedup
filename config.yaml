@@ -1,0 +1,64 @@
+# =============================================================================
+# Photo Dedup — configuration
+# Edit `paths.root` to point at your photo library, then run the pipeline.
+# All thresholds are documented in docs/ALGORITHM.md.
+# =============================================================================
+
+paths:
+  root: "E:/Photos"              # top of the library to scan (YYYY/MM/ layout, on the HDD)
+  # DB holds all intermediate results (a few hundred MB for 66k files).
+  # Keep it on the SSD system drive for fast random reads in stages 2/3.
+  # A relative path lands next to this repo -- put the repo on the SSD (e.g. C:).
+  db: "./inventory.sqlite"
+  # `move` mode relocates deleted files here. This can grow to 100+ GB if you
+  # reclaim 20%+, so it usually must live on the HDD (E:). If your SSD has room
+  # you may point it there for speed -- your call (see README "Where to put things").
+  trash: "E:/Photos/_trash"
+  output_dir: "./output"         # review.html / delete_local.txt / etc. (SSD, small)
+  models_dir: "./models"         # downloaded YuNet ONNX + cached weights (SSD, small)
+
+scan:
+  # File extensions to inventory (case-insensitive). Motion-photo .MP/.MP4
+  # partners are matched automatically regardless of this list.
+  extensions: [".jpg", ".jpeg", ".png", ".mp4", ".mp", ".mov"]
+  follow_symlinks: false
+  commit_every: 100              # stage0/stage1 commit cadence (crash-safe)
+  # Embedded motion-photo detection cost knobs (see docs/ALGORITHM.md):
+  embedded_head_bytes: 262144            # header window scanned for XMP motion markers
+  embedded_full_scan_max_bytes: 0        # >0: also full-scan files <= N bytes for trailing MP4
+
+features:
+  # backend: auto | torch | stub
+  #   auto  -> use torch/DINOv2 if importable, else fall back to stub
+  #   torch -> real DINOv2 + pyiqa + YuNet (needs the GPU stack)
+  #   stub  -> deterministic numpy features (tests / no-GPU dry runs)
+  backend: "auto"
+  device: "cuda"                 # cuda | cpu  (torch backend only)
+  batch_size: 32
+  dinov2_model: "facebook/dinov2-base"
+  dinov2_input: 224
+  iqa_musiq: true
+  iqa_clipiqa: true
+  yunet_input_width: 640         # long-edge resize before face detection
+  yunet_score_threshold: 0.6
+  yunet_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+
+cluster:
+  burst_window_seconds: 30       # Layer-2 sliding time window
+  dinov2_threshold: 0.92         # cosine >= this => same burst (higher = stricter)
+  phash_hamming_threshold: 2     # Layer-1 exact-dup: hamming <= this
+  face_pose_shift_ratio: 0.30    # face-center move > 30% of img width => split group
+  min_face_score: 0.6            # ignore YuNet faces below this confidence
+  enable_loose_similar: false    # Layer-3 (slow, easy to over-merge). Off by default.
+  loose_window_seconds: 300
+  loose_dinov2_threshold: 0.96
+
+quality:
+  weight_iqa: 0.6
+  weight_face: 0.3
+  weight_resolution: 0.1
+  resolution_ref_mp: 12.0        # megapixels that map to full resolution_bonus=1.0
+
+execute:
+  mode: "move"                   # move | delete
+  dry_run: true                  # first run: true (writes plan, touches nothing)

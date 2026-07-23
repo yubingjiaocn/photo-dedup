@@ -1,0 +1,39 @@
+# --- Photo Dedup ignores ---
+# Databases / caches (regenerable from a rescan)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Trash & pipeline outputs
+_trash/
+output/
+*.log
+
+# Generated review artifacts
+review.html
+delete_local.txt
+delete_cloud.json
+summary.txt
+
+# Models / weights (downloaded on first run)
+models/
+*.onnx
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
