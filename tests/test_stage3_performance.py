@@ -1,13 +1,17 @@
-import base64
-import io
+"""Stage 3 must never open an original photo: it uses only the SSD thumb cache."""
 
+from pathlib import Path
+
+import pytest
 from PIL import Image
 
-from src import stage3_report
+from src import stage3_report, thumbnails
 
 
-def _rec(index, decision="MAYBE"):
+def _rec(index, decision="MAYBE", file_id=None):
     return {
+        "file_id": index if file_id is None else file_id,
+        "group_id": None,
         "path": f"/photos/{index}.jpg",
         "basename": f"{index}.jpg",
         "width": 4000,
@@ -20,95 +24,99 @@ def _rec(index, decision="MAYBE"):
     }
 
 
-def test_large_review_queues_only_generate_limited_thumbnails_and_report_omitted(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        stage3_report, "thumb_data_uri",
-        lambda path, max_px: calls.append((path, max_px)) or "data:image/jpeg;base64,x",
-    )
-    data = {
-        "groups": [],
+def _data(maybe=(), unknown=(), groups=()):
+    return {
+        "groups": list(groups),
         "delete_paths": [],
         "total_delete_bytes": 0,
-        "queues": {
-            "MAYBE": [_rec(i) for i in range(1500)],
-            "UNKNOWN": [_rec(i, "UNKNOWN") for i in range(1200)],
-        },
+        "queues": {"MAYBE": list(maybe), "UNKNOWN": list(unknown)},
     }
 
-    page = stage3_report.render_html(data, review_limit=1000)
 
-    assert len(calls) == 2000
-    assert "total: 1500" in page and "shown: 1000" in page and "omitted: 500" in page
-    assert "total: 1200" in page and "omitted: 200" in page
+def test_render_html_never_opens_a_source_image(tmp_path, monkeypatch):
+    """Even for a huge queue, rendering must not call Image.open at all."""
+    def explode(*args, **kwargs):
+        raise AssertionError("stage 3 must not open original photos")
+
+    monkeypatch.setattr(Image, "open", explode)
+    data = _data(maybe=[_rec(i) for i in range(1500)],
+                 unknown=[_rec(i, "UNKNOWN") for i in range(1200)])
+
+    page = stage3_report.render_html(data, tmp_path, review_limit=100)
+
+    assert "/api/thumb/" in page  # paged UI fetches cached thumbs by file id
+    assert "1500" in page and "1200" in page
 
 
-def test_auto_remove_group_thumbnails_keep_existing_semantics(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        stage3_report, "thumb_data_uri",
-        lambda path, max_px: calls.append(path) or "data:image/jpeg;base64,x",
+def _fallback(page: str) -> str:
+    """Only the static file:// fallback block, excluding the JS template."""
+    return page.rsplit('<div class="row">', 1)[1]
+
+
+def test_static_fallback_uses_cached_thumbnail_when_present(tmp_path):
+    directory = thumbnails.thumbs_dir(tmp_path)
+    directory.mkdir(parents=True)
+    Image.new("RGB", (32, 24), "navy").save(thumbnails.thumb_path(directory, 7), "JPEG")
+
+    fallback = _fallback(stage3_report.render_html(
+        _data(maybe=[_rec(7)]), tmp_path, review_limit=5))
+
+    assert 'src="thumbs/7.jpg"' in fallback
+    assert "thumbnail unavailable" not in fallback
+
+
+def test_static_fallback_reports_missing_thumbnail_instead_of_reading_source(tmp_path):
+    fallback = _fallback(stage3_report.render_html(
+        _data(maybe=[_rec(9)]), tmp_path, review_limit=5))
+    assert "thumbnail unavailable" in fallback
+    assert "thumbs/9.jpg" not in fallback
+
+
+def test_no_thumbs_omits_the_static_fallback_entirely(tmp_path):
+    directory = thumbnails.thumbs_dir(tmp_path)
+    directory.mkdir(parents=True)
+    thumbnails.thumb_path(directory, 4).write_bytes(b"jpeg")
+    fallback = _fallback(stage3_report.render_html(
+        _data(maybe=[_rec(4)]), tmp_path, review_limit=0))
+    assert "thumbs/4.jpg" not in fallback
+
+
+def test_cached_thumb_uri_only_reports_existing_files(tmp_path):
+    assert stage3_report.cached_thumb_uri(tmp_path, 3) is None
+    assert stage3_report.cached_thumb_uri(tmp_path, None) is None
+    directory = thumbnails.thumbs_dir(tmp_path)
+    directory.mkdir(parents=True)
+    thumbnails.thumb_path(directory, 3).write_bytes(b"jpeg")
+    assert stage3_report.cached_thumb_uri(tmp_path, 3) == "thumbs/3.jpg"
+
+
+def test_render_html_declares_the_page_size_choices_and_all_view(tmp_path):
+    page = stage3_report.render_html(_data(), tmp_path, review_limit=1)
+    assert 'data-view="ALL"' in page
+    assert 'data-view="MAYBE"' in page
+    assert 'data-view="UNKNOWN"' in page
+    assert 'data-view="GROUPS"' in page
+    for size in (50, 100, 200):
+        assert f'value="{size}"' in page
+
+
+def test_render_html_rejects_a_negative_fallback_limit(tmp_path):
+    with pytest.raises(ValueError, match="review_limit"):
+        stage3_report.render_html(_data(), tmp_path, review_limit=-1)
+
+
+def test_performance_panel_is_replaced_in_place(tmp_path):
+    review = tmp_path / "review.html"
+    review.write_text(
+        '<h1>x</h1><div class="notice" id="perf">placeholder</div><div>rest</div>',
+        encoding="utf-8",
     )
-    keep = _rec("keep", "KEEP")
-    remove = _rec("remove", "AUTO_REMOVE")
-    data = {
-        "groups": [{"id": 1, "type": "exact_dup", "member_count": 2,
-                    "keep": keep, "deletes": [remove]}],
-        "delete_paths": [remove["path"]],
-        "total_delete_bytes": 1,
-        "queues": {"MAYBE": [], "UNKNOWN": []},
-    }
-
-    stage3_report.render_html(data, review_limit=1)
-
-    assert calls == [keep["path"], remove["path"]]
-
-
-def test_jpeg_draft_happens_before_convert_and_downsamples(tmp_path, monkeypatch):
-    source = tmp_path / "large.jpg"
-    Image.new("RGB", (4096, 3072), "navy").save(source, "JPEG")
-    original_open = Image.open
-    events = []
-    drafted_sizes = []
-
-    class TrackedImage:
-        def __init__(self, image):
-            self.image = image
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            self.image.close()
-
-        @property
-        def format(self):
-            return self.image.format
-
-        def draft(self, mode, size):
-            events.append("draft")
-            result = self.image.draft(mode, size)
-            drafted_sizes.append(self.image.size)
-            return result
-
-        def convert(self, mode):
-            events.append("convert")
-            return self.image.convert(mode)
-
-    monkeypatch.setattr(Image, "open", lambda path: TrackedImage(original_open(path)))
-
-    uri = stage3_report.thumb_data_uri(str(source), 200)
-
-    assert events == ["draft", "convert"]
-    assert drafted_sizes[0][0] < 4096 and drafted_sizes[0][1] < 3072
-    thumb = original_open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
-    assert max(thumb.size) <= 200
-
-
-def test_unreadable_thumbnail_still_returns_placeholder_signal(tmp_path):
-    broken = tmp_path / "broken.jpg"
-    broken.write_bytes(b"not a jpeg")
-    assert stage3_report.thumb_data_uri(str(broken)) is None
+    assert stage3_report.rewrite_performance_panel(review, "measured 1.5s") is True
+    text = review.read_text(encoding="utf-8")
+    assert "measured 1.5s" in text
+    assert "placeholder" not in text
+    assert "<div>rest</div>" in text
+    assert stage3_report.rewrite_performance_panel(Path(tmp_path / "missing.html"), "x") is False
 
 
 def test_stage3_cli_passes_review_limit(monkeypatch):

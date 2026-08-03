@@ -145,6 +145,7 @@ def run(
     follow = bool(cfg.scan.get("follow_symlinks", False))
 
     inserted = 0
+    refreshed = 0
     since_commit = 0
     t0 = time.time()
 
@@ -169,6 +170,10 @@ def run(
                 print(f"[stage0][WARN] stat failed {p}: {exc}")
                 continue
             fid = db.insert_file(conn, meta)
+            # A re-scan must notice a replaced/edited photo, otherwise stale
+            # hashes and stale thumbnails would survive (see refresh_file_identity).
+            if db.refresh_file_identity(conn, fid, meta):
+                refreshed += 1
             path_to_id[p] = fid
             partner_of[p] = partner
             inserted += 1
@@ -192,11 +197,18 @@ def run(
     dt = time.time() - t0
     stats = {
         "files": db.count_files(conn),
+        "still_images": db.count_still_images(conn),
+        "total_bytes": int(conn.execute(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM files").fetchone()[0]),
+        "changed_files": refreshed,
         "jpg": db.count_files(conn, "file_kind='jpg'"),
         "jpg_motion": db.count_files(conn, "file_kind='jpg_motion'"),
         "mp4_paired": db.count_files(conn, "file_kind='mp4_paired'"),
         "mp4_only": db.count_files(conn, "file_kind='mp4_only'"),
     }
+    if refreshed:
+        print(f"[stage0] {refreshed} file(s) changed on disk; their cached features and "
+              "thumbnails were invalidated and will be recomputed")
     print(f"[stage0] inventoried {inserted} files in {dt:.1f}s -> {stats}")
     conn.close()
     return stats

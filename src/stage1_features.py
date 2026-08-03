@@ -12,14 +12,22 @@ Results stream into the ``features`` table, committing every
 ``scan.commit_every`` images, so a Ctrl+C (or crash) resumes exactly where it
 stopped -- only rows without a ``status='done'`` feature row are reprocessed.
 
-Two interchangeable backends
-----------------------------
+Two interchangeable backends (see :mod:`src.stage1_backends`)
+-----------------------------------------------------------
 * **torch** -- real DINOv2 + pyiqa (MUSIQ/CLIP-IQA) + OpenCV YuNet. Needs the
   GPU stack from requirements.txt.
 * **stub**  -- deterministic numpy-only features. Used by the test suite and
   for no-GPU dry runs. Same output schema, so stages 2/3 don't care which ran.
 
 ``features.backend: auto`` uses torch if importable, else stub.
+
+One read, one decode, many outputs
+----------------------------------
+Each photo is read from the HDD exactly once (hashing that same sequential
+read) and decoded exactly once. The embedding, IQA, faces, exposure, scene
+routing **and** the SSD review thumbnail are all produced from that one decoded
+``PIL.Image``, which is what makes a 100k-photo library on a single mechanical
+disk practical.
 """
 
 from __future__ import annotations
@@ -42,187 +50,21 @@ from . import quality as Q
 from . import exposure
 from . import decision
 from . import eye_detection
+from . import thumbnails
 from .scene_router import DecodeState, RoutingInput, SceneRouter
+from .stage1_backends import (  # noqa: F401 (re-exported for existing callers/tests)
+    EMBED_DIM,
+    StubBackend,
+    TorchBackend,
+    _load_yunet,
+    resolve_backend,
+)
 
 try:  # progress bar is optional
     from tqdm import tqdm
 except Exception:  # pragma: no cover
     def tqdm(x, **_kwargs):  # type: ignore
         return x
-
-
-EMBED_DIM = 768
-
-
-# ===========================================================================
-# Backends
-# ===========================================================================
-
-class StubBackend:
-    """Deterministic, numpy-only feature backend (no torch/CUDA required).
-
-    * embedding -- L2-normalised 24x32 grayscale downsample (768-d), which is
-      remarkably good at separating "same scene" from "different scene".
-    * quality   -- variance-of-Laplacian sharpness mapped to 0..100.
-    * faces     -- detects a bright-red block as a stand-in "face" so the
-      check-in-photo split logic is exercisable end-to-end in tests.
-    """
-
-    name = "stub"
-
-    def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
-        out = np.zeros((len(images), EMBED_DIM), dtype=np.float32)
-        for i, im in enumerate(images):
-            g = im.convert("L").resize((32, 24), Image.BILINEAR)
-            v = np.asarray(g, dtype=np.float32).flatten()
-            v -= v.mean()
-            n = np.linalg.norm(v)
-            out[i] = v / n if n > 0 else v
-        return out
-
-    def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
-        gray = np.asarray(image.convert("L"), dtype=np.float64)
-        sharp = Q.variance_of_laplacian(gray)
-        score = 100.0 * Q.normalize_sharpness(sharp)
-        return score, {"sharpness": sharp, "clipiqa": None, "backend": "stub"}
-
-    def faces(self, image: Image.Image) -> List[Dict[str, Any]]:
-        arr = np.asarray(image.convert("RGB"), dtype=np.int16)
-        r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
-        mask = (r > 150) & (g < 100) & (b < 100)
-        if int(mask.sum()) < 20:
-            return []
-        ys, xs = np.where(mask)
-        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-        bbox = [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
-        return [{"bbox": bbox, "landmarks": [], "score": 0.95}]
-
-
-class TorchBackend:
-    """Real backend: DINOv2 embedding + pyiqa MUSIQ/CLIP-IQA + YuNet faces.
-
-    Heavy imports happen in ``__init__`` so importing this module never pulls
-    torch. Not exercised by the Linux test box; verified logically only.
-    """
-
-    name = "torch"
-
-    def __init__(self, cfg: Config) -> None:
-        import torch  # noqa: WPS433 (intentional lazy import)
-        from transformers import AutoImageProcessor, AutoModel
-
-        self.torch = torch
-        self.cfg = cfg
-        want_cuda = str(cfg.features.get("device", "cuda")) == "cuda"
-        self.device = "cuda" if (want_cuda and torch.cuda.is_available()) else "cpu"
-
-        model_name = cfg.features.get("dinov2_model", "facebook/dinov2-base")
-        self.processor = AutoImageProcessor.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
-
-        self.musiq = None
-        self.clipiqa = None
-        if cfg.features.get("iqa_musiq", True) or cfg.features.get("iqa_clipiqa", True):
-            import pyiqa  # noqa: WPS433
-
-            if cfg.features.get("iqa_musiq", True):
-                self.musiq = pyiqa.create_metric("musiq", device=self.device)
-            if cfg.features.get("iqa_clipiqa", True):
-                self.clipiqa = pyiqa.create_metric("clipiqa", device=self.device)
-
-        self._face = _load_yunet(cfg)
-
-    # -- embeddings ---------------------------------------------------------
-    def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
-        torch = self.torch
-        inputs = self.processor(images=list(images), return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            out = self.model(**inputs)
-        # pooler_output is the CLS-token summary (768-d for dinov2-base).
-        emb = out.pooler_output if out.pooler_output is not None else out.last_hidden_state[:, 0]
-        return emb.float().cpu().numpy()
-
-    # -- quality ------------------------------------------------------------
-    def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
-        torch = self.torch
-        arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        score = 0.0
-        meta: Dict[str, Any] = {"backend": "torch"}
-        if self.musiq is not None:
-            score = float(self.musiq(tensor).item())  # MUSIQ ~0..100
-        meta["musiq"] = score
-        if self.clipiqa is not None:
-            meta["clipiqa"] = float(self.clipiqa(tensor).item())  # 0..1
-        gray = arr.mean(axis=2) * 255.0
-        meta["sharpness"] = Q.variance_of_laplacian(gray)
-        return score, meta
-
-    # -- faces --------------------------------------------------------------
-    def faces(self, image: Image.Image) -> List[Dict[str, Any]]:
-        if self._face is None:
-            return []
-        import cv2  # noqa: WPS433
-
-        rgb = np.asarray(image.convert("RGB"))
-        bgr = rgb[:, :, ::-1].copy()
-        h, w = bgr.shape[:2]
-        target = int(self.cfg.features.get("yunet_input_width", 640))
-        scale = target / max(h, w) if max(h, w) > target else 1.0
-        if scale != 1.0:
-            bgr_small = cv2.resize(bgr, (int(w * scale), int(h * scale)))
-        else:
-            bgr_small = bgr
-        sh, sw = bgr_small.shape[:2]
-        self._face.setInputSize((sw, sh))
-        _, dets = self._face.detect(bgr_small)
-        faces: List[Dict[str, Any]] = []
-        if dets is None:
-            return faces
-        for d in dets:
-            x, y, fw, fh = (float(v) / scale for v in d[:4])
-            landmarks = [float(v) / scale for v in d[4:14]]
-            faces.append({"bbox": [x, y, fw, fh], "landmarks": landmarks, "score": float(d[14])})
-        return faces
-
-
-def _load_yunet(cfg: Config):
-    """Download (if needed) and construct the OpenCV YuNet face detector."""
-    try:
-        import cv2  # noqa: WPS433
-    except Exception:
-        return None
-    models_dir = cfg.models_dir
-    models_dir.mkdir(parents=True, exist_ok=True)
-    onnx = models_dir / "face_detection_yunet_2023mar.onnx"
-    if not onnx.exists():
-        url = cfg.features.get("yunet_url")
-        try:
-            import urllib.request
-
-            print(f"[stage1] downloading YuNet model -> {onnx}")
-            urllib.request.urlretrieve(url, onnx)  # noqa: S310
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(f"YuNet download failed: {exc}") from exc
-    score_thr = float(cfg.features.get("yunet_score_threshold", 0.6))
-    return cv2.FaceDetectorYN.create(str(onnx), "", (320, 320), score_thr, 0.3, 5000)
-
-
-def resolve_backend(cfg: Config, override: Optional[str] = None):
-    """Pick a backend per config/override. auto -> torch if importable else stub."""
-    choice = (override or cfg.features.get("backend", "auto")).lower()
-    if choice == "stub":
-        return StubBackend()
-    if choice == "torch":
-        return TorchBackend(cfg)
-    # auto
-    try:
-        import torch  # noqa: F401,WPS433
-
-        return TorchBackend(cfg)
-    except ImportError as exc:
-        print(f"[stage1] torch unavailable ({exc}); using stub backend.")
-        return StubBackend()
 
 
 # ===========================================================================
@@ -249,12 +91,16 @@ def _process_batch(
     cfg: Config,
     eye_detector: Any = None,
     scene_router: Any = None,
+    thumbnailer: Any = None,
 ) -> List[Dict[str, Any]]:
     """Compute features for one batch of file rows. Returns feature dicts.
 
     The router is constructed at batch scope when the caller did not retain a
     run-scoped instance.  It receives the same decoded RGB ``Image`` used by
     embeddings and technical detectors; it never opens the source path.
+
+    The optional ``thumbnailer`` gets that *same* decoded object too, so the
+    SSD thumbnail cache costs no additional HDD read and no second decode.
     """
     router = scene_router if scene_router is not None else _build_scene_router(cfg)
     images: List[Image.Image] = []
@@ -273,6 +119,10 @@ def _process_batch(
             routing = router.route(RoutingInput(
                 metadata=_routing_metadata(row), decode_state=DecodeState.FAILED
             ))
+            if thumbnailer is not None:
+                thumbnailer.record_source_failure(
+                    row, f"{thumbnails.SOURCE_DECODE_FAILED}: {type(exc).__name__}: {exc}"
+                )
             out_rows.append(_error_feature_row(int(row["id"]), routing=routing))
 
     if not valid_rows:
@@ -305,6 +155,10 @@ def _process_batch(
         meta["routing"] = router.route(RoutingInput(
             metadata=_routing_metadata(row), image=image
         ))
+        # Same decoded object, no reopen: the SSD thumbnail is a by-product of
+        # the decode the extractors above already paid for.
+        if thumbnailer is not None:
+            thumbnailer.capture(row, image)
         out_rows.append(
             {
                 "file_id": int(row["id"]),
@@ -369,8 +223,22 @@ def _error_feature_row(file_id: int, routing: Optional[Dict[str, Any]] = None) -
     }
 
 
+def _build_thumbnailer(cfg: Config) -> Optional[thumbnails.Thumbnailer]:
+    """Construct the SSD thumbnail cache writer unless it is disabled."""
+    thumb_cfg = cfg.features.get("thumbnails", {})
+    if not isinstance(thumb_cfg, dict):
+        thumb_cfg = {}
+    if thumb_cfg.get("enabled", True) is False:
+        return None
+    return thumbnails.Thumbnailer(
+        thumbnails.thumbs_dir(cfg.output_dir),
+        max_px=int(thumb_cfg.get("max_px", thumbnails.DEFAULT_MAX_PX)),
+        jpeg_quality=int(thumb_cfg.get("jpeg_quality", thumbnails.DEFAULT_JPEG_QUALITY)),
+    )
+
+
 def run(config_path: Optional[str] = None, backend_override: Optional[str] = None,
-        limit: Optional[int] = None) -> Dict[str, int]:
+        limit: Optional[int] = None) -> Dict[str, Any]:
     """Run stage 1. Returns a small stats dict."""
     cfg = load_config(config_path)
     conn = db.open_db(cfg.db_path)
@@ -384,15 +252,27 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     # Construct once per Stage 1 run. Local runtime failures remain a
     # MODEL_UNAVAILABLE shadow record and never interrupt existing features.
     scene_router = _build_scene_router(cfg)
+    thumbnailer = _build_thumbnailer(cfg)
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
 
-    pending = list(db.iter_files_for_features(conn))
+    if thumbnailer is None:
+        pending = list(db.iter_files_for_features(conn))
+    else:
+        # One cheap SSD listing decides which cached JPEGs actually exist, so a
+        # deleted thumbnail is regenerated and a stale one is never reused.
+        db.register_thumb_presence(conn, thumbnails.ids_on_disk(thumbnailer.directory))
+        pending = list(db.iter_files_for_features(conn, thumb_max_px=thumbnailer.max_px))
     if limit:
         pending = pending[:limit]
     total = len(pending)
-    print(f"[stage1] backend={backend.name} pending={total} batch_size={batch_size}")
+    thumb_note = (
+        "off" if thumbnailer is None
+        else f"{thumbnailer.max_px}px -> {thumbnailer.directory}"
+    )
+    print(f"[stage1] backend={backend.name} pending={total} batch_size={batch_size} "
+          f"thumbs={thumb_note}")
 
     done = 0
     since_commit = 0
@@ -400,9 +280,12 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     batches = _guarded_batches(pending, batch_size, max_pixels)
     for batch in tqdm(batches, desc="features", unit="batch"):
         feature_rows = _process_batch(
-            backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router
+            backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router,
+            thumbnailer=thumbnailer,
         )
         db.batch_insert_features(conn, feature_rows)
+        if thumbnailer is not None:
+            db.batch_upsert_thumbnails(conn, thumbnailer.drain())
         done += len(feature_rows)
         since_commit += len(feature_rows)
         if since_commit >= commit_every:
@@ -415,8 +298,28 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     dt = time.time() - t0
     rate = done / dt if dt > 0 else 0.0
     print(f"[stage1] processed {done} images in {dt:.1f}s ({rate:.1f}/s)")
+    stats: Dict[str, Any] = {"processed": done, "total": total}
+    if thumbnailer is None:
+        stats["thumbnails"] = thumbnails.disabled_stats()
+    else:
+        thumb_stats = thumbnailer.stats()
+        thumb_stats.update(db.thumbnail_stats(conn))
+        db.set_meta(conn, "stage1_thumb_max_px", str(thumbnailer.max_px))
+        stats["thumbnails"] = thumb_stats
+        print(
+            f"[stage1] thumbnails: created={thumb_stats['created']} "
+            f"reused={thumb_stats['reused']} failed={thumb_stats['failed']} "
+            f"cache={thumb_stats['cache_files']} files / "
+            f"{thumb_stats['cache_bytes'] / (1024 ** 3):.2f} GiB"
+        )
+        if thumb_stats["failed"]:
+            print(
+                f"[stage1][WARN] {thumb_stats['failed']} thumbnail(s) failed this run; "
+                "those items show an explicit 'thumbnail unavailable' tile in the review UI"
+            )
+    conn.commit()
     conn.close()
-    return {"processed": done, "total": total}
+    return stats
 
 
 def _guarded_batches(rows: Sequence[Any], batch_size: int, max_pixels: int) -> List[List[Any]]:

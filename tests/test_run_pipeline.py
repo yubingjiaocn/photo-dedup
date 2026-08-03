@@ -3,10 +3,25 @@ from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
+import pytest
 import yaml
 
+from src import db
 from src import execute_local
 from src import run_pipeline
+
+
+def _seed_output(output: Path) -> Path:
+    """Minimal served output directory: review page + a real (empty) review DB."""
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "review.html").write_text(
+        '<h1>Photo Dedup - Review</h1><div class="notice" id="perf">old</div>',
+        encoding="utf-8",
+    )
+    conn = db.open_db(output / "inventory.sqlite")
+    conn.commit()
+    conn.close()
+    return output
 
 
 def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
@@ -20,20 +35,24 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
             config = yaml.safe_load(Path(kwargs["config_path"]).read_text(encoding="utf-8"))
             calls.append((name, kwargs, config))
             if name == "stage3":
-                (output / "review.html").write_text("review", encoding="utf-8")
+                _seed_output(output)
             return result
 
         return fake
 
     monkeypatch.setattr(run_pipeline.stage0_inventory, "run", record("stage0", {"files": 2}))
     monkeypatch.setattr(
-        run_pipeline.stage1_features, "run", record("stage1", {"processed": 2})
+        run_pipeline.stage1_features, "run",
+        record("stage1", {"processed": 2, "thumbnails": {"created": 2, "cache_files": 2,
+                                                         "cache_bytes": 4096,
+                                                         "average_bytes": 2048.0}}),
     )
     monkeypatch.setattr(run_pipeline.stage2_cluster, "run", record("stage2", {"groups": 1}))
     monkeypatch.setattr(
         run_pipeline.stage3_report,
         "run",
-        record("stage3", {"groups": 1, "maybe": 1, "unknown": 0, "delete_files": 0}),
+        record("stage3", {"groups": 1, "maybe": 1, "unknown": 0, "delete_files": 0,
+                          "all_items": 2, "thumbnails": {"recorded_ok": 2}}),
     )
     monkeypatch.setattr(
         execute_local,
@@ -52,7 +71,77 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
     assert calls[3][1]["review_limit"] == 37
     assert all(call[2]["paths"]["output_dir"] == str(output.resolve()) for call in calls)
     assert all(call[2]["paths"]["db"] == str(output.resolve() / "inventory.sqlite") for call in calls)
+    # Runtime config enables the SSD thumbnail cache without touching config.yaml.
+    assert all(call[2]["features"]["thumbnails"]["enabled"] is True for call in calls)
+    assert calls[1][2]["features"]["thumbnails"]["max_px"] == 320
     assert result["review_html"] == str(output.resolve() / "review.html")
+
+
+def test_pipeline_reports_stage_times_throughput_and_rough_eta(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "review"
+
+    def stage(name, result):
+        def fake(*args, **kwargs):
+            if name == "stage3":
+                _seed_output(output)
+            return result
+
+        return fake
+
+    monkeypatch.setattr(run_pipeline.stage0_inventory, "run", stage("stage0", {"files": 5}))
+    monkeypatch.setattr(
+        run_pipeline.stage1_features, "run",
+        stage("stage1", {"processed": 5, "thumbnails": {"created": 5, "cache_files": 5,
+                                                        "cache_bytes": 5 * 30000,
+                                                        "average_bytes": 30000.0}}),
+    )
+    monkeypatch.setattr(run_pipeline.stage2_cluster, "run", stage("stage2", {"groups": 0}))
+    monkeypatch.setattr(
+        run_pipeline.stage3_report, "run",
+        stage("stage3", {"groups": 0, "maybe": 0, "unknown": 0, "delete_files": 0,
+                         "all_items": 5, "output_dir": str(output),
+                         "thumbnails": {"recorded_ok": 5}}),
+    )
+    monkeypatch.setattr(run_pipeline, "_still_image_count", lambda _path: 5)
+
+    result = run_pipeline.run(str(root), str(output), backend="stub")
+
+    performance = result["performance"]
+    assert set(performance["stage_seconds"]) == {"stage0", "stage1", "stage2", "stage3"}
+    assert performance["stage1_processed"] == 5
+    assert performance["stage1_images_per_second"] > 0
+    assert performance["stage0_files_per_second"] > 0
+    assert performance["eta_hours"] is not None
+    assert "ROUGH LINEAR ESTIMATE ONLY" in performance["eta_disclaimer"]
+    # ETA scope is this inventory, never a hardcoded 1 TiB library.
+    assert performance["inventory_still_images"] == 5
+    assert "1 TiB" not in performance["eta_basis"]
+
+    text = (output / "performance.txt").read_text(encoding="utf-8")
+    assert "stage0 wall time" in text and "stage3 wall time" in text
+    assert "files/s" in text and "images/s" in text
+    assert "ROUGH full-library ETA" in text
+    assert "Thumbnail cache (SSD)" in text
+    assert "SSD free space" in text
+
+    page = (output / "review.html").read_text(encoding="utf-8")
+    assert "Observed performance and thumbnail disk usage" in page
+    assert "ROUGH full-library ETA" in page
+
+
+def test_low_disk_space_warns_but_does_not_abort(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "out"
+    output.mkdir()
+    monkeypatch.setattr(run_pipeline.pipeline_report, "free_bytes", lambda _path: 3 * 1024 ** 3)
+    plan = run_pipeline.pipeline_report.print_thumbnail_plan(output, 100000, 30000.0)
+    assert plan["low_space"] is True
+    captured = capsys.readouterr().out
+    assert "less than 20 GiB free" in captured
+    assert "advisory only" in captured
+    # 50 GiB is never demanded anywhere in the notice.
+    assert "50 GiB" not in captured
 
 
 def test_main_reports_clear_error_for_missing_root(tmp_path, capsys):
@@ -64,9 +153,7 @@ def test_main_reports_clear_error_for_missing_root(tmp_path, capsys):
 
 
 def test_server_is_local_output_root_and_returns_review(tmp_path):
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "review.html").write_text("review-page", encoding="utf-8")
+    output = _seed_output(tmp_path / "output")
     (tmp_path / "secret.txt").write_text("outside", encoding="utf-8")
     server, url = run_pipeline.start_review_server(output)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -74,17 +161,24 @@ def test_server_is_local_output_root_and_returns_review(tmp_path):
     try:
         assert server.server_address[0] == "127.0.0.1"
         assert url.endswith("/review.html")
-        assert urlopen(url).read() == b"review-page"
-        try:
-            urlopen(url.rsplit("/", 1)[0] + "/../secret.txt")
-        except HTTPError as exc:
-            assert exc.code == 404
-        else:
-            raise AssertionError("server escaped its output root")
+        assert b"Photo Dedup - Review" in urlopen(url).read()
+        for probe in ("/../secret.txt", "/inventory.sqlite", "/thumbs/1.jpg"):
+            with pytest.raises(HTTPError) as excinfo:
+                urlopen(url.rsplit("/", 1)[0] + probe)
+            assert excinfo.value.code == 404
     finally:
         server.shutdown()
         server.server_close()
+        server.review_data.close()
         thread.join()
+
+
+def test_server_refuses_to_start_without_a_review_database(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "review.html").write_text("review", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="review database does not exist"):
+        run_pipeline.start_review_server(output)
 
 
 def test_main_serves_only_after_pipeline_and_honors_no_open(tmp_path, monkeypatch):
@@ -109,7 +203,7 @@ def test_main_serves_only_after_pipeline_and_honors_no_open(tmp_path, monkeypatc
     assert calls == ["pipeline", ("serve", output, 8765, False)]
 
 
-def test_main_passes_review_limit(tmp_path, monkeypatch):
+def test_main_passes_review_limit_and_thumb_px(tmp_path, monkeypatch):
     root = tmp_path / "photos"
     root.mkdir()
     output = tmp_path / "output"
@@ -123,8 +217,9 @@ def test_main_passes_review_limit(tmp_path, monkeypatch):
     status = run_pipeline.main(
         [
             "--root", str(root), "--output", str(output),
-            "--review-limit", "23", "--no-serve",
+            "--review-limit", "23", "--thumb-px", "256", "--no-serve",
         ]
     )
     assert status == 0
     assert received["review_limit"] == 23
+    assert received["thumb_px"] == 256

@@ -1,9 +1,14 @@
 """Stage 3 -- review report + delete manifests.
 
-Turns the ``groups`` table into four artifacts in ``paths.output_dir``:
+Turns the ``groups`` table into artifacts in ``paths.output_dir``:
 
-* ``review.html``       -- one section per group: the keeper (larger thumb) vs
-  the delete candidates, with scores. For eyeballing a sample before deleting.
+* ``review.html``       -- paged review UI (ALL timeline / MAYBE / UNKNOWN /
+  GROUPS), rendered by :mod:`src.review_page`. Thumbnails come from
+  ``output/thumbs`` on the SSD, which Stage 1 wrote from its single decode of
+  each photo; the UI never reads an original.
+* ``review_index`` rows -- compact ordered pagination index inside the DB, so
+  a 100k-photo library pages with LIMIT/OFFSET instead of one giant JSON.
+* ``review_summary.json`` -- small counters for the page header.
 * ``delete_local.txt``  -- absolute paths to delete locally, one per line.
   Motion-photo sidecar videos are appended automatically (jpg dies -> mp4 dies).
 * ``delete_cloud.json`` -- [{filename, exif_datetime, size_bytes}] consumed by
@@ -17,10 +22,7 @@ Nothing is deleted here; this stage only *proposes*. Deletion is stage 4
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
-import html
-import io
 import json
 import sys
 import time
@@ -28,28 +30,12 @@ from typing import Any, Dict, List, Optional
 
 from .config import load_config
 from . import db
-
-DEFAULT_REVIEW_LIMIT = 1000
-
-
-# --- thumbnails ------------------------------------------------------------
-
-def thumb_data_uri(path: str, max_px: int = 200) -> Optional[str]:
-    """Return a base64 JPEG data URI thumbnail, or None if unreadable."""
-    try:
-        from PIL import Image
-
-        with Image.open(path) as img:
-            if img.format == "JPEG":
-                img.draft("RGB", (max_px, max_px))
-            img = img.convert("RGB")
-            img.thumbnail((max_px, max_px))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=80)
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:image/jpeg;base64,{b64}"
-    except Exception:
-        return None
+from .review_page import (  # noqa: F401 (cached_thumb_uri re-exported for callers)
+    DEFAULT_REVIEW_LIMIT,
+    cached_thumb_uri,
+    render_html,
+    rewrite_performance_panel,
+)
 
 
 # --- delete-list expansion -------------------------------------------------
@@ -76,7 +62,8 @@ def collect_deletions(conn) -> Dict[str, Any]:
         del_recs: List[Dict[str, Any]] = []
         for m in members:
             rec = {
-                "file_id": m["file_id"], "path": m["path"], "basename": m["basename"],
+                "file_id": m["file_id"], "group_id": grp["id"],
+                "path": m["path"], "basename": m["basename"],
                 "size_bytes": m["size_bytes"] or 0, "width": m["width"], "height": m["height"],
                 "exif_datetime": m["exif_datetime"], "quality_score": m["quality_score"],
                 "face_count": m["face_count"], "reason": m["reason"],
@@ -170,96 +157,18 @@ def _iso_t(exif_dt: Optional[str]) -> Optional[str]:
     return exif_dt.replace(" ", "T")
 
 
-# --- HTML ------------------------------------------------------------------
 
-_HTML_HEAD = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<title>Photo Dedup - Review</title>
-<style>
- body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#eee}
- h1{font-size:20px} .stats{color:#9cf;margin-bottom:16px}
- .group{border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:18px;background:#1a1a1a}
- .gtitle{font-weight:bold;color:#fc9;margin-bottom:8px}
- .row{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
- .keep{border:2px solid #4c9;padding:6px;border-radius:6px}
- .del{border:2px solid #c55;padding:6px;border-radius:6px;opacity:.9}
- .maybe{border-color:#fc3}.unknown{border-color:#999}
- .cap{font-size:11px;color:#bbb;max-width:210px;word-break:break-all}
- img{display:block;border-radius:4px}
- .tag{font-size:11px;padding:2px 6px;border-radius:4px;color:#000}
- .tk{background:#4c9}.td{background:#c55}
-</style></head><body>
-"""
-
-
-def _img_block(rec: Dict[str, Any], max_px: int, is_keep: bool, thumbs: bool = True) -> str:
-    uri = thumb_data_uri(rec["path"], max_px) if thumbs else None
-    decision = rec.get("decision", "KEEP" if is_keep else "AUTO_REMOVE")
-    tag = f'<span class="tag {"tk" if decision == "KEEP" else "td"}">{decision}</span>'
-    cls = "keep" if decision == "KEEP" else f'del {decision.lower()}'
-    if uri:
-        img = f'<img src="{uri}" width="{max_px}">'
-    else:
-        note = "[unreadable]" if thumbs else "[thumb skipped]"
-        img = '<div style="width:%dpx;color:#888">%s</div>' % (max_px, note)
-    score = rec.get("quality_score")
-    score_txt = f"{score:.1f}" if isinstance(score, (int, float)) else "?"
-    exp = (rec.get("quality_meta") or {}).get("exposure", {})
-    exp_txt = ""
-    if exp:
-        exp_txt = (
-            f'<br>clip={float(exp.get("clip_hi", 0)):.1%}/{float(exp.get("clip_lo", 0)):.1%} '
-            f'anchor={float(exp.get("anchor_mass", 0)):.1%} '
-            f'entropy={float(exp.get("entropy_nonclip", 0)):.2f}'
-        )
-    cap = (
-        f'{tag}<br>{html.escape(rec["basename"])}<br>'
-        f'{rec["width"]}x{rec["height"]} | q={score_txt} | faces={rec["face_count"]}{exp_txt}<br>'
-        f'{html.escape(str(rec["reason"] or ""))}'
-    )
-    return f'<div class="{cls}">{img}<div class="cap">{cap}</div></div>'
-
-
-def render_html(
-    data: Dict[str, Any], thumbs: bool = True, review_limit: int = DEFAULT_REVIEW_LIMIT
-) -> str:
-    if review_limit < 1:
-        raise ValueError("review_limit must be at least 1")
-    parts = [_HTML_HEAD]
-    n_groups = len(data["groups"])
-    gb = data["total_delete_bytes"] / (1024 ** 3)
-    n_del = len(data["delete_paths"])
-    parts.append("<h1>Photo Dedup - Review</h1>")
-    parts.append(
-        f'<div class="stats">{n_groups} groups &middot; {n_del} files to delete '
-        f'&middot; ~{gb:.2f} GB reclaimable</div>'
-    )
-    for g in data["groups"]:
-        parts.append('<div class="group">')
-        parts.append(
-            f'<div class="gtitle">Group #{g["id"]} [{g["type"]}] '
-            f'({g["member_count"]} items)</div><div class="row">'
-        )
-        if g["keep"]:
-            parts.append(_img_block(g["keep"], 220, True, thumbs))
-        for d in g["deletes"]:
-            parts.append(_img_block(d, 150, False, thumbs))
-        parts.append("</div></div>")
-    for state in ("MAYBE", "UNKNOWN"):
-        queue = data["queues"][state]
-        shown = queue[:review_limit]
-        omitted = len(queue) - len(shown)
-        parts.append(
-            f'<h1>{state} review queue</h1>'
-            f'<div class="stats">total: {len(queue)} &middot; shown: {len(shown)} '
-            f'&middot; omitted: {omitted}</div>'
-        )
-        parts.append('<div class="row">')
-        for rec in shown:
-            parts.append(_img_block(rec, 150, False, thumbs))
-        parts.append('</div>')
-    parts.append("</body></html>")
-    return "".join(parts)
+def build_review_indexes(conn, data: Dict[str, Any]) -> Dict[str, int]:
+    """Write the compact pagination index for every view (no image reads)."""
+    counts = {"ALL": db.build_all_view_index(conn)}
+    for view in ("MAYBE", "UNKNOWN"):
+        counts[view] = db.replace_review_index(conn, view, [
+            {"file_id": rec["file_id"], "group_id": rec.get("group_id"),
+             "decision": view, "risk": rec.get("risk")}
+            for rec in data["queues"][view]
+        ])
+    counts["GROUPS"] = db.count_groups(conn)
+    return counts
 
 
 # --- orchestration ---------------------------------------------------------
@@ -268,6 +177,7 @@ def run(
     config_path: Optional[str] = None,
     no_thumbs: bool = False,
     review_limit: int = DEFAULT_REVIEW_LIMIT,
+    performance_panel: str = "",
 ) -> Dict[str, Any]:
     if review_limit < 1:
         raise ValueError("review_limit must be at least 1")
@@ -278,6 +188,10 @@ def run(
 
     data = collect_deletions(conn)
     data["decision_stats"] = _json_obj(db.get_meta(conn, "stage2_stats", "{}"))
+    view_counts = build_review_indexes(conn, data)
+    conn.commit()
+    thumb_stats = db.thumbnail_stats(conn)
+    thumb_failures = db.thumbnail_failures(conn)
 
     # delete_local.txt
     local_txt = out_dir / "delete_local.txt"
@@ -301,11 +215,28 @@ def run(
     with open(cloud_json, "w", encoding="utf-8") as fh:
         json.dump(data["cloud_items"], fh, ensure_ascii=False, indent=2)
 
-    # review.html (base64 thumbnails inline unless --no-thumbs)
+    # review.html: paged UI; the static fallback uses only cached SSD thumbs.
     review = out_dir / "review.html"
-    html_str = render_html(data, thumbs=not no_thumbs, review_limit=review_limit)
+    html_str = render_html(
+        data, out_dir,
+        review_limit=0 if no_thumbs else review_limit,
+        performance_panel=performance_panel,
+    )
     with open(review, "w", encoding="utf-8") as fh:
         fh.write(html_str)
+
+    summary_payload = {
+        "schema": 1,
+        "views": view_counts,
+        "groups": len(data["groups"]),
+        "delete_files": len(data["delete_paths"]),
+        "reclaim_bytes": data["total_delete_bytes"],
+        "thumbnails": thumb_stats,
+        "thumbnail_failures": thumb_failures,
+        "page_sizes": [50, 100, 200],
+    }
+    with open(out_dir / "review_summary.json", "w", encoding="utf-8") as fh:
+        json.dump(summary_payload, fh, ensure_ascii=False, indent=2)
 
     # summary.txt
     gb = data["total_delete_bytes"] / (1024 ** 3)
@@ -321,20 +252,34 @@ def run(
         fh.write(f"auto coverage: {float(stats.get('auto_coverage', 0)):.1%}\n")
         fh.write("decision reasons: " + json.dumps(stats.get("reasons", {}), ensure_ascii=False) + "\n")
         fh.write(f"reclaimable: {gb:.2f} GB ({data['total_delete_bytes']} bytes)\n")
+        fh.write(f"ALL timeline entries: {view_counts['ALL']}\n")
+        fh.write(
+            f"thumbnails cached: {thumb_stats['recorded_ok']} "
+            f"({thumb_stats['recorded_bytes'] / (1024 ** 3):.2f} GiB), "
+            f"failed: {thumb_stats['recorded_failed']}\n"
+        )
 
     db.set_meta(conn, "stage3_done_at", str(int(time.time())))
     conn.commit()
     conn.close()
     print(
         f"[stage3] wrote {review.name}, {local_txt.name}, {cloud_json.name}, "
-        f"{summary.name} -> {out_dir}"
+        f"review_summary.json, {summary.name} -> {out_dir}"
     )
+    if thumb_stats["recorded_failed"]:
+        print(
+            f"[stage3][WARN] {thumb_stats['recorded_failed']} photo(s) have no thumbnail; "
+            "their review tiles say so explicitly (the UI never re-reads the HDD)"
+        )
     return {
         "groups": len(data["groups"]),
         "delete_files": len(data["delete_paths"]),
         "cloud_items": len(data["cloud_items"]),
         "maybe": len(data["queues"]["MAYBE"]),
         "unknown": len(data["queues"]["UNKNOWN"]),
+        "all_items": view_counts["ALL"],
+        "views": view_counts,
+        "thumbnails": thumb_stats,
         "reclaim_gb": gb,
         "output_dir": str(out_dir),
     }
@@ -343,10 +288,13 @@ def run(
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 3: review report + delete lists")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--no-thumbs", action="store_true", help="skip base64 thumbnails")
+    ap.add_argument(
+        "--no-thumbs", action="store_true",
+        help="omit the static fallback tiles (the paged UI is unaffected)",
+    )
     ap.add_argument(
         "--review-limit", type=int, default=DEFAULT_REVIEW_LIMIT,
-        help="maximum thumbnails shown in each MAYBE/UNKNOWN queue (default: 1000)",
+        help=f"static fallback tile count (default: {DEFAULT_REVIEW_LIMIT})",
     )
     args = ap.parse_args(argv)
     run(config_path=args.config, no_thumbs=args.no_thumbs, review_limit=args.review_limit)

@@ -44,7 +44,7 @@ where the person clearly moved.
 
 ### DINOv2 embedding (`facebook/dinov2-base`, 768-d)
 - **What:** the CLS/pooler vector of a self-supervised ViT. Stored as float16
-  (1536 bytes/image → ~100 MB for 66k images, fits in RAM for stage 2).
+  (1536 bytes/image → ~150 MB for 100k images, fits in RAM for stage 2 on 32 GB).
 - **Why DINOv2-base (not -small / CLIP):**
   - DINOv2 captures **scene structure and layout**, which is exactly what
     separates "same viewpoint of the same place" from "different place". CLIP
@@ -100,7 +100,7 @@ edge type (`exact_dup` > `burst` > `similar_scene`).
 - **Why 2:** 0 is only hash-identical, not byte-identical; 1–2 tolerates JPEG re-encode / a resave
   without letting genuinely different photos in. Above ~4 you start merging
   merely-similar images, which is what Layer 2 is *for* (with time gating).
-- **Performance:** naïve all-pairs is O(N²) ≈ 4×10⁹ for 66k — too slow. We use
+- **Performance:** naïve all-pairs is O(N²) ≈ 10¹⁰ for 100k — too slow. We use
   **multi-index hashing**: split the 64-bit hash into four 16-bit bands. By the
   pigeonhole principle, two hashes within Hamming 2 must share **≥ 2** of the 4
   bands, so they will collide in at least one band bucket. We only compare

@@ -19,6 +19,25 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Sequence, Tuple
 
+# Thumbnail bookkeeping and the review pagination index live in their own module
+# to keep this file focused on the core schema. They are re-exported here so
+# every caller can keep using ``db.<helper>``.
+from .review_queries import (  # noqa: F401 (intentional re-export)
+    ALL_VIEW_ORDER,
+    FEATURE_KINDS,
+    REVIEW_VIEWS,
+    batch_upsert_thumbnails,
+    build_all_view_index,
+    count_groups,
+    group_page,
+    replace_review_index,
+    review_index_count,
+    review_page,
+    thumbnail_failures,
+    thumbnail_ids_recorded_ok,
+    thumbnail_stats,
+)
+
 # --- schema ----------------------------------------------------------------
 
 SCHEMA = """
@@ -52,6 +71,35 @@ CREATE TABLE IF NOT EXISTS features (
   faces_json TEXT,              -- YuNet: [{bbox, landmarks, score}, ...]
   status TEXT DEFAULT 'pending'
 );
+
+-- SSD thumbnail cache bookkeeping. One row per still image Stage 1 handled.
+-- Identity columns capture the source file as it was when the JPEG was made,
+-- so a changed original can never reuse a stale thumbnail.
+CREATE TABLE IF NOT EXISTS thumbnails (
+  file_id INTEGER PRIMARY KEY REFERENCES files(id),
+  status TEXT,                  -- 'ok' | 'error'
+  max_px INTEGER,
+  bytes INTEGER,
+  source_size_bytes INTEGER,
+  source_mtime_ns INTEGER,
+  error TEXT,
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_thumbs_status ON thumbnails(status);
+
+-- Compact, ordered pagination index built by stage 3 (one row per visible
+-- item per view) so the review server can page 100k photos with LIMIT/OFFSET
+-- instead of shipping a huge JSON document to the browser.
+CREATE TABLE IF NOT EXISTS review_index (
+  view TEXT,                    -- 'ALL' | 'MAYBE' | 'UNKNOWN' | 'GROUPS'
+  position INTEGER,
+  file_id INTEGER,
+  group_id INTEGER,
+  decision TEXT,
+  risk REAL,
+  PRIMARY KEY (view, position)
+);
+CREATE INDEX IF NOT EXISTS idx_review_index_file ON review_index(file_id);
 
 CREATE TABLE IF NOT EXISTS groups (
   id INTEGER PRIMARY KEY,
@@ -152,6 +200,38 @@ def insert_file(conn: sqlite3.Connection, meta: Dict[str, Any]) -> int:
     return int(row["id"]) if row else int(cur.lastrowid or 0)
 
 
+def refresh_file_identity(conn: sqlite3.Connection, file_id: int,
+                         meta: Dict[str, Any]) -> bool:
+    """Update a re-scanned row when the file on disk actually changed.
+
+    ``insert_file`` is INSERT-OR-IGNORE, so without this a replaced photo would
+    keep the identity it had at first scan. That is not merely cosmetic: the
+    stored ``content_sha256`` drives the byte-identity rule that is the *only*
+    automatic removal, and the thumbnail cache is validated against
+    ``size_bytes``/``mtime_ns``. So when either changes we rewrite the inventory
+    fields and invalidate the derived feature row, which makes Stage 1 recompute
+    features **and** the thumbnail from one fresh decode.
+
+    Returns True when something changed.
+    """
+    row = conn.execute(
+        "SELECT size_bytes, mtime_ns FROM files WHERE id = ?", (int(file_id),)
+    ).fetchone()
+    if row is None:
+        return False
+    if (row["size_bytes"] == meta.get("size_bytes")
+            and row["mtime_ns"] == meta.get("mtime_ns")):
+        return False
+    updatable = [c for c in FILE_COLUMNS if c in meta and c != "path"]
+    assignments = ", ".join(f"{name} = ?" for name in updatable)
+    conn.execute(f"UPDATE files SET {assignments} WHERE id = ?",
+                 [meta[name] for name in updatable] + [int(file_id)])
+    # Any cached derivative now describes bytes that no longer exist.
+    conn.execute("UPDATE features SET status = 'pending' WHERE file_id = ?", (int(file_id),))
+    conn.execute("DELETE FROM thumbnails WHERE file_id = ?", (int(file_id),))
+    return True
+
+
 def set_motion_partner(conn: sqlite3.Connection, file_id: int, partner_id: int) -> None:
     """Link two rows as a motion-photo pair (bidirectional)."""
     conn.execute("UPDATE files SET motion_partner_id = ? WHERE id = ?", (partner_id, file_id))
@@ -171,26 +251,78 @@ def count_files(conn: sqlite3.Connection, where: str = "") -> int:
 
 # --- features --------------------------------------------------------------
 
-FEATURE_KINDS = ("jpg", "jpg_motion")
+THUMB_PRESENCE_TABLE = "temp.thumb_present"
+
+# A cached thumbnail is only trusted when the recorded identity still matches
+# the live inventory row, the pixel size matches the current setting, and the
+# JPEG is actually present on the SSD (registered in the presence table).
+_THUMB_CURRENT_SQL = f"""
+    COALESCE(t.status, '') = 'ok'
+    AND COALESCE(t.max_px, -1) = :thumb_max_px
+    AND COALESCE(t.source_size_bytes, -1) = COALESCE(f.size_bytes, -2)
+    AND COALESCE(t.source_mtime_ns, -1) = COALESCE(f.mtime_ns, -2)
+    AND EXISTS (SELECT 1 FROM {THUMB_PRESENCE_TABLE} p WHERE p.file_id = f.id)
+"""
+
+_THUMB_SELECT = """
+    t.status AS thumb_status, t.max_px AS thumb_max_px, t.bytes AS thumb_bytes,
+    t.source_size_bytes AS thumb_source_size_bytes,
+    t.source_mtime_ns AS thumb_source_mtime_ns, t.error AS thumb_error
+"""
+
+
+def _ensure_thumb_presence_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {THUMB_PRESENCE_TABLE.split('.', 1)[1]} "
+        "(file_id INTEGER PRIMARY KEY)"
+    )
+
+
+def register_thumb_presence(conn: sqlite3.Connection, file_ids: Iterable[int]) -> int:
+    """Record which thumbnail JPEGs currently exist on disk (temp table).
+
+    Called once per Stage 1 run from a single cheap SSD directory listing, so a
+    manually deleted thumbnail is regenerated instead of silently missing.
+    """
+    _ensure_thumb_presence_table(conn)
+    conn.execute(f"DELETE FROM {THUMB_PRESENCE_TABLE}")
+    ids = [(int(value),) for value in file_ids]
+    conn.executemany(f"INSERT OR IGNORE INTO {THUMB_PRESENCE_TABLE} (file_id) VALUES (?)", ids)
+    return len(ids)
 
 
 def iter_files_for_features(
-    conn: sqlite3.Connection, batch_size: int = 256
+    conn: sqlite3.Connection, batch_size: int = 256, thumb_max_px: int | None = None
 ) -> Iterator[sqlite3.Row]:
-    """Yield still-image rows that have no completed feature row yet.
+    """Yield still-image rows that still need Stage 1 work.
 
     Resumable: a file counts as pending unless it has a ``features`` row with
-    ``status='done'``. Streams in batches to keep memory flat on 66k files.
+    ``status='done'``. When ``thumb_max_px`` is given, a file whose features are
+    done but whose SSD thumbnail is missing/stale/failed is pending as well, so
+    the single decode of that repair pass serves features *and* the thumbnail.
+    Streams in batches to keep memory flat on a 100k+ library.
     """
-    placeholders = ", ".join("?" for _ in FEATURE_KINDS)
+    if thumb_max_px is None:
+        thumb_clause = ""
+        params: Dict[str, Any] = {}
+    else:
+        _ensure_thumb_presence_table(conn)
+        thumb_clause = f"OR (fe.status = 'done' AND NOT ({_THUMB_CURRENT_SQL}))"
+        params = {"thumb_max_px": int(thumb_max_px)}
+    kind_params = {f"kind{i}": kind for i, kind in enumerate(FEATURE_KINDS)}
+    kind_placeholders = ", ".join(f":{name}" for name in kind_params)
     sql = f"""
-        SELECT f.* FROM files f
+        SELECT f.*, {_THUMB_SELECT} FROM files f
         LEFT JOIN features fe ON fe.file_id = f.id
-        WHERE f.file_kind IN ({placeholders})
-          AND (fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error'))
+        LEFT JOIN thumbnails t ON t.file_id = f.id
+        WHERE f.file_kind IN ({kind_placeholders})
+          AND (
+            fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error')
+            {thumb_clause}
+          )
         ORDER BY f.id
     """
-    cur = conn.execute(sql, FEATURE_KINDS)
+    cur = conn.execute(sql, {**kind_params, **params})
     while True:
         rows = cur.fetchmany(batch_size)
         if not rows:
@@ -224,6 +356,14 @@ def batch_insert_features(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any
         """,
         normalized,
     )
+
+
+def count_still_images(conn: sqlite3.Connection) -> int:
+    """Number of still images Stage 1 is responsible for (thumbnail denominator)."""
+    placeholders = ", ".join("?" for _ in FEATURE_KINDS)
+    return int(conn.execute(
+        f"SELECT COUNT(*) AS n FROM files WHERE file_kind IN ({placeholders})", FEATURE_KINDS
+    ).fetchone()["n"])
 
 
 def load_features_joined(conn: sqlite3.Connection) -> List[sqlite3.Row]:

@@ -38,6 +38,14 @@ features:
   # prevent 50 MP photos from turning a nominal batch into multi-GB RAM use.
   batch_size: 4
   max_inflight_megapixels: 80
+  # SSD thumbnail cache. Stage 1 writes one small JPEG per still image from the
+  # decode it already performs for embeddings/IQA/faces -- no second read of the
+  # HDD and no second decode. The review UI serves only these files, so paging
+  # 100k+ photos never wakes the mechanical disk.
+  thumbnails:
+    enabled: true
+    max_px: 320                 # long edge; ~25-45 KiB per photo in practice
+    jpeg_quality: 80
   dinov2_model: "facebook/dinov2-base"
   dinov2_input: 224
   iqa_musiq: true

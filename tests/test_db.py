@@ -31,6 +31,53 @@ def test_insert_file_idempotent(tmp_path):
     conn.close()
 
 
+def test_refresh_file_identity_only_fires_on_real_change(tmp_path):
+    conn = db.open_db(tmp_path / "t.sqlite")
+    meta = _meta("/x/a.jpg")
+    fid = db.insert_file(conn, meta)
+    assert db.refresh_file_identity(conn, fid, meta) is False
+
+    changed = {**meta, "size_bytes": 999, "mtime_ns": 42}
+    assert db.refresh_file_identity(conn, fid, changed) is True
+    row = db.get_file(conn, fid)
+    assert row["size_bytes"] == 999 and row["mtime_ns"] == 42
+    assert db.refresh_file_identity(conn, fid, changed) is False
+    conn.close()
+
+
+def test_refresh_file_identity_invalidates_derived_rows(tmp_path):
+    """A replaced photo must not keep its old hash, features, or thumbnail."""
+    conn = db.open_db(tmp_path / "t.sqlite")
+    meta = _meta("/x/a.jpg")
+    fid = db.insert_file(conn, meta)
+    db.batch_insert_features(conn, [{
+        "file_id": fid, "phash": (1).to_bytes(8, "big"), "content_sha256": "oldhash",
+        "dinov2_embedding": None, "quality_score": 50.0, "quality_meta": "{}",
+        "face_count": 0, "faces_json": "[]", "status": "done",
+    }])
+    db.batch_upsert_thumbnails(conn, [{
+        "file_id": fid, "status": "ok", "max_px": 320, "bytes": 900,
+        "source_size_bytes": meta["size_bytes"], "source_mtime_ns": meta["mtime_ns"],
+        "error": None, "created_at": 1,
+    }])
+    conn.commit()
+    assert list(db.iter_files_for_features(conn)) == []
+
+    db.refresh_file_identity(conn, fid, {**meta, "size_bytes": 777, "mtime_ns": 88})
+    conn.commit()
+
+    # Stage 1 sees it as pending again, and the thumbnail record is gone.
+    assert [int(r["id"]) for r in db.iter_files_for_features(conn)] == [fid]
+    assert db.thumbnail_stats(conn)["recorded_rows"] == 0
+    conn.close()
+
+
+def test_refresh_file_identity_ignores_unknown_rows(tmp_path):
+    conn = db.open_db(tmp_path / "t.sqlite")
+    assert db.refresh_file_identity(conn, 4242, _meta("/x/ghost.jpg")) is False
+    conn.close()
+
+
 def test_motion_partner_bidirectional(tmp_path):
     conn = db.open_db(tmp_path / "t.sqlite")
     a = db.insert_file(conn, _meta("/x/a.jpg", "jpg_motion"))
@@ -48,6 +95,7 @@ def test_features_roundtrip_and_resumability(tmp_path):
     ids = [db.insert_file(conn, _meta(f"/x/{i}.jpg", ts=1000 + i)) for i in range(3)]
     conn.commit()
 
+    assert db.count_still_images(conn) == 3
     # All three pending initially.
     assert len(list(db.iter_files_for_features(conn))) == 3
 

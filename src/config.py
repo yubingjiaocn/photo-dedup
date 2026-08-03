@@ -39,6 +39,11 @@ _DEFAULTS: Dict[str, Any] = {
         "device": "cuda",
         "batch_size": 4,
         "max_inflight_megapixels": 80,
+        "thumbnails": {
+            "enabled": True,
+            "max_px": 320,
+            "jpeg_quality": 80,
+        },
         "dinov2_model": "facebook/dinov2-base",
         "dinov2_input": 224,
         "iqa_musiq": True,
