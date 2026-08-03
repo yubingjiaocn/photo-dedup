@@ -25,6 +25,8 @@ Two interchangeable backends
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import sys
 import time
@@ -226,10 +228,18 @@ def resolve_backend(cfg: Config, override: Optional[str] = None):
 # Main loop
 # ===========================================================================
 
-def _open_image(path: Path) -> Image.Image:
-    img = Image.open(path)
+def _open_image_and_sha(path: Path) -> Tuple[Image.Image, str]:
+    """Read compressed bytes once, hashing that same sequential read before decode."""
+    digest = hashlib.sha256()
+    data = io.BytesIO()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+            data.write(chunk)
+    data.seek(0)
+    img = Image.open(data)
     img = img.convert("RGB")
-    return img
+    return img, digest.hexdigest()
 
 
 def _process_batch(
@@ -239,12 +249,15 @@ def _process_batch(
 ) -> List[Dict[str, Any]]:
     """Compute features for one batch of file rows. Returns feature dicts."""
     images: List[Image.Image] = []
+    hashes: List[str] = []
     valid_rows: List[Any] = []
     out_rows: List[Dict[str, Any]] = []
 
     for row in rows:
         try:
-            images.append(_open_image(Path(row["path"])))
+            image, sha256 = _open_image_and_sha(Path(row["path"]))
+            images.append(image)
+            hashes.append(sha256)
             valid_rows.append(row)
         except Exception as exc:  # unreadable / corrupt file
             print(f"[stage1][WARN] cannot read {row['path']}: {exc}")
@@ -254,7 +267,7 @@ def _process_batch(
         return out_rows
 
     embeddings = backend.embed_batch(images)
-    for row, image, emb in zip(valid_rows, images, embeddings):
+    for row, image, sha256, emb in zip(valid_rows, images, hashes, embeddings):
         score, meta = backend.quality(image)
         faces = backend.faces(image)
         img_rgb = np.asarray(image)
@@ -269,6 +282,7 @@ def _process_batch(
             {
                 "file_id": int(row["id"]),
                 "phash": Q.phash_bytes(image),
+                "content_sha256": sha256,
                 "dinov2_embedding": Q.embedding_to_blob(emb),
                 "quality_score": float(score),
                 "quality_meta": json.dumps(meta),
@@ -284,12 +298,13 @@ def _error_feature_row(file_id: int) -> Dict[str, Any]:
     return {
         "file_id": file_id,
         "phash": None,
+        "content_sha256": None,
         "dinov2_embedding": None,
         "quality_score": None,
         "quality_meta": json.dumps({"error": True}),
         "face_count": 0,
         "faces_json": "[]",
-        "status": "error",
+        "status": "done_error",
     }
 
 
@@ -299,7 +314,8 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     cfg = load_config(config_path)
     conn = db.open_db(cfg.db_path)
     backend = resolve_backend(cfg, backend_override)
-    batch_size = int(cfg.features.get("batch_size", 32))
+    batch_size = max(1, int(cfg.features.get("batch_size", 4)))
+    max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
 
     pending = list(db.iter_files_for_features(conn))
@@ -311,8 +327,8 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     done = 0
     since_commit = 0
     t0 = time.time()
-    for start in tqdm(range(0, total, batch_size), desc="features", unit="batch"):
-        batch = pending[start:start + batch_size]
+    batches = _guarded_batches(pending, batch_size, max_pixels)
+    for batch in tqdm(batches, desc="features", unit="batch"):
         feature_rows = _process_batch(backend, batch, cfg)
         db.batch_insert_features(conn, feature_rows)
         done += len(feature_rows)
@@ -329,6 +345,23 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     print(f"[stage1] processed {done} images in {dt:.1f}s ({rate:.1f}/s)")
     conn.close()
     return {"processed": done, "total": total}
+
+
+def _guarded_batches(rows: Sequence[Any], batch_size: int, max_pixels: int) -> List[List[Any]]:
+    """Bound full-resolution decoded images held concurrently."""
+    batches: List[List[Any]] = []
+    current: List[Any] = []
+    pixels = 0
+    for row in rows:
+        item_pixels = max(1, int(row["width"] or 0) * int(row["height"] or 0))
+        if current and (len(current) >= batch_size or pixels + item_pixels > max_pixels):
+            batches.append(current)
+            current, pixels = [], 0
+        current.append(row)
+        pixels += item_pixels
+    if current:
+        batches.append(current)
+    return batches
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

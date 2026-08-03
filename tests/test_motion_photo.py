@@ -81,3 +81,15 @@ def test_classify_standalone(tmp_path: Path):
     dir_files = [jpg, vid]
     assert mp.classify_file(jpg, dir_files)[0] == "jpg"
     assert mp.classify_file(vid, dir_files)[0] == "mp4_only"
+
+
+def test_ambiguous_jpg_jpeg_do_not_claim_same_sidecar(tmp_path: Path):
+    jpg = tmp_path / "IMG_1.jpg"
+    jpeg = tmp_path / "IMG_1.jpeg"
+    video = tmp_path / "IMG_1.mp4"
+    for p in (jpg, jpeg, video):
+        p.write_bytes(b"x")
+    files = [jpg, jpeg, video]
+    assert mp.classify_file(jpg, files) == ("jpg", None)
+    assert mp.classify_file(jpeg, files) == ("jpg", None)
+    assert mp.classify_file(video, files) == ("mp4_only", None)

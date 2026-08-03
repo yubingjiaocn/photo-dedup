@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import io
 import json
@@ -96,11 +97,14 @@ def collect_deletions(conn) -> Dict[str, Any]:
                 delete_paths.append(p)
                 total_delete_bytes += size
             # Cloud manifest: only the still image itself (Google merges motion).
-            cloud_items.append({
-                "filename": rec["basename"],
-                "exif_datetime": _iso_t(rec["exif_datetime"]),
-                "size_bytes": rec["size_bytes"],
-            })
+            # Filename alone is not unique in Google Photos. Omit cloud items
+            # unless both capture time and byte size are present.
+            if rec["exif_datetime"] and rec["size_bytes"] > 0:
+                cloud_items.append({
+                    "filename": rec["basename"],
+                    "exif_datetime": _iso_t(rec["exif_datetime"]),
+                    "size_bytes": rec["size_bytes"],
+                })
 
         groups_out.append({
             "id": grp["id"], "type": grp["group_type"],
@@ -133,10 +137,24 @@ def _risk(rec: Dict[str, Any]) -> float:
 
 
 def _expand_with_partner(conn, rec: Dict[str, Any]) -> List[tuple]:
-    """Yield (path, size) for a delete record + its motion sidecar video."""
+    """Expand only a uniquely/bidirectionally owned, unprotected sidecar."""
     out = [(rec["path"], rec["size_bytes"])]
     partner = db.get_file(conn, int(rec["motion_partner_id"])) if rec["motion_partner_id"] else None
-    if partner is not None:
+    if partner is not None and partner["motion_partner_id"] == rec["file_id"]:
+        owner_count = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE motion_partner_id = ?", (partner["id"],)
+        ).fetchone()[0]
+        protected = conn.execute(
+            "SELECT 1 FROM group_members WHERE file_id = ? AND (is_keep = 1 OR decision = 'KEEP') LIMIT 1",
+            (partner["id"],),
+        ).fetchone()
+        protected_ref = conn.execute(
+            "SELECT 1 FROM files f JOIN group_members gm ON gm.file_id=f.id "
+            "WHERE f.motion_partner_id=? AND f.id != ? AND (gm.is_keep=1 OR gm.decision='KEEP') LIMIT 1",
+            (partner["id"], rec["file_id"]),
+        ).fetchone()
+        if owner_count != 1 or protected or protected_ref:
+            return out
         out.append((partner["path"], partner["size_bytes"] or 0))
     return out
 
@@ -245,6 +263,17 @@ def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str,
     with open(local_txt, "w", encoding="utf-8") as fh:
         for p in data["delete_paths"]:
             fh.write(p + "\n")
+
+    stage2_run = db.get_meta(conn, "stage2_run_id") or db.get_meta(conn, "stage2_done_at")
+    groups = list(db.iter_groups(conn))
+    policy = groups[0]["policy_version"] if groups else None
+    manifest_meta = {
+        "schema": 1, "stage2_run_id": stage2_run, "policy_version": policy,
+        "count": len(data["delete_paths"]),
+        "paths_sha256": hashlib.sha256(local_txt.read_bytes()).hexdigest(),
+    }
+    with open(out_dir / "delete_local.meta.json", "w", encoding="utf-8") as fh:
+        json.dump(manifest_meta, fh, indent=2)
 
     # delete_cloud.json
     cloud_json = out_dir / "delete_cloud.json"

@@ -18,6 +18,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import load_config
+from . import db
 
 try:
     from tqdm import tqdm
@@ -46,6 +48,26 @@ def _read_delete_list(path: Path) -> List[Path]:
             if line:
                 out.append(Path(line))
     return out
+
+
+def _verify_manifest(cfg, delete_list: Path, files: List[Path]) -> None:
+    """Refuse stale/tampered manifests before any real filesystem mutation."""
+    meta_path = cfg.output_dir / "delete_local.meta.json"
+    if not meta_path.exists():
+        raise RuntimeError("manifest metadata missing; rerun stage3")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    digest = hashlib.sha256(delete_list.read_bytes()).hexdigest()
+    if digest != meta.get("paths_sha256") or len(files) != meta.get("count"):
+        raise RuntimeError("delete manifest changed after stage3; refusing execution")
+    conn = db.open_db(cfg.db_path)
+    try:
+        run_id = db.get_meta(conn, "stage2_run_id") or db.get_meta(conn, "stage2_done_at")
+        groups = list(db.iter_groups(conn))
+        policy = groups[0]["policy_version"] if groups else None
+    finally:
+        conn.close()
+    if run_id != meta.get("stage2_run_id") or policy != meta.get("policy_version"):
+        raise RuntimeError("delete manifest is stale for current DB policy/run; rerun stage3")
 
 
 def _dest_for(src: Path, root: Path, session_dir: Path) -> Path:
@@ -137,6 +159,8 @@ def run(
                 fh.write(f"{exists}\t{f}\n")
         print(f"[execute] dry run -> wrote plan to {plan}. Re-run with --no-dry-run to apply.")
         return {"planned": len(files), "dry_run": True, "reclaim_gb": gb}
+
+    _verify_manifest(cfg, delete_list, files)
 
     if mode == "move":
         result = move_files(files, cfg.root_path, cfg.trash_path)

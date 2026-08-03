@@ -124,7 +124,8 @@ def build_file_meta(
 
 
 def _wanted(path: Path, extensions: set[str]) -> bool:
-    return path.suffix.lower() in extensions or mp.is_image(path) or mp.is_video(path)
+    """Honor the configured allow-list exactly; unsupported formats stay out."""
+    return path.suffix.lower() in extensions
 
 
 def run(config_path: Optional[str] = None, root_override: Optional[str] = None) -> Dict[str, int]:

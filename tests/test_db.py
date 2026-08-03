@@ -93,3 +93,14 @@ def test_meta_kv(tmp_path):
     assert db.get_meta(conn, "k") == "v2"
     assert db.get_meta(conn, "missing", "d") == "d"
     conn.close()
+
+
+def test_done_error_is_terminal(tmp_path):
+    conn = db.open_db(tmp_path / "t.sqlite")
+    fid = db.insert_file(conn, _meta("/x/bad.jpg"))
+    db.batch_insert_features(conn, [{
+        "file_id": fid, "phash": None, "dinov2_embedding": None,
+        "quality_score": None, "quality_meta": "{}", "face_count": 0,
+        "faces_json": "[]", "status": "done_error",
+    }])
+    assert list(db.iter_files_for_features(conn)) == []

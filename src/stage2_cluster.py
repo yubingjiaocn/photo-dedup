@@ -32,6 +32,7 @@ import argparse
 import json
 import sys
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -197,17 +198,22 @@ def layer1_exact_dup(
 
 # --- burst / similar layer -------------------------------------------------
 
-def _unit_embeddings(rows: Sequence[Any]) -> np.ndarray:
+def _unit_embeddings(rows: Sequence[Any]) -> Tuple[np.ndarray, np.ndarray]:
     embs = np.zeros((len(rows), 768), dtype=np.float32)
+    valid = np.zeros(len(rows), dtype=bool)
     for i, r in enumerate(rows):
         blob = r["dinov2_embedding"]
         if blob:
-            v = Q.blob_to_embedding(blob)
-            if v.shape[0] == 768:
+            try:
+                v = Q.blob_to_embedding(blob)
+            except (ValueError, TypeError):
+                continue
+            if v.shape == (768,) and np.all(np.isfinite(v)) and np.linalg.norm(v) > 0:
                 embs[i] = v
+                valid[i] = True
     norms = np.linalg.norm(embs, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return embs / norms
+    return embs / norms, valid
 
 
 def layer_window(
@@ -222,16 +228,20 @@ def layer_window(
     face_ratio: float,
     min_face_score: float,
     edge_type: str,
+    valid_embeddings: Optional[np.ndarray] = None,
 ) -> List[Tuple[int, int, str]]:
     """Time-windowed similarity union with check-in face split. Returns edges."""
     edges: List[Tuple[int, int, str]] = []
     n = len(rows)
     for i in range(n):
         ti = timestamps[i]
-        if ti is None:
+        if ti is None or (valid_embeddings is not None and not valid_embeddings[i]):
             continue
         j = i + 1
         while j < n and timestamps[j] is not None and (timestamps[j] - ti) <= window_seconds:
+            if (valid_embeddings is not None and not valid_embeddings[j]):
+                j += 1
+                continue
             if dsu.find(i) != dsu.find(j):
                 cos = float(np.dot(units[i], units[j]))
                 if cos >= cos_threshold:
@@ -259,7 +269,7 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
 
     dsu = DSU(n)
     phash_ints = _phash_ints(rows)
-    units = _unit_embeddings(rows)
+    units, valid_embeddings = _unit_embeddings(rows)
     timestamps = [r["exif_timestamp"] for r in rows]
     faces = [parse_faces(r["faces_json"]) for r in rows]
 
@@ -273,6 +283,7 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         face_ratio=float(cc.get("face_pose_shift_ratio", 0.30)),
         min_face_score=float(cc.get("min_face_score", 0.6)),
         edge_type="burst",
+        valid_embeddings=valid_embeddings,
     )
     if bool(cc.get("enable_loose_similar", False)):
         edges += layer_window(
@@ -282,6 +293,7 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
             face_ratio=float(cc.get("face_pose_shift_ratio", 0.30)),
             min_face_score=float(cc.get("min_face_score", 0.6)),
             edge_type="similar_scene",
+            valid_embeddings=valid_embeddings,
         )
 
     # Label each component by its strongest edge type.
@@ -306,6 +318,9 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         if len(member_idx) < 2:
             continue
         members = [dict(rows[i]) for i in member_idx]
+        for local, gi in enumerate(member_idx):
+            if not valid_embeddings[gi]:
+                members[local]["dinov2_embedding"] = None
         keep_local, scores = select_keep(members, cfg)
         keep_file_id = int(rows[member_idx[keep_local]]["id"])
         gtype = comp_type.get(root, "burst")
@@ -317,14 +332,21 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         # DSU reachability is not enough: require every burst member to remain
         # close to the selected representative, preventing A~B~C chaining from
         # turning an outlier into an automatic removal.
-        purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
-                     for gi in member_idx)
-        group_trusted = gtype == "exact_dup" or (
-            gtype == "burst" and purity >= float(cc.get("dinov2_threshold", 0.92))
-        )
+        if all(valid_embeddings[gi] for gi in member_idx):
+            purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
+                         for gi in member_idx)
+        else:
+            purity = -1.0
+        group_trusted = gtype == "burst" and purity >= float(cc.get("dinov2_threshold", 0.92))
+        keeper_sha = rows[member_idx[keep_local]]["content_sha256"]
+        safe_duplicates = {
+            local: bool(keeper_sha and keeper_sha == rows[gi]["content_sha256"])
+            for local, gi in enumerate(member_idx)
+        }
         result = D.decide_group(
             members, keep_local, scores, gtype, profile=profile,
             phash_distances=distances, group_trusted=group_trusted,
+            safe_duplicates=safe_duplicates,
         )
         member_tuples = []
         for local, gi in enumerate(member_idx):
@@ -351,6 +373,7 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         group_count += 1
     conn.commit()
     db.set_meta(conn, "stage2_done_at", str(created_at))
+    db.set_meta(conn, "stage2_run_id", uuid.uuid4().hex)
 
     candidates = sum(decision_counts[k] for k in ("AUTO_REMOVE", "MAYBE", "UNKNOWN"))
     stats = {

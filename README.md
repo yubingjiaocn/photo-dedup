@@ -4,8 +4,9 @@ Automatically de-duplicate a large local photo library (JPEG + motion photos +
 video), then trash the same photos in Google Photos. Built for a Windows
 desktop with an NVIDIA RTX 5070 Ti (16 GB) and photos on an HDD.
 
-It is **selectively automatic** — clear exact duplicates and hard exposure
-failures become `AUTO_REMOVE`; only boundary cases go to `MAYBE`, and missing
+It is **selectively automatic** — only byte-identical duplicates become
+`AUTO_REMOVE`; pHash-near duplicates, exposure extremes, and other boundary
+cases go to `MAYBE`, and missing
 features become `UNKNOWN`. Every group has a `KEEP`. Automatic items can only
 move to recoverable trash (local undo / Google's trash), never permanent delete.
 
@@ -16,7 +17,8 @@ move to recoverable trash (local undo / Google's trash), never permanent delete.
 
 ## What it does (the hard cases it gets right)
 
-- **True duplicates** (re-uploads, original + recompressed copy) → keep one.
+- **Byte-identical duplicates** (same bytes copied twice) → keep one automatically.
+  Re-encodes and pHash-near frames require review until face/eye evidence is calibrated.
 - **Bursts / continuous shots** (many frames seconds apart) → keep the best.
 - **Check-in photos** (a landmark is the subject, a person re-poses in front)
   → **kept separately**. A face-position guard refuses to merge frames where
@@ -79,6 +81,9 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    python -m src.stage1_features
    ```
+   Stage 1 computes SHA-256 during its existing sequential file read—there is no
+   extra whole-library hash pass. The default batch is 4 and an 80 MP inflight
+   guard bounds RAM for 50 MP images; raise these only after measuring memory.
    *~1–4 h for 66k files; ~20–50 img/s on the 5070 Ti. Commits every 100 images,
    so re-running continues where it stopped.*
 
@@ -94,7 +99,8 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    Produces in `output/`: `review.html` (separate risk-sorted Maybe/Unknown
    queues), `delete_local.txt`, `delete_cloud.json`, `summary.txt`. Manifests
-   contain only `AUTO_REMOVE` decisions.
+   contain only `AUTO_REMOVE` decisions. Cloud entries without a timestamp and
+   size are omitted because a filename is not unique.
 
 6. **Review** — open `output/review.html` in a browser. Each group shows the
    keeper vs the delete candidates with scores. Spot-check a few dozen groups.
@@ -103,7 +109,7 @@ Activate the environment first: `\.venv\Scripts\activate`
 7. **Delete locally** — first do a dry run (default), then apply:
    ```
    python -m src.execute_local                # dry run: writes output\execute_plan.txt, touches nothing
-   python -m src.execute_local --no-dry-run   # move to E:\Photos\_trash\<timestamp>\
+   python -m src.execute_local --no-dry-run   # verifies Stage-2 run/policy + manifest hash, then moves
    ```
    Changed your mind? Undo the whole session:
    ```
@@ -125,9 +131,10 @@ Activate the environment first: `\.venv\Scripts\activate`
 Everything lives in `config.yaml`; `docs/ALGORITHM.md` explains each value.
 Most common tweaks:
 
-- **Automation coverage:** set `decision.profile` to `conservative`, `balanced`
-  (default), or `aggressive`. Exact duplicates and clear hard defects remain
-  automatic; profiles mainly change how much of the boundary becomes Maybe.
+- **Automation coverage:** `conservative`, `balanced`, and `aggressive` use
+  different quality-margin abstention thresholds. Exposure alone is never
+  automatic: conservative marks it Unknown while balanced/aggressive queue it
+  as Maybe. Byte identity is profile-independent.
 
 - **Over-merging** (different photos grouped)? Raise `cluster.dinov2_threshold`
   (0.92 → 0.94) and/or lower `cluster.face_pose_shift_ratio` (0.30 → 0.20, more

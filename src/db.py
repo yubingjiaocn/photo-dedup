@@ -44,6 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_files_base ON files(basename);
 CREATE TABLE IF NOT EXISTS features (
   file_id INTEGER PRIMARY KEY REFERENCES files(id),
   phash BLOB,                   -- 8-byte 64-bit perceptual hash
+  content_sha256 TEXT,          -- byte identity; pHash alone is never exact proof
   dinov2_embedding BLOB,        -- 768-dim float16 = 1536 bytes
   quality_score REAL,           -- MUSIQ 0-100 (or stub proxy)
   quality_meta TEXT,            -- JSON: {sharpness, clipiqa, ...}
@@ -115,6 +116,7 @@ def open_db(path: str | Path) -> sqlite3.Connection:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add P0 decision columns to databases created by pre-P0 releases."""
     additions = {
+        "features": {"content_sha256": "TEXT"},
         "groups": {"decision_state": "TEXT", "confidence": "REAL",
                    "policy_version": "TEXT", "decision_json": "TEXT"},
         "group_members": {"decision": "TEXT", "confidence": "REAL",
@@ -185,7 +187,7 @@ def iter_files_for_features(
         SELECT f.* FROM files f
         LEFT JOIN features fe ON fe.file_id = f.id
         WHERE f.file_kind IN ({placeholders})
-          AND (fe.file_id IS NULL OR fe.status != 'done')
+          AND (fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error'))
         ORDER BY f.id
     """
     cur = conn.execute(sql, FEATURE_KINDS)
@@ -201,16 +203,18 @@ def batch_insert_features(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any
     """Upsert a batch of feature rows. Caller commits (stage1 commits per batch)."""
     if not rows:
         return
+    normalized = [{"content_sha256": None, **row} for row in rows]
     conn.executemany(
         """
         INSERT INTO features
-            (file_id, phash, dinov2_embedding, quality_score,
+            (file_id, phash, content_sha256, dinov2_embedding, quality_score,
              quality_meta, face_count, faces_json, status)
         VALUES
-            (:file_id, :phash, :dinov2_embedding, :quality_score,
+            (:file_id, :phash, :content_sha256, :dinov2_embedding, :quality_score,
              :quality_meta, :face_count, :faces_json, :status)
         ON CONFLICT(file_id) DO UPDATE SET
             phash=excluded.phash,
+            content_sha256=excluded.content_sha256,
             dinov2_embedding=excluded.dinov2_embedding,
             quality_score=excluded.quality_score,
             quality_meta=excluded.quality_meta,
@@ -218,7 +222,7 @@ def batch_insert_features(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any
             faces_json=excluded.faces_json,
             status=excluded.status
         """,
-        rows,
+        normalized,
     )
 
 
@@ -232,7 +236,7 @@ def load_features_joined(conn: sqlite3.Connection) -> List[sqlite3.Row]:
         SELECT f.id, f.path, f.basename, f.size_bytes, f.mtime_ns,
                f.exif_datetime, f.exif_timestamp, f.width, f.height,
                f.file_kind, f.motion_partner_id,
-               fe.phash, fe.dinov2_embedding, fe.quality_score,
+               fe.phash, fe.content_sha256, fe.dinov2_embedding, fe.quality_score,
                fe.quality_meta, fe.face_count, fe.faces_json
         FROM files f
         JOIN features fe ON fe.file_id = f.id

@@ -7,12 +7,12 @@ from typing import Any, Dict, Mapping, Sequence
 from . import exposure
 
 PROFILES = {
-    "conservative": {"margin_min": 0.14, "exact_hamming_max": 0},
-    "balanced": {"margin_min": 0.08, "exact_hamming_max": 2},
-    "aggressive": {"margin_min": 0.04, "exact_hamming_max": 2},
+    "conservative": {"margin_min": 0.14, "exposure_review": "UNKNOWN"},
+    "balanced": {"margin_min": 0.08, "exposure_review": "MAYBE"},
+    "aggressive": {"margin_min": 0.04, "exposure_review": "MAYBE"},
 }
 VALID_DECISIONS = {"KEEP", "AUTO_REMOVE", "MAYBE", "UNKNOWN"}
-POLICY_VERSION = "p0-phase1-v1"
+POLICY_VERSION = "p0-safety-v2"
 
 
 def parse_meta(raw: str | None) -> Dict[str, Any]:
@@ -47,6 +47,7 @@ def decide_group(
     group_type: str, *, profile: str = "balanced",
     phash_distances: Mapping[int, int] | None = None,
     group_trusted: bool = True,
+    safe_duplicates: Mapping[int, bool] | None = None,
 ) -> Dict[str, Any]:
     """Decide each member; ``keeper`` and distance keys are local indices."""
     policy = PROFILES.get(profile)
@@ -56,24 +57,29 @@ def decide_group(
     decisions[keeper] = _record("KEEP", 1.0, "GROUP_KEEPER", scores[keeper], 0.0)
     keeper_exp, _, _ = _exposure(members[keeper])
     distances = phash_distances or {}
+    direct_duplicates = safe_duplicates or {}
     for idx, member in enumerate(members):
         if idx == keeper:
             continue
         margin = float(scores[keeper] - scores[idx])
-        exp_state, exp_reason, severity = _exposure(member)
+        exp_state, exp_reason, _severity = _exposure(member)
         if not _critical_available(member):
             decisions[idx] = _record("UNKNOWN", 0.0, "FEATURE_MISSING", scores[idx], margin)
         elif group_type == "similar_scene":
             decisions[idx] = _record("MAYBE", 0.0, "SUBJECTIVE_ONLY: similar_scene", scores[idx], margin)
+        elif direct_duplicates.get(idx, False):
+            decisions[idx] = _record("AUTO_REMOVE", 1.0, "BYTE_IDENTICAL", scores[idx], margin)
         elif not group_trusted:
             decisions[idx] = _record("MAYBE", 0.0, "GROUP_IMPURE", scores[idx], margin)
-        elif group_type == "exact_dup" and distances.get(idx, 64) <= policy["exact_hamming_max"]:
-            decisions[idx] = _record("AUTO_REMOVE", 0.99, "EXACT_DUPLICATE", scores[idx], margin)
+        elif group_type == "exact_dup" and distances.get(idx, 64) <= 2:
+            decisions[idx] = _record("MAYBE", 0.0, "PHASH_NEAR_DUP_ONLY", scores[idx], margin)
         elif _face_conflict(members[keeper], member):
             decisions[idx] = _record("MAYBE", 0.0, "FACE_COUNT_MISMATCH", scores[idx], margin)
         elif exp_state == "reject" and keeper_exp != "reject":
-            decisions[idx] = _record("AUTO_REMOVE", min(1.0, 0.8 + severity * 0.2),
-                                     f"HARD_EXPOSURE: {exp_reason}", scores[idx], margin)
+            review_state = policy["exposure_review"]
+            decisions[idx] = _record(review_state, 0.0,
+                                     f"EXPOSURE_UNCALIBRATED_{profile.upper()}: {exp_reason}",
+                                     scores[idx], margin)
         elif margin < policy["margin_min"]:
             decisions[idx] = _record("MAYBE", 0.0, "LOW_MARGIN", scores[idx], margin)
         elif exp_state == "maybe":

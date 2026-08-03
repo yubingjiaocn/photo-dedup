@@ -134,22 +134,16 @@ def _video_base_candidates(video_name: str) -> set[str]:
 def find_image_for_video(video: Path, dir_files: Sequence[Path]) -> Optional[Path]:
     """Given a video, return the still image it pairs with (or None)."""
     cands = _video_base_candidates(video.name)
-    for other in dir_files:
-        if other == video or not is_image(other):
-            continue
-        if other.name.lower() in cands or other.stem.lower() in cands:
-            return other
-    return None
+    matches = [other for other in dir_files if other != video and is_image(other)
+               and (other.name.lower() in cands or other.stem.lower() in cands)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def find_video_for_image(image: Path, dir_files: Sequence[Path]) -> Optional[Path]:
     """Given a still image, return a sidecar video that pairs with it (or None)."""
-    for other in dir_files:
-        if other == image or not is_video(other):
-            continue
-        if find_image_for_video(other, [image]) is not None:
-            return other
-    return None
+    matches = [other for other in dir_files if other != image and is_video(other)
+               and find_image_for_video(other, dir_files) == image]
+    return matches[0] if len(matches) == 1 else None
 
 
 # --- unified classification ------------------------------------------------

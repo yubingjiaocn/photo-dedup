@@ -37,7 +37,8 @@ _DEFAULTS: Dict[str, Any] = {
     "features": {
         "backend": "auto",
         "device": "cuda",
-        "batch_size": 32,
+        "batch_size": 4,
+        "max_inflight_megapixels": 80,
         "dinov2_model": "facebook/dinov2-base",
         "dinov2_input": 224,
         "iqa_musiq": True,

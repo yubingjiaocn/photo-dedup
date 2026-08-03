@@ -20,7 +20,8 @@ The library is a mix of:
    a naïve similarity metric but are **not** duplicates and must be kept.
 4. **Unrelated photos** — everything else.
 
-We attack (1) with a perceptual hash, (2) with semantic embeddings gated by a
+We find candidates for (1) with a perceptual hash but prove automatic byte
+identity with SHA-256, (2) with semantic embeddings gated by a
 time window, and (3) with a face-position guard that *refuses* to merge frames
 where the person clearly moved.
 
@@ -34,6 +35,12 @@ where the person clearly moved.
 - **Why 64-bit:** standard; the Hamming distance between two 64-bit hashes is a
   robust "are these visually the same picture" signal that ignores JPEG
   recompression, minor resizing, and metadata changes.
+
+### SHA-256 content hash
+- Computed while Stage 1 performs its existing sequential compressed-file read;
+  it does **not** add another library scan.
+- This is the only P0 automatic duplicate proof. pHash Hamming 0–2 is only a
+  candidate signal: blinks and tiny local edits can retain the same pHash.
 
 ### DINOv2 embedding (`facebook/dinov2-base`, 768-d)
 - **What:** the CLS/pooler vector of a self-supervised ViT. Stored as float16
@@ -77,7 +84,8 @@ mid-tone anchor mass, non-clipped luminance entropy, mean luminance, plus the
 same metrics for each already-detected face ROI. Labels are derived in Stage 2,
 so changing decision thresholds does not re-read images. Reject requires
 multiple conditions; silhouettes and local highlights are protected by anchor,
-connected-region, entropy, and face-ROI gates.
+connected-region, entropy, and face-ROI gates. Until calibrated on real labels,
+exposure classifications are review evidence only and never cause AUTO_REMOVE.
 
 ---
 
@@ -87,9 +95,9 @@ A file lands in **exactly one** group. Layers run in priority order and a
 union-find (DSU) merges members; each final group is labelled by its strongest
 edge type (`exact_dup` > `burst` > `similar_scene`).
 
-### Layer 1 — Exact duplicate
+### Layer 1 — pHash near-duplicate candidates
 - **Rule:** pHash Hamming distance ≤ `phash_hamming_threshold` (**default 2**).
-- **Why 2:** 0 = bit-identical hash; 1–2 tolerates JPEG re-encode / a resave
+- **Why 2:** 0 is only hash-identical, not byte-identical; 1–2 tolerates JPEG re-encode / a resave
   without letting genuinely different photos in. Above ~4 you start merging
   merely-similar images, which is what Layer 2 is *for* (with time gating).
 - **Performance:** naïve all-pairs is O(N²) ≈ 4×10⁹ for 66k — too slow. We use
@@ -98,6 +106,9 @@ edge type (`exact_dup` > `burst` > `similar_scene`).
   bands, so they will collide in at least one band bucket. We only compare
   within buckets. (Guaranteed correct for threshold ≤ 3; if you set it higher,
   increase the band count or accept recall loss — noted in code.)
+- DSU connectivity never grants deletion trust. Every candidate is compared
+  directly with the selected keeper, and only matching non-empty SHA-256 values
+  use the automatic duplicate lane. Thus A≈B≈C chaining cannot remove C.
 
 ### Layer 2 — Burst / continuous shot
 - **Rule:** within `burst_window_seconds` (**default 30 s**) *and* DINOv2 cosine
@@ -184,6 +195,10 @@ bound:** if the JPEG is deleted, stage 3 automatically appends the sidecar
 video to `delete_local.txt`. Embedded videos need no extra handling — deleting
 the single JPEG removes them. See `src/motion_photo.py`.
 
+Pairing is one-to-one. Ambiguous `IMG_1.jpg` + `IMG_1.jpeg` + `IMG_1.mp4`
+sets remain unbound. Stage 3 also rechecks unique reverse ownership and refuses
+to expand a sidecar referenced by a keeper/protected asset.
+
 Embedded detection defaults to a **cheap header-only XMP-marker scan**
 (`GCamera:MicroVideo` / `MotionPhoto`), which is what Xiaomi/Samsung/Google
 write. A full trailing-MP4 scan is available (`scan.embedded_full_scan_max_bytes`)
@@ -197,6 +212,10 @@ but off by default to preserve stage 0's small-read budget on the HDD.
 - `execute.mode: move` — files go to `paths.trash/<timestamp>/` preserving the
   tree, with an `_undo_manifest.json` enabling `--undo`.
 - Cloud deletes go to the Google Photos **trash** (60-day recovery).
+- Cloud manifest items require filename + capture timestamp + size. The JS
+  executor requires exactly one size-and-time match; ambiguity is skipped.
+- Local execution verifies a Stage-2 run id, policy version, count and SHA-256
+  binding before moving anything. Dry run remains available without mutation.
 
 Stage 2 emits `KEEP/AUTO_REMOVE/MAYBE/UNKNOWN` with a mandatory keeper floor.
 `similar_scene` never auto-removes by default. Stage 3 manifests contain only
@@ -204,6 +223,13 @@ Stage 2 emits `KEEP/AUTO_REMOVE/MAYBE/UNKNOWN` with a mandatory keeper floor.
 accepts only recoverable `move`, so automatic decisions cannot hard-delete.
 
 Profiles (`conservative`, default `balanced`, `aggressive`) tune abstention
-margin, while exact duplicates and clear hard exposure failures take the safe
-automatic lane. Closed-eye and OFIQ hooks exist but remain disabled/unknown
+margin (0.14 / 0.08 / 0.04). Uncalibrated exposure is `UNKNOWN` under
+conservative and `MAYBE` under balanced/aggressive, but never automatic; only
+byte identity takes the duplicate automatic lane. Closed-eye and OFIQ hooks exist but remain disabled/unknown
 until their models are validated.
+
+Stage 2 validates every embedding as exactly 768 finite, non-zero values before
+cosine clustering; malformed legacy BLOBs are excluded instead of crashing.
+Unreadable images become terminal `done_error` rows, so resumable runs do not
+retry them forever. `scan.extensions` is an actual allow-list; unsupported HEIC
+is not silently inventoried.

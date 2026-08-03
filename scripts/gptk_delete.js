@@ -68,6 +68,7 @@
     dedupKey: it.dedupKey || it.dedup_key || it.mediaKey || it.media_key,
     fileName: it.fileName || it.filename || it.name,
     ts: it.timestamp || it.creationTimestamp || it.takenTimestamp || it.descriptionTimestamp,
+    size: Number(it.sizeBytes || it.size_bytes || it.fileSize || it.size) || null,
   });
 
   // ----- 1. page through the whole cloud library ----------------------------
@@ -110,22 +111,24 @@
   const toTrash = [];
   let matched = 0, missed = 0, ambiguous = 0;
   for (const target of DELETE_CLOUD) {
-    const cands = byName.get(normName(target.filename)) || [];
+    if (!parseMs(target.exif_datetime) || !(Number(target.size_bytes) > 0)) {
+      ambiguous++; continue;
+    }
+    const cands = (byName.get(normName(target.filename)) || []).filter((c) =>
+      c.size != null && c.size === Number(target.size_bytes));
     if (cands.length === 0) { missed++; continue; }
     const tMs = parseMs(target.exif_datetime);
     let pick = null;
-    if (cands.length === 1) {
-      pick = cands[0];
-    } else if (tMs != null) {
-      // choose the candidate whose timestamp is closest and within tolerance
-      let best = null, bestDiff = Infinity;
+    if (tMs != null) {
+      // Require exactly one size+timestamp match; ties/duplicates are skipped.
+      let matches = [];
       for (const c of cands) {
         const cMs = Number(c.ts) || null;
         if (cMs == null) continue;
         const diff = Math.abs(cMs - tMs);
-        if (diff < bestDiff) { bestDiff = diff; best = c; }
+        if (diff <= TIME_TOLERANCE_MS) matches.push(c);
       }
-      if (best && bestDiff <= TIME_TOLERANCE_MS) pick = best;
+      if (matches.length === 1) pick = matches[0];
     }
     if (pick && pick.dedupKey) { toTrash.push(pick.dedupKey); matched++; }
     else { ambiguous++; }

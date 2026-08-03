@@ -19,7 +19,7 @@ paths:
 
 scan:
   # File extensions to inventory (case-insensitive). Motion-photo .MP/.MP4
-  # partners are matched automatically regardless of this list.
+  # is a strict allow-list. Include sidecar formats you want paired.
   extensions: [".jpg", ".jpeg", ".png", ".mp4", ".mp", ".mov"]
   follow_symlinks: false
   commit_every: 100              # stage0/stage1 commit cadence (crash-safe)
@@ -34,7 +34,10 @@ features:
   #   stub  -> deterministic numpy features (tests / no-GPU dry runs)
   backend: "auto"
   device: "cuda"                 # cuda | cpu  (torch backend only)
-  batch_size: 32
+  # Full-resolution frames are retained for IQA/face analysis. These guards
+  # prevent 50 MP photos from turning a nominal batch into multi-GB RAM use.
+  batch_size: 4
+  max_inflight_megapixels: 80
   dinov2_model: "facebook/dinov2-base"
   dinov2_input: 224
   iqa_musiq: true
@@ -61,8 +64,8 @@ quality:
   resolution_ref_mp: 12.0        # megapixels that map to full resolution_bonus=1.0
 
 decision:
-  # conservative | balanced | aggressive. Profiles only change abstention
-  # coverage; exact duplicates and clear hard exposure failures override.
+  # conservative | balanced | aggressive: margin abstention 0.14/0.08/0.04.
+  # Exposure alone never auto-removes; only SHA-256 byte identity does.
   profile: "balanced"
 
 execute:
