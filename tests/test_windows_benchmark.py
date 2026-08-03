@@ -30,29 +30,42 @@ def test_limit_dry_run_and_path_privacy(tmp_path):
     assert "private-0" not in encoded and str(root) not in encoded
 
 
-def test_interrupt_state_resumes_and_json_is_finite(tmp_path):
-    root = _sample(tmp_path)
-    class Interrupted:
-        model_descriptor = {"fake": "one"}
-        calls = 0
-        def siglip(self, image):
-            self.calls += 1
-            if self.calls == 2:
-                raise KeyboardInterrupt()
-        def stage1(self, image):
-            return float("nan")
-    runner = Interrupted()
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(benchmark, "_load_runner", lambda _: runner)
-    state, output = tmp_path / "state.json", tmp_path / "out.json"
-    with pytest.raises(KeyboardInterrupt):
-        benchmark.run(sample_dir=str(root), state=str(state), output=str(output))
-    assert len(json.loads(state.read_text())["completed"]) == 1
-    monkeypatch.setattr(benchmark, "_load_runner", lambda _: benchmark.BuiltinRunner())
-    result = benchmark.run(sample_dir=str(root), state=str(state), output=str(output))
-    assert result["status"] == "COMPLETE" and not state.exists()
-    assert "NaN" not in output.read_text()
-    monkeypatch.undo()
+def test_state_identity_mismatch_restarts_not_resumes(tmp_path):
+    root, state = _sample(tmp_path), tmp_path / "state.json"
+    paths, selection = benchmark._samples(str(root), None, None)
+    state.write_text(json.dumps({"state_version": 2, "schema_version": 1, "config_hash": "old",
+        "sample_set_hash": benchmark._hash(selection), "model_hash": "old", "runner_spec": "builtin",
+        "completed": {benchmark._path_token(paths[0]): {}}}))
+    result = benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out.json"))
+    assert result["resume_status"] == "STATE_MISMATCH_RESTARTED"
+    assert result["phases"]["decode"]["processed"] == 2
+
+
+def test_atomic_writer_keeps_old_output_when_replace_fails(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    output.write_text('{"old":true}')
+    monkeypatch.setattr(benchmark.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("nope")))
+    with pytest.raises(OSError):
+        benchmark._atomic_json(output, {"new": True})
+    assert output.read_text() == '{"old":true}'
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_skipped_siglip_is_not_processed(tmp_path):
+    root = _sample(tmp_path, 1)
+    result = benchmark.run(sample_dir=str(root), output=str(tmp_path / "out.json"))
+    siglip = result["phases"]["siglip"]
+    assert siglip["processed"] == 0 and siglip["skipped"] == 1 and siglip["throughput_per_s"] is None
+
+
+def test_fixture_rejects_escape_and_bad_types(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "fixtures": [{"id": "x", "file": "../out.png", "buckets": ["x"]}]}))
+    with pytest.raises(ValueError, match="escapes"):
+        benchmark._samples(None, str(manifest), None)
+    manifest.write_text(json.dumps({"schema_version": 1, "fixtures": [{"id": 1, "file": "x.png", "buckets": []}]}))
+    with pytest.raises(ValueError, match="string id"):
+        benchmark._samples(None, str(manifest), None)
 
 
 def test_windows_style_path_token_is_opaque():

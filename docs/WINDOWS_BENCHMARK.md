@@ -32,7 +32,11 @@ loads nor downloads a provider. A future **local, offline** provider can be
 injected with `--runner package.module:factory`; its object must expose
 `siglip(PIL.Image)` and `stage1(PIL.Image)`, plus optional `model_descriptor`.
 Interrupt with Ctrl+C: completed opaque tokens are checkpointed in `--state`;
-re-run the same command to resume. A changed config hash starts a new checkpoint.
+re-run the same command to resume. State is accepted only when its schema,
+config hash, ordered sample set (path token + size + mtime, or manifest hash),
+model hash, and runner spec match exactly; any mismatch safely restarts rather
+than mixing benchmark populations. JSON output and checkpoints are written via
+fsync + atomic replace, so a failure preserves the previous complete file.
 
 Before claiming RTX 5070 Ti results, Willy must run the real selected-sample
 command on Windows, confirm `benchmark-real.json` names the GPU and shows
