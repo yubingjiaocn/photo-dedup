@@ -73,19 +73,28 @@ def read_image_header(path: Path) -> Dict[str, object]:
     try:
         from PIL import Image
 
-        with Image.open(path) as img:
-            result["width"], result["height"] = img.size
-            exif = None
-            try:
-                exif = img.getexif()
-            except Exception:
+        # Header inspection does not allocate the pixel raster. Disable Pillow's
+        # decompression-bomb gate only for this single-threaded header read so a
+        # 200 MP image still records dimensions and can be rejected by Stage 1
+        # before any full decode. The global is restored immediately.
+        old_limit = Image.MAX_IMAGE_PIXELS
+        try:
+            Image.MAX_IMAGE_PIXELS = None
+            with Image.open(path) as img:
+                result["width"], result["height"] = img.size
                 exif = None
-            if exif:
-                # 36867 = DateTimeOriginal, 306 = DateTime
-                dt_val = exif.get(36867) or exif.get(306)
-                if dt_val:
-                    iso, ts = _parse_exif_datetime(str(dt_val))
-                    result["exif_datetime"], result["exif_timestamp"] = iso, ts
+                try:
+                    exif = img.getexif()
+                except Exception:
+                    exif = None
+                if exif:
+                    # 36867 = DateTimeOriginal, 306 = DateTime
+                    dt_val = exif.get(36867) or exif.get(306)
+                    if dt_val:
+                        iso, ts = _parse_exif_datetime(str(dt_val))
+                        result["exif_datetime"], result["exif_timestamp"] = iso, ts
+        finally:
+            Image.MAX_IMAGE_PIXELS = old_limit
     except Exception:
         pass
     return result

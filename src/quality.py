@@ -86,7 +86,9 @@ def variance_of_laplacian(gray: np.ndarray) -> float:
 
     Higher = sharper. Uses a 3x3 discrete Laplacian via numpy (no OpenCV).
     """
-    g = gray.astype(np.float64)
+    # float32 is ample for 8-bit pixels and avoids two full-resolution
+    # float64 arrays (hundreds of MiB on large photos).
+    g = np.asarray(gray, dtype=np.float32)
     lap = (
         -4.0 * g
         + np.roll(g, 1, axis=0)

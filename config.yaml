@@ -38,6 +38,13 @@ features:
   # prevent 50 MP photos from turning a nominal batch into multi-GB RAM use.
   batch_size: 4
   max_inflight_megapixels: 80
+  # Stills above this inventory-header pixel count are recorded as
+  # skipped_oversize before any full decode or GPU/model inference.
+  max_process_megapixels: 64
+  # Symmetric max(width/height, height/width); strictly greater panoramas skip.
+  max_process_aspect_ratio: 3.0
+  # IQA/sharpness input keeps aspect ratio and is bounded to this long edge.
+  iqa_max_long_edge: 1920
   # SSD thumbnail cache. Stage 1 writes one small JPEG per still image from the
   # decode it already performs for embeddings/IQA/faces -- no second read of the
   # HDD and no second decode. The review UI serves only these files, so paging

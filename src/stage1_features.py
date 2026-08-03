@@ -45,7 +45,7 @@ import numpy as np
 from PIL import Image
 
 from .config import Config, load_config
-from . import db
+from . import db, feature_admission
 from . import quality as Q
 from . import exposure
 from . import decision
@@ -242,16 +242,25 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     """Run stage 1. Returns a small stats dict."""
     cfg = load_config(config_path)
     conn = db.open_db(cfg.db_path)
-    backend = resolve_backend(cfg, backend_override)
-    eye_cfg = cfg.features.get("eye_detection", {})
-    eye_detector = (
-        eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
-        if eye_cfg.get("enabled", False)
-        else None
+    max_process_mp = float(cfg.features.get("max_process_megapixels", 64))
+    if max_process_mp <= 0:
+        raise ValueError("features.max_process_megapixels must be greater than zero")
+    max_process_pixels = int(max_process_mp * 1_000_000)
+    max_aspect_ratio = float(cfg.features.get("max_process_aspect_ratio", 3.0))
+    if max_aspect_ratio < 1:
+        raise ValueError("features.max_process_aspect_ratio must be at least 1")
+    skipped = feature_admission.mark_unprocessable_skipped(
+        conn, max_process_pixels, max_aspect_ratio
     )
-    # Construct once per Stage 1 run. Local runtime failures remain a
-    # MODEL_UNAVAILABLE shadow record and never interrupt existing features.
-    scene_router = _build_scene_router(cfg)
+    conn.commit()
+    skip_counts = {
+        reason: sum(row["skip_reason"] == reason for row in skipped)
+        for reason in ("PIXEL_LIMIT", "ASPECT_RATIO")
+    }
+    for row in skipped:
+        print(f"[stage1][SKIP {row['skip_reason']}] {row['path']} — "
+              f"{row['width']}x{row['height']}, {row['megapixels']:.2f} MP, "
+              f"ratio={row['aspect_ratio']:.3f}")
     thumbnailer = _build_thumbnailer(cfg)
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
@@ -267,11 +276,22 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     if limit:
         pending = pending[:limit]
     total = len(pending)
+    backend = resolve_backend(cfg, backend_override) if pending else None
+    eye_cfg = cfg.features.get("eye_detection", {})
+    eye_detector = (
+        eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
+        if pending and eye_cfg.get("enabled", False)
+        else None
+    )
+    # No detector/provider/model is constructed when all inventory rows were
+    # skipped or already terminal.
+    scene_router = _build_scene_router(cfg) if pending else None
     thumb_note = (
         "off" if thumbnailer is None
         else f"{thumbnailer.max_px}px -> {thumbnailer.directory}"
     )
-    print(f"[stage1] backend={backend.name} pending={total} batch_size={batch_size} "
+    backend_name = backend.name if backend is not None else "not-loaded"
+    print(f"[stage1] backend={backend_name} pending={total} batch_size={batch_size} "
           f"thumbs={thumb_note}")
 
     done = 0
@@ -293,12 +313,24 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
             since_commit = 0
     conn.commit()
 
-    db.set_meta(conn, "stage1_backend", backend.name)
+    db.set_meta(conn, "stage1_backend", backend_name)
+    db.set_meta(conn, "stage1_skipped_oversize", str(len(skipped)))
+    db.set_meta(conn, "stage1_skipped_pixel_limit", str(skip_counts["PIXEL_LIMIT"]))
+    db.set_meta(conn, "stage1_skipped_aspect_ratio", str(skip_counts["ASPECT_RATIO"]))
     db.set_meta(conn, "stage1_done_at", str(int(time.time())))
     dt = time.time() - t0
     rate = done / dt if dt > 0 else 0.0
-    print(f"[stage1] processed {done} images in {dt:.1f}s ({rate:.1f}/s)")
-    stats: Dict[str, Any] = {"processed": done, "total": total}
+    print(f"[stage1] processed {done} images, skipped={len(skipped)} "
+          f"(PIXEL_LIMIT={skip_counts['PIXEL_LIMIT']}, "
+          f"ASPECT_RATIO={skip_counts['ASPECT_RATIO']}) "
+          f"in {dt:.1f}s ({rate:.1f}/s)")
+    stats: Dict[str, Any] = {
+        "processed": done, "total": total, "skipped_oversize": len(skipped),
+        "skipped_pixel_limit": skip_counts["PIXEL_LIMIT"],
+        "skipped_aspect_ratio": skip_counts["ASPECT_RATIO"],
+        "max_process_megapixels": max_process_mp,
+        "max_process_aspect_ratio": max_aspect_ratio,
+    }
     if thumbnailer is None:
         stats["thumbnails"] = thumbnails.disabled_stats()
     else:

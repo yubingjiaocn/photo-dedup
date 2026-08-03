@@ -2,10 +2,10 @@
 
 Hard boundaries (the reason this file exists):
 
-* ``/api/thumb/<id>.jpg`` reads **only** ``output/thumbs/<id>.jpg`` on the SSD.
-  There is no source path in this process at all: the handler never learns the
-  original filename, so paging the UI can never wake the HDD. A missing
-  thumbnail is an honest ``404`` and the UI shows an explicit placeholder.
+* ``/api/thumb/<id>.jpg`` reads **only** ``output/thumbs/<id>.jpg`` on the SSD,
+  so normal paging never wakes the HDD. ``/api/original/<id>`` is the sole,
+  explicit exception: a user click streams that one inventoried still image
+  for focus inspection; source paths are never returned to the browser.
 * Pages come from SQLite with ``LIMIT/OFFSET`` over the pre-built
   ``review_index`` table, so no giant JSON is loaded by the server or browser.
 * Views: ``ALL`` (full timeline), ``MAYBE``, ``UNKNOWN``, ``GROUPS``.
@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import re
 import sqlite3
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -30,7 +32,16 @@ DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
 VIEWS = ("ALL", "MAYBE", "UNKNOWN", "GROUPS")
 _THUMB_RE = re.compile(r"^/api/thumb/(\d{1,18})\.jpg$")
+_ORIGINAL_RE = re.compile(r"^/api/original/(\d{1,18})$")
+_GROUP_RE = re.compile(r"^/api/group/(\d{1,18})$")
 _DENY_NAMES = {"inventory.sqlite", "inventory.sqlite-wal", "inventory.sqlite-shm"}
+
+
+@dataclass(frozen=True)
+class OriginalRecord:
+    path: Path
+    size_bytes: int
+    mtime_ns: int
 
 
 def _public_item(row: Any) -> Dict[str, Any]:
@@ -138,6 +149,14 @@ class ReviewData:
             "items": items,
         }
 
+    def group(self, group_id: int) -> Optional[Dict[str, Any]]:
+        """Path-free members for lightbox navigation from any review queue."""
+        with self._lock:
+            rows = db.group_page_by_id(self._conn, int(group_id))
+        if not rows:
+            return None
+        return _group_items(rows)[0]
+
     def thumb_bytes(self, file_id: int) -> Optional[bytes]:
         """Read a cached JPEG from the SSD only. No source fallback, ever."""
         candidate = thumbnails.thumb_path(self.thumbs, file_id).resolve()
@@ -147,6 +166,18 @@ class ReviewData:
             return candidate.read_bytes()
         except OSError:
             return None
+
+    def original_record(self, file_id: int) -> Optional[OriginalRecord]:
+        """Resolve immutable inventory identity for one explicit preview click."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT path, file_kind, size_bytes, mtime_ns FROM files WHERE id = ?",
+                (int(file_id),),
+            ).fetchone()
+        if (row is None or row["file_kind"] not in ("jpg", "jpg_motion")
+                or row["size_bytes"] is None or row["mtime_ns"] is None):
+            return None
+        return OriginalRecord(Path(row["path"]), int(row["size_bytes"]), int(row["mtime_ns"]))
 
     def status(self) -> Dict[str, Any]:
         files, cache_bytes = thumbnails.directory_usage(self.thumbs)
@@ -175,9 +206,21 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
             if parsed.path == "/api/status":
                 self._send_json(data.status())
                 return
+            match = _GROUP_RE.fullmatch(parsed.path)
+            if match:
+                group = data.group(int(match.group(1)))
+                if group is None:
+                    self.send_error(404, "group unavailable")
+                else:
+                    self._send_json(group)
+                return
             match = _THUMB_RE.fullmatch(parsed.path)
             if match:
                 self._serve_thumb(int(match.group(1)))
+                return
+            match = _ORIGINAL_RE.fullmatch(parsed.path)
+            if match:
+                self._serve_original(int(match.group(1)))
                 return
             if not self._static_allowed(parsed.path):
                 self.send_error(404)
@@ -215,6 +258,39 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
             self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
             self.wfile.write(payload)
+
+        def _serve_original(self, file_id: int) -> None:
+            """Stream one source JPEG only after an explicit lightbox request."""
+            record = data.original_record(file_id)
+            if record is None:
+                self.send_error(404, "original image unavailable")
+                return
+            try:
+                with record.path.open("rb") as source:
+                    live = os.fstat(source.fileno())
+                    if (live.st_size != record.size_bytes
+                            or live.st_mtime_ns != record.mtime_ns):
+                        self.send_error(409, "original changed since inventory")
+                        return
+                    head = source.read(16)
+                    if head.startswith(b"\xff\xd8\xff"):
+                        content_type = "image/jpeg"
+                    elif head.startswith(b"\x89PNG\r\n\x1a\n"):
+                        content_type = "image/png"
+                    else:
+                        self.send_error(415, "inventoried file is not JPEG or PNG")
+                        return
+                    source.seek(0)
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(live.st_size))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    while chunk := source.read(1024 * 1024):
+                        self.wfile.write(chunk)
+            except (OSError, BrokenPipeError, ConnectionError):
+                return
 
         def _send_json(self, value: Any, status: int = 200) -> None:
             payload = json.dumps(value, ensure_ascii=False,

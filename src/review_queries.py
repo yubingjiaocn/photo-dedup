@@ -123,11 +123,13 @@ def build_all_view_index(conn: sqlite3.Connection) -> int:
                ROW_NUMBER() OVER ({ALL_VIEW_ORDER}) - 1,
                f.id, m.group_id, m.decision, NULL
         FROM files f
+        LEFT JOIN features fe ON fe.file_id = f.id
         LEFT JOIN (
             SELECT file_id, MIN(group_id) AS group_id, MIN(decision) AS decision
             FROM group_members GROUP BY file_id
         ) m ON m.file_id = f.id
         WHERE f.file_kind IN ({placeholders})
+          AND COALESCE(fe.status, 'pending') != 'skipped_oversize'
         """,
         FEATURE_KINDS,
     )
@@ -193,6 +195,27 @@ def group_page(conn: sqlite3.Connection, offset: int, limit: int) -> List[sqlite
         ORDER BY g.id, gm.is_keep DESC, gm.file_id
         """,
         (int(limit), int(offset)),
+    ).fetchall()
+
+
+def group_page_by_id(conn: sqlite3.Connection, group_id: int) -> List[sqlite3.Row]:
+    """One group's path-free display join for on-demand lightbox navigation."""
+    return conn.execute(
+        """
+        SELECT g.id AS group_id, g.group_type, g.member_count,
+               gm.file_id, gm.is_keep, gm.decision, gm.reason,
+               f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
+               f.file_kind, fe.quality_score, fe.face_count,
+               t.status AS thumb_status, t.error AS thumb_error
+        FROM groups g
+        JOIN group_members gm ON gm.group_id = g.id
+        JOIN files f ON f.id = gm.file_id
+        LEFT JOIN features fe ON fe.file_id = gm.file_id
+        LEFT JOIN thumbnails t ON t.file_id = gm.file_id
+        WHERE g.id = ?
+        ORDER BY gm.is_keep DESC, gm.file_id
+        """,
+        (int(group_id),),
     ).fetchall()
 
 

@@ -101,6 +101,9 @@ def build_performance(
     total_seconds = round(sum(raw_seconds.values()), 3)
     files = int(inventory.get("files", 0) or 0)
     processed = int(features.get("processed", 0) or 0)
+    skipped_oversize = int(features.get("skipped_oversize", 0) or 0)
+    skipped_pixel = int(features.get("skipped_pixel_limit", 0) or 0)
+    skipped_aspect = int(features.get("skipped_aspect_ratio", 0) or 0)
     stage0_rate = _rate(files, raw_seconds["stage0"])
     stage1_rate = _rate(processed, raw_seconds["stage1"])
     scope = int(library_still_images if library_still_images is not None
@@ -123,6 +126,9 @@ def build_performance(
         "inventory_files": files,
         "inventory_still_images": scope,
         "stage1_processed": processed,
+        "stage1_skipped_oversize": skipped_oversize,
+        "stage1_skipped_pixel_limit": skipped_pixel,
+        "stage1_skipped_aspect_ratio": skipped_aspect,
         "stage0_files_per_second": stage0_rate,
         "stage1_images_per_second": stage1_rate,
         "eta_seconds": eta_seconds,
@@ -147,6 +153,9 @@ def render_lines(performance: Dict[str, Any], disk: Optional[Dict[str, Any]] = N
         f"({_fmt_rate(performance['stage0_files_per_second'], 'files/s')})",
         f"stage1 processed: {performance['stage1_processed']} images "
         f"({_fmt_rate(performance['stage1_images_per_second'], 'images/s')})",
+        f"stage1 skipped: {performance.get('stage1_skipped_oversize', 0)} images "
+        f"(PIXEL_LIMIT={performance.get('stage1_skipped_pixel_limit', 0)}, "
+        f"ASPECT_RATIO={performance.get('stage1_skipped_aspect_ratio', 0)})",
         f"discovered still images used for projection: "
         f"{performance['inventory_still_images']}",
     ]

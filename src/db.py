@@ -30,6 +30,7 @@ from .review_queries import (  # noqa: F401 (intentional re-export)
     build_all_view_index,
     count_groups,
     group_page,
+    group_page_by_id,
     replace_review_index,
     review_index_count,
     review_page,
@@ -317,7 +318,7 @@ def iter_files_for_features(
         LEFT JOIN thumbnails t ON t.file_id = f.id
         WHERE f.file_kind IN ({kind_placeholders})
           AND (
-            fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error')
+            fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error', 'skipped_oversize')
             {thumb_clause}
           )
         ORDER BY f.id

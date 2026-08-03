@@ -234,6 +234,13 @@ def run(
         "thumbnails": thumb_stats,
         "thumbnail_failures": thumb_failures,
         "page_sizes": [50, 100, 200],
+        "skipped_oversize": int(db.get_meta(conn, "stage1_skipped_oversize", "0") or 0),
+        "skipped_pixel_limit": int(
+            db.get_meta(conn, "stage1_skipped_pixel_limit", "0") or 0
+        ),
+        "skipped_aspect_ratio": int(
+            db.get_meta(conn, "stage1_skipped_aspect_ratio", "0") or 0
+        ),
     }
     with open(out_dir / "review_summary.json", "w", encoding="utf-8") as fh:
         json.dump(summary_payload, fh, ensure_ascii=False, indent=2)
@@ -253,6 +260,9 @@ def run(
         fh.write("decision reasons: " + json.dumps(stats.get("reasons", {}), ensure_ascii=False) + "\n")
         fh.write(f"reclaimable: {gb:.2f} GB ({data['total_delete_bytes']} bytes)\n")
         fh.write(f"ALL timeline entries: {view_counts['ALL']}\n")
+        fh.write(f"skipped oversize: {summary_payload['skipped_oversize']}\n")
+        fh.write(f"skipped pixel limit: {summary_payload['skipped_pixel_limit']}\n")
+        fh.write(f"skipped aspect ratio: {summary_payload['skipped_aspect_ratio']}\n")
         fh.write(
             f"thumbnails cached: {thumb_stats['recorded_ok']} "
             f"({thumb_stats['recorded_bytes'] / (1024 ** 3):.2f} GiB), "

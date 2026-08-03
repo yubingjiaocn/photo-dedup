@@ -25,6 +25,19 @@ from . import quality as Q
 EMBED_DIM = 768
 
 
+def _bounded_iqa_image(image: Image.Image, max_long_edge: int) -> tuple[Image.Image, float]:
+    """Aspect-preserving IQA input; never enlarge the source."""
+    width, height = image.size
+    longest = max(width, height)
+    if max_long_edge < 1:
+        raise ValueError("features.iqa_max_long_edge must be at least 1")
+    if longest <= max_long_edge:
+        return image, 1.0
+    scale = max_long_edge / longest
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS), scale
+
+
 # ===========================================================================
 # Backends
 # ===========================================================================
@@ -41,6 +54,9 @@ class StubBackend:
 
     name = "stub"
 
+    def __init__(self, iqa_max_long_edge: int = 1920) -> None:
+        self.iqa_max_long_edge = int(iqa_max_long_edge)
+
     def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
         out = np.zeros((len(images), EMBED_DIM), dtype=np.float32)
         for i, im in enumerate(images):
@@ -52,10 +68,12 @@ class StubBackend:
         return out
 
     def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
-        gray = np.asarray(image.convert("L"), dtype=np.float64)
+        bounded, scale = _bounded_iqa_image(image, self.iqa_max_long_edge)
+        gray = np.asarray(bounded.convert("L"), dtype=np.float32)
         sharp = Q.variance_of_laplacian(gray)
         score = 100.0 * Q.normalize_sharpness(sharp)
-        return score, {"sharpness": sharp, "clipiqa": None, "backend": "stub"}
+        return score, {"sharpness": sharp, "clipiqa": None, "backend": "stub",
+                       "iqa_input_size": list(bounded.size), "iqa_scale": scale}
 
     def faces(self, image: Image.Image) -> List[Dict[str, Any]]:
         arr = np.asarray(image.convert("RGB"), dtype=np.int16)
@@ -85,7 +103,9 @@ class TorchBackend:
         self.torch = torch
         self.cfg = cfg
         want_cuda = str(cfg.features.get("device", "cuda")) == "cuda"
-        self.device = "cuda" if (want_cuda and torch.cuda.is_available()) else "cpu"
+        if want_cuda and not torch.cuda.is_available():
+            raise RuntimeError("features.device=cuda but CUDA is unavailable; no CPU fallback")
+        self.device = "cuda" if want_cuda else "cpu"
 
         model_name = cfg.features.get("dinov2_model", "facebook/dinov2-base")
         self.processor = AutoImageProcessor.from_pretrained(model_name)
@@ -116,10 +136,15 @@ class TorchBackend:
     # -- quality ------------------------------------------------------------
     def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
         torch = self.torch
-        arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+        bounded, scale = _bounded_iqa_image(
+            image, int(self.cfg.features.get("iqa_max_long_edge", 1920))
+        )
+        arr = np.asarray(bounded.convert("RGB"), dtype=np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(self.device)
         score = 0.0
-        meta: Dict[str, Any] = {"backend": "torch"}
+        meta: Dict[str, Any] = {
+            "backend": "torch", "iqa_input_size": list(bounded.size), "iqa_scale": scale,
+        }
         if self.musiq is not None:
             score = float(self.musiq(tensor).item())  # MUSIQ ~0..100
         meta["musiq"] = score
@@ -183,7 +208,7 @@ def resolve_backend(cfg: Config, override: Optional[str] = None):
     """Pick a backend per config/override. auto -> torch if importable else stub."""
     choice = (override or cfg.features.get("backend", "auto")).lower()
     if choice == "stub":
-        return StubBackend()
+        return StubBackend(int(cfg.features.get("iqa_max_long_edge", 1920)))
     if choice == "torch":
         return TorchBackend(cfg)
     # auto
@@ -193,4 +218,4 @@ def resolve_backend(cfg: Config, override: Optional[str] = None):
         return TorchBackend(cfg)
     except ImportError as exc:
         print(f"[stage1] torch unavailable ({exc}); using stub backend.")
-        return StubBackend()
+        return StubBackend(int(cfg.features.get("iqa_max_long_edge", 1920)))

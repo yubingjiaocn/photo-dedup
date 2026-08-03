@@ -96,6 +96,11 @@ def test_render_html_declares_the_page_size_choices_and_all_view(tmp_path):
     assert 'data-view="MAYBE"' in page
     assert 'data-view="UNKNOWN"' in page
     assert 'data-view="GROUPS"' in page
+    assert "/api/original/" in page
+    assert "与组内 KEEP 对比" in page
+    assert "ArrowLeft" in page and "ArrowRight" in page
+    assert "/api/group/" in page
+    assert "leftImage.removeAttribute('src')" in page
     for size in (50, 100, 200):
         assert f'value="{size}"' in page
 

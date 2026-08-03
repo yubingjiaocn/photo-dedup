@@ -29,6 +29,24 @@ where the person clearly moved.
 
 ## 1. Features (stage 1)
 
+### Resource admission and bounded IQA
+- `max_process_megapixels: 64` is checked from inventory `width × height`
+  **before** full decode, hashing, thumbnail generation, or model/GPU calls.
+  `max_process_aspect_ratio: 3.0` applies the same exclusion when
+  `max(width/height, height/width)` is strictly greater than 3.0. Thus normal
+  16:9 and 21:9 photos, plus the exact 3:1 boundary, remain eligible while
+  extreme panoramas do not consume model work. Excluded stills are persisted
+  as `features.status='skipped_oversize'` with reason `PIXEL_LIMIT` or
+  `ASPECT_RATIO`; this also migrates formerly `done` rows out of Stage 2 and
+  review. MP4/MOV rows are not still candidates and are never decoded by Stage
+  1. The original is untouched.
+- `iqa_max_long_edge: 1920` resizes eligible IQA/sharpness input with preserved
+  aspect ratio and no upscaling. `quality_meta.iqa_input_size` and `iqa_scale`
+  record the exact scoring scale. Laplacian sharpness uses float32 rather than
+  full-resolution float64 working arrays.
+- A requested CUDA backend fails clearly when CUDA is unavailable; it does not
+  silently run expensive inference on CPU.
+
 ### pHash (perceptual hash), 64-bit
 - **What:** DCT-based hash of a 32×32 grayscale reduction (`imagehash.phash`,
   with a self-contained numpy-DCT fallback so the core has no scipy hard-dep).

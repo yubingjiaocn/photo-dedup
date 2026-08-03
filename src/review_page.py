@@ -58,10 +58,19 @@ button:disabled{opacity:.4}
 .keep{border-color:#4c9}.maybe{border-color:#fc3}.unknown{border-color:#999}
 .auto_remove{border-color:#c55}.ungrouped{border-color:#456}
 img{display:block;width:190px;height:160px;object-fit:contain;background:#000;border-radius:3px}
+.card img{cursor:zoom-in}.card button{font-size:11px;margin-top:5px;width:100%}
 .miss{width:190px;height:160px;background:#221c1c;color:#c88;font-size:12px;
  display:flex;align-items:center;justify-content:center;text-align:center;border-radius:3px}
 .cap{font-size:11px;color:#bbb;max-width:190px;word-break:break-word;margin-top:4px}
 .tag{font-weight:bold;color:#fc9}
+.lightbox{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.94);display:none;
+ flex-direction:column;padding:12px;box-sizing:border-box}.lightbox.open{display:flex}
+.viewerbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.viewerbar .title{flex:1;color:#ddd}.viewer{display:grid;grid-template-columns:1fr;gap:10px;
+ min-height:0;flex:1}.viewer.compare{grid-template-columns:1fr 1fr}
+.pane{min-width:0;min-height:0;display:flex;flex-direction:column;align-items:center}
+.pane img{width:100%;height:calc(100vh - 100px);object-fit:contain;background:#000;cursor:default}
+.pane .label{font-size:12px;color:#fc9;margin-bottom:4px}
 </style></head><body>
 <h1>照片去重 - 审阅</h1>
 <div class="notice" id="perf">PERFORMANCE_PANEL</div>
@@ -82,19 +91,30 @@ img{display:block;width:190px;height:160px;object-fit:contain;background:#000;bo
 </nav>
 <div class="stats" id="stats">SUMMARY_TEXT</div>
 <div class="row" id="content"></div>
+<div class="lightbox" id="lightbox">
+ <div class="viewerbar"><span class="title" id="viewerTitle"></span>
+  <button id="compare">与组内 KEEP 对比</button><button id="vprev">&lsaquo; 上一张</button>
+  <button id="vnext">下一张 &rsaquo;</button><button id="closeViewer">关闭 Esc</button></div>
+ <div class="viewer" id="viewer">
+  <div class="pane" id="leftPane"><div class="label" id="leftLabel"></div><img id="leftImage"></div>
+  <div class="pane" id="rightPane"><div class="label" id="rightLabel"></div><img id="rightImage"></div>
+ </div>
+</div>
 <script>
 const content=document.getElementById('content'),stats=document.getElementById('stats');
-let view='ALL',page=1,pages=1,size=100;
+let view='ALL',page=1,pages=1,size=100,loadGeneration=0;
+let visibleItems=[],groupMembers=new Map(),viewerItems=[],viewerIndex=0;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function tile(r){
  const cls=esc(String(r.decision||'ungrouped').toLowerCase());
  const img=r.thumb==='ok'
-  ?`<img loading="lazy" src="/api/thumb/${r.file_id}.jpg" onerror="this.outerHTML='<div class=miss>缩略图缺失<br>（不会回源读取机械盘）</div>'">`
+  ?`<img loading="lazy" src="/api/thumb/${r.file_id}.jpg" onclick="openViewer(${r.file_id})" title="点击按需从原图库加载高清大图" onerror="this.outerHTML='<div class=miss>缩略图缺失<br>（不会自动回源读取机械盘）</div>'">`
   :`<div class=miss>缩略图不可用<br>${esc(r.thumb_error||r.thumb||'未生成')}</div>`;
  return `<div class="card ${cls}">${img}<div class=cap><span class=tag>${esc(r.decision)}</span>`
   +`${r.is_keep?'（保留项）':''}<br>${esc(r.basename)}<br>${r.width||'?'}x${r.height||'?'}`
   +` &middot; 质量=${r.quality_score??'?'} &middot; 人脸=${r.face_count??'?'}<br>`
-  +`${esc(r.exif_datetime||'无拍摄时间')}<br>${esc(r.reason||'')}</div></div>`;
+  +`${esc(r.exif_datetime||'无拍摄时间')}<br>${esc(r.reason||'')}`
+  +`<button onclick="openViewer(${r.file_id})">查看高清大图</button></div></div>`;
 }
 function groupBlock(g){
  return `<div class=group><div class=tag>分组 #${g.group_id} [${esc(g.group_type)}] &middot; `
@@ -108,10 +128,13 @@ function setButtons(){
  document.getElementById('last').disabled=page>=pages;
 }
 async function load(){
+ const generation=++loadGeneration;
  try{
+  closeViewer();
   const r=await fetch(`/api/page?view=${view}&page=${page}&page_size=${size}`);
   if(!r.ok)throw new Error('HTTP '+r.status);
   const d=await r.json();
+  if(generation!==loadGeneration)return;
   if(d.error)throw new Error(d.error);
   page=d.page;pages=d.pages;
   document.getElementById('mode').textContent=
@@ -119,8 +142,12 @@ async function load(){
    +'本页面只读：不会移动、删除或修改任何原图。';
   stats.textContent=`${view}：共 ${d.total} 项 · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} 项`
    +` · 本页之后还剩 ${d.remaining_after_page} 项`;
+  groupMembers=new Map();
+  if(view==='GROUPS')d.items.forEach(g=>groupMembers.set(Number(g.group_id),g.members||[]));
+  visibleItems=view==='GROUPS'?d.items.flatMap(g=>g.members||[]):d.items;
   content.innerHTML=d.items.map(view==='GROUPS'?groupBlock:tile).join('')||'<div>本视图没有条目。</div>';
   const s=await (await fetch('/api/status')).json();
+  if(generation!==loadGeneration)return;
   stats.textContent+=` · 缩略图缓存 ${s.thumb_cache_files} 个文件 / `
    +`${(s.thumb_cache_bytes/1073741824).toFixed(2)} GiB`;
  }catch(e){
@@ -128,6 +155,35 @@ async function load(){
  }
  setButtons();
 }
+const lightbox=document.getElementById('lightbox'),viewer=document.getElementById('viewer');
+const leftImage=document.getElementById('leftImage'),rightImage=document.getElementById('rightImage');
+function showOne(r){
+ viewer.classList.remove('compare');document.getElementById('rightPane').style.display='none';
+ leftImage.src=`/api/original/${r.file_id}`;document.getElementById('leftLabel').textContent=`${r.decision} · ${r.basename}`;
+ document.getElementById('viewerTitle').textContent=`高清原图（按需读取 HDD） ${r.width||'?'}×${r.height||'?'}`;
+ const keeper=viewerItems.find(item=>item.is_keep);
+ document.getElementById('compare').style.display=viewerItems.length>1&&keeper&&Number(keeper.file_id)!==Number(r.file_id)?'inline-block':'none';
+}
+async function openViewer(id){
+ const chosen=visibleItems.find(r=>Number(r.file_id)===Number(id));if(!chosen)return;
+ viewerItems=groupMembers.get(Number(chosen.group_id))||[];
+ if(!viewerItems.length&&chosen.group_id!=null){try{const r=await fetch(`/api/group/${chosen.group_id}`);if(r.ok)viewerItems=(await r.json()).members||[]}catch(_e){viewerItems=[]}}
+ if(!viewerItems.length)viewerItems=[chosen];
+ viewerIndex=Math.max(0,viewerItems.findIndex(r=>Number(r.file_id)===Number(id)));
+ showOne(viewerItems[viewerIndex]);lightbox.classList.add('open');
+}
+function stepViewer(delta){if(!viewerItems.length)return;viewerIndex=(viewerIndex+delta+viewerItems.length)%viewerItems.length;showOne(viewerItems[viewerIndex])}
+document.getElementById('compare').onclick=()=>{
+ const selected=viewerItems[viewerIndex],keeper=viewerItems.find(r=>r.is_keep)||viewerItems[0];
+ viewer.classList.add('compare');document.getElementById('rightPane').style.display='flex';
+ leftImage.src=`/api/original/${keeper.file_id}`;rightImage.src=`/api/original/${selected.file_id}`;
+ document.getElementById('leftLabel').textContent=`KEEP · ${keeper.basename}`;
+ document.getElementById('rightLabel').textContent=`${selected.decision} · ${selected.basename}`;
+};
+document.getElementById('vprev').onclick=()=>stepViewer(-1);document.getElementById('vnext').onclick=()=>stepViewer(1);
+function closeViewer(){lightbox.classList.remove('open');leftImage.removeAttribute('src');rightImage.removeAttribute('src');viewerItems=[];viewerIndex=0}
+document.getElementById('closeViewer').onclick=closeViewer;
+document.addEventListener('keydown',e=>{if(!lightbox.classList.contains('open'))return;if(e.key==='Escape')closeViewer();else if(e.key==='ArrowLeft')stepViewer(-1);else if(e.key==='ArrowRight')stepViewer(1)});
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;page=1;load()});
 document.getElementById('prev').onclick=()=>{if(page>1){page--;load()}};
 document.getElementById('next').onclick=()=>{if(page<pages){page++;load()}};

@@ -39,6 +39,9 @@ _DEFAULTS: Dict[str, Any] = {
         "device": "cuda",
         "batch_size": 4,
         "max_inflight_megapixels": 80,
+        "max_process_megapixels": 64,
+        "max_process_aspect_ratio": 3.0,
+        "iqa_max_long_edge": 1920,
         "thumbnails": {
             "enabled": True,
             "max_px": 320,

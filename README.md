@@ -80,9 +80,14 @@ desktop with an NVIDIA RTX 5070 Ti (16 GB), 32 GB RAM, and a library of roughly
 **100,000+ JPEG / phone Motion-JPEG photos on a single mechanical HDD**.
 
 The HDD is the bottleneck, so the design is deliberately single-stream: one
-sequential read per photo, one decode per photo, and every derived artifact
+sequential read per eligible photo, one decode per eligible photo, and every derived artifact
 (hash, embedding, quality, faces, **and the review thumbnail**) comes from that
-same decode. Nothing in the review UI ever reads the HDD again.
+same decode. By default, stills above **64 MP** or with a long-to-short-edge
+ratio strictly above **3:1** are persistently marked `skipped_oversize` from
+Stage 0's width/height metadata before full decode or GPU work. Ordinary 16:9,
+21:9, and exactly 3:1 photos remain eligible; videos are never Stage-1
+candidates. Re-runs do not retry skipped files, and older completed rows are
+migrated out of clustering/review.
 
 It is **selectively automatic** — only byte-identical duplicates become
 `AUTO_REMOVE`; pHash-near duplicates, exposure extremes, and other boundary
@@ -179,6 +184,13 @@ Page size is 50, 100 (default), or 200. Pages come from SQLite with
 "thumbnail unavailable" tile with the recorded reason (also listed in
 `review_summary.json` and `summary.txt`) — it is never silently blank and never
 triggers a fallback read of the original.
+
+Normal browsing and pagination remain SSD-thumbnail-only. Clicking **查看高清大图**
+is the sole opt-in HDD read: the loopback server streams exactly that inventoried
+JPEG/PNG after validating its stored size and mtime. It never returns a source
+path. In GROUPS, the lightbox compares the keeper and selected candidate side by
+side (at most two originals) and Left/Right stays within that group; closing the
+lightbox releases both image URLs.
 
 The page is in Chinese; internal state names (`MAYBE`, `UNKNOWN`, `KEEP`,
 `AUTO_REMOVE`, group types) stay in English so they match the DB, the manifests,

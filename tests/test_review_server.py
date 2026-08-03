@@ -11,7 +11,7 @@ from urllib.request import urlopen
 import pytest
 from PIL import Image
 
-from src import db, review_server, thumbnails
+from src import db, motion_photo, review_server, thumbnails
 
 
 def _build_output(tmp_path: Path, count: int = 250, thumbs: bool = True,
@@ -28,10 +28,11 @@ def _build_output(tmp_path: Path, count: int = 250, thumbs: bool = True,
     file_ids = []
     for index in range(count):
         source = photos / f"IMG_2026{index:04d}.jpg"
-        source.write_bytes(b"pretend original bytes")
+        Image.new("RGB", (3, 2), (index % 255, 20, 30)).save(source, "JPEG")
+        source_stat = source.stat()
         file_id = db.insert_file(conn, {
-            "path": str(source), "basename": source.name, "size_bytes": 1234,
-            "mtime_ns": 10 + index,
+            "path": str(source), "basename": source.name, "size_bytes": source_stat.st_size,
+            "mtime_ns": source_stat.st_mtime_ns,
             "exif_datetime": f"2026-01-01 12:{index % 60:02d}:00",
             # Deliberately reversed timestamps so ALL ordering is observable.
             "exif_timestamp": 100000 - index,
@@ -48,7 +49,8 @@ def _build_output(tmp_path: Path, count: int = 250, thumbs: bool = True,
                 thumbnails.thumb_path(directory, file_id), "JPEG")
             db.batch_upsert_thumbnails(conn, [{
                 "file_id": file_id, "status": "ok", "max_px": 320, "bytes": 900,
-                "source_size_bytes": 1234, "source_mtime_ns": 10 + index,
+                "source_size_bytes": source_stat.st_size,
+                "source_mtime_ns": source_stat.st_mtime_ns,
                 "error": None, "created_at": 1,
             }])
 
@@ -153,6 +155,72 @@ def test_thumbnail_endpoint_has_no_source_fallback(tmp_path):
             urlopen(f"{base}/api/thumb/{file_id}.jpg")
         assert excinfo.value.code == 404
         assert not victim.exists()  # nothing regenerated it behind our back
+
+
+def test_original_endpoint_reads_one_source_only_after_explicit_request(tmp_path, monkeypatch):
+    output, photos = _build_output(tmp_path, 3)
+    originals = {str(p) for p in photos.iterdir()}
+    opened: list[str] = []
+    real_open = Path.open
+
+    def tracked_open(self, *args, **kwargs):
+        if str(self) in originals:
+            opened.append(str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    with _Served(output) as base:
+        page = _get(base, "/api/page?view=ALL&page_size=50")
+        assert opened == []
+        file_id = page["items"][0]["file_id"]
+        assert urlopen(f"{base}/api/original/{file_id}").read().startswith(b"\xff\xd8\xff")
+        assert len(opened) == 1
+        assert opened[0] in originals
+
+
+def test_original_endpoint_does_not_expose_arbitrary_paths(tmp_path):
+    output, _photos = _build_output(tmp_path, 2)
+    with _Served(output) as base:
+        for probe in ("/api/original/999999", "/api/original/../secret", "/api/original/abc"):
+            with pytest.raises(HTTPError) as excinfo:
+                urlopen(base + probe)
+            assert excinfo.value.code == 404
+
+
+def test_original_endpoint_serves_png_with_correct_type(tmp_path):
+    output, photos = _build_output(tmp_path, 1)
+    source = next(photos.iterdir())
+    Image.new("RGB", (4, 3), "navy").save(source, "PNG")
+    # ``jpg`` is the schema's generic still-image kind, including inventoried
+    # PNG files; prove the normal Stage 0 classification reaches this endpoint.
+    png_source = source.with_suffix(".png")
+    source.rename(png_source)
+    source = png_source
+    assert motion_photo.classify_file(source, [source])[0] == "jpg"
+    stat = source.stat()
+    conn = db.open_db(output / "inventory.sqlite")
+    conn.execute(
+        "UPDATE files SET path=?, basename=?, size_bytes=?, mtime_ns=?, file_kind='jpg'",
+        (str(source), source.name, stat.st_size, stat.st_mtime_ns),
+    )
+    file_id = conn.execute("SELECT id FROM files").fetchone()[0]
+    conn.commit()
+    conn.close()
+    with _Served(output) as base:
+        response = urlopen(f"{base}/api/original/{file_id}")
+        assert response.headers["Content-Type"] == "image/png"
+        assert response.read().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_original_endpoint_rejects_stale_inventory_identity(tmp_path):
+    output, photos = _build_output(tmp_path, 1)
+    source = next(photos.iterdir())
+    source.write_bytes(source.read_bytes() + b"changed")
+    with _Served(output) as base:
+        file_id = _get(base, "/api/page?view=ALL&page_size=50")["items"][0]["file_id"]
+        with pytest.raises(HTTPError) as excinfo:
+            urlopen(f"{base}/api/original/{file_id}")
+        assert excinfo.value.code == 409
 
 
 def test_paths_are_never_exposed_to_the_browser(tmp_path):
@@ -278,6 +346,17 @@ def test_queue_and_group_views_report_their_own_totals(tmp_path):
         assert status["counts"] == {"ALL": 250, "MAYBE": 120, "UNKNOWN": 20, "GROUPS": 5}
         assert status["page_sizes"] == [50, 100, 200]
         assert status["thumb_cache_files"] == 250
+
+
+def test_group_endpoint_supports_lightbox_compare_without_paths(tmp_path):
+    output, photos = _build_output(tmp_path, 4, groups=1)
+    with _Served(output) as base:
+        group = _get(base, "/api/group/1")
+        assert len(group["members"]) == 2
+        assert group["members"][0]["is_keep"] is True
+        blob = json.dumps(group)
+        assert "path" not in group["members"][0]
+        assert all(str(photo) not in blob for photo in photos.iterdir())
 
 
 def test_missing_thumbnail_status_is_surfaced_to_the_ui(tmp_path):
