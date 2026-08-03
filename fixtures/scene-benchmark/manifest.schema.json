@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Photo Dedup scene benchmark fixture manifest",
+  "type": "object",
+  "required": ["schema_version", "fixtures"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "fixtures": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "required": ["id", "file", "buckets"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9_-]+$"},
+          "file": {"type": "string", "pattern": "^synthetic/[a-z0-9_-]+\\.png$"},
+          "buckets": {"type": "array", "minItems": 1, "items": {"enum": ["closeup_face", "closed_or_wink_or_smile_eye", "heavy_makeup_or_masked_cosplay", "multiple_subjects", "background_tourists", "poster_or_screen", "doll_or_mascot", "food", "still_life", "fireworks", "motion_photo"]}},
+          "notes": {"type": "string"}
+        }, "additionalProperties": false}
+    }
+  }, "additionalProperties": false
+}

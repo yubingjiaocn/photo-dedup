@@ -44,6 +44,14 @@ No GPU / just trying it out? `setup_windows.bat` falls back to CPU wheels, and
 you can also run everything with the built-in **stub** backend
 (`features.backend: stub` in `config.yaml`) — deterministic, no models.
 
+## Before a real GPU run: offline benchmark
+
+Use the opt-in harness in [docs/WINDOWS_BENCHMARK.md](docs/WINDOWS_BENCHMARK.md)
+on a small directory you deliberately selected, or on its checked-in synthetic
+fixtures. It never scans `paths.root`, downloads a model, writes pipeline
+manifests, changes decisions, or moves/deletes photos. It reports decode,
+local SigLIP-provider, and Stage 1 timings with CUDA peak memory when available.
+
 ---
 
 ## Where to put things (SSD vs HDD)

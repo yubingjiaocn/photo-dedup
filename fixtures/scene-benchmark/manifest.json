@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {"id":"closeup-face","file":"synthetic/closeup-face.png","buckets":["closeup_face"],"notes":"Abstract colored geometry only; not a person."},
+    {"id":"eyes-expression","file":"synthetic/eyes-expression.png","buckets":["closed_or_wink_or_smile_eye"],"notes":"Placeholder for eye-state calibration; no biometric claim."},
+    {"id":"cosplay-mask","file":"synthetic/cosplay-mask.png","buckets":["heavy_makeup_or_masked_cosplay"],"notes":"Must remain conservative/abstain."},
+    {"id":"crowd","file":"synthetic/crowd.png","buckets":["multiple_subjects","background_tourists"],"notes":"Multiple abstract circles."},
+    {"id":"screen","file":"synthetic/screen.png","buckets":["poster_or_screen"],"notes":"Synthetic display rectangle."},
+    {"id":"mascot","file":"synthetic/mascot.png","buckets":["doll_or_mascot"],"notes":"Synthetic nonhuman figure."},
+    {"id":"food-still","file":"synthetic/food-still.png","buckets":["food","still_life"],"notes":"Synthetic bowl and objects."},
+    {"id":"fireworks","file":"synthetic/fireworks.png","buckets":["fireworks"],"notes":"Synthetic night burst."},
+    {"id":"motion-photo","file":"synthetic/motion-photo.png","buckets":["motion_photo"],"notes":"Metadata-only placeholder; no sidecar is included."}
+  ]
+}
