@@ -41,12 +41,15 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not execute")),
     )
 
-    result = run_pipeline.run(str(root), str(output), backend="stub", limit=2)
+    result = run_pipeline.run(
+        str(root), str(output), backend="stub", limit=2, review_limit=37
+    )
 
     assert [call[0] for call in calls] == ["stage0", "stage1", "stage2", "stage3"]
     assert calls[0][1]["limit"] == 2
     assert calls[1][1]["limit"] == 2
     assert calls[1][1]["backend_override"] == "stub"
+    assert calls[3][1]["review_limit"] == 37
     assert all(call[2]["paths"]["output_dir"] == str(output.resolve()) for call in calls)
     assert all(call[2]["paths"]["db"] == str(output.resolve() / "inventory.sqlite") for call in calls)
     assert result["review_html"] == str(output.resolve() / "review.html")
@@ -104,3 +107,24 @@ def test_main_serves_only_after_pipeline_and_honors_no_open(tmp_path, monkeypatc
     )
     assert status == 0
     assert calls == ["pipeline", ("serve", output, 8765, False)]
+
+
+def test_main_passes_review_limit(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "output"
+    received = {}
+
+    def fake_run(*args, **kwargs):
+        received.update(kwargs)
+        return {"report": {"output_dir": str(output)}}
+
+    monkeypatch.setattr(run_pipeline, "run", fake_run)
+    status = run_pipeline.main(
+        [
+            "--root", str(root), "--output", str(output),
+            "--review-limit", "23", "--no-serve",
+        ]
+    )
+    assert status == 0
+    assert received["review_limit"] == 23

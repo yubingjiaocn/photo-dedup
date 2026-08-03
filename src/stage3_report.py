@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional
 from .config import load_config
 from . import db
 
+DEFAULT_REVIEW_LIMIT = 1000
+
 
 # --- thumbnails ------------------------------------------------------------
 
@@ -38,6 +40,8 @@ def thumb_data_uri(path: str, max_px: int = 200) -> Optional[str]:
         from PIL import Image
 
         with Image.open(path) as img:
+            if img.format == "JPEG":
+                img.draft("RGB", (max_px, max_px))
             img = img.convert("RGB")
             img.thumbnail((max_px, max_px))
             buf = io.BytesIO()
@@ -216,7 +220,11 @@ def _img_block(rec: Dict[str, Any], max_px: int, is_keep: bool, thumbs: bool = T
     return f'<div class="{cls}">{img}<div class="cap">{cap}</div></div>'
 
 
-def render_html(data: Dict[str, Any], thumbs: bool = True) -> str:
+def render_html(
+    data: Dict[str, Any], thumbs: bool = True, review_limit: int = DEFAULT_REVIEW_LIMIT
+) -> str:
+    if review_limit < 1:
+        raise ValueError("review_limit must be at least 1")
     parts = [_HTML_HEAD]
     n_groups = len(data["groups"])
     gb = data["total_delete_bytes"] / (1024 ** 3)
@@ -238,9 +246,16 @@ def render_html(data: Dict[str, Any], thumbs: bool = True) -> str:
             parts.append(_img_block(d, 150, False, thumbs))
         parts.append("</div></div>")
     for state in ("MAYBE", "UNKNOWN"):
-        parts.append(f'<h1>{state} review queue ({len(data["queues"][state])})</h1>')
+        queue = data["queues"][state]
+        shown = queue[:review_limit]
+        omitted = len(queue) - len(shown)
+        parts.append(
+            f'<h1>{state} review queue</h1>'
+            f'<div class="stats">total: {len(queue)} &middot; shown: {len(shown)} '
+            f'&middot; omitted: {omitted}</div>'
+        )
         parts.append('<div class="row">')
-        for rec in data["queues"][state]:
+        for rec in shown:
             parts.append(_img_block(rec, 150, False, thumbs))
         parts.append('</div>')
     parts.append("</body></html>")
@@ -249,7 +264,13 @@ def render_html(data: Dict[str, Any], thumbs: bool = True) -> str:
 
 # --- orchestration ---------------------------------------------------------
 
-def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str, Any]:
+def run(
+    config_path: Optional[str] = None,
+    no_thumbs: bool = False,
+    review_limit: int = DEFAULT_REVIEW_LIMIT,
+) -> Dict[str, Any]:
+    if review_limit < 1:
+        raise ValueError("review_limit must be at least 1")
     cfg = load_config(config_path)
     conn = db.open_db(cfg.db_path)
     out_dir = cfg.output_dir
@@ -282,7 +303,7 @@ def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str,
 
     # review.html (base64 thumbnails inline unless --no-thumbs)
     review = out_dir / "review.html"
-    html_str = render_html(data, thumbs=not no_thumbs)
+    html_str = render_html(data, thumbs=not no_thumbs, review_limit=review_limit)
     with open(review, "w", encoding="utf-8") as fh:
         fh.write(html_str)
 
@@ -323,8 +344,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 3: review report + delete lists")
     ap.add_argument("--config", default=None)
     ap.add_argument("--no-thumbs", action="store_true", help="skip base64 thumbnails")
+    ap.add_argument(
+        "--review-limit", type=int, default=DEFAULT_REVIEW_LIMIT,
+        help="maximum thumbnails shown in each MAYBE/UNKNOWN queue (default: 1000)",
+    )
     args = ap.parse_args(argv)
-    run(config_path=args.config, no_thumbs=args.no_thumbs)
+    run(config_path=args.config, no_thumbs=args.no_thumbs, review_limit=args.review_limit)
     return 0
 
 

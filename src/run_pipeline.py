@@ -59,7 +59,13 @@ def _runtime_config(root: Path, output: Path, backend: str) -> dict[str, Any]:
     return data
 
 
-def run(root: str, output: str, backend: str = "torch", limit: int | None = None) -> dict[str, Any]:
+def run(
+    root: str,
+    output: str,
+    backend: str = "torch",
+    limit: int | None = None,
+    review_limit: int = stage3_report.DEFAULT_REVIEW_LIMIT,
+) -> dict[str, Any]:
     """Run inventory -> features -> cluster -> report. Never executes deletion."""
     root_path = Path(root).expanduser().resolve()
     output_path = Path(output).expanduser().resolve()
@@ -67,6 +73,8 @@ def run(root: str, output: str, backend: str = "torch", limit: int | None = None
         raise FileNotFoundError(f"photo root is not a directory: {root_path}")
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
+    if review_limit < 1:
+        raise ValueError("review_limit must be at least 1")
     output_path.mkdir(parents=True, exist_ok=True)
 
     config = _runtime_config(root_path, output_path, backend)
@@ -83,7 +91,7 @@ def run(root: str, output: str, backend: str = "torch", limit: int | None = None
         print("[pipeline] stage 2/4: cluster")
         clusters = stage2_cluster.run(config_path=str(config_path))
         print("[pipeline] stage 3/4: build review")
-        report = stage3_report.run(config_path=str(config_path))
+        report = stage3_report.run(config_path=str(config_path), review_limit=review_limit)
 
     review = output_path / "review.html"
     result = {
@@ -114,6 +122,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", required=True, help="directory for DB and review files")
     parser.add_argument("--backend", choices=("torch", "stub"), default="torch")
     parser.add_argument("--limit", type=int, default=None, help="scan/process at most N files")
+    parser.add_argument(
+        "--review-limit", type=int, default=stage3_report.DEFAULT_REVIEW_LIMIT,
+        help="maximum thumbnails shown in each MAYBE/UNKNOWN queue (default: 1000)",
+    )
     parser.add_argument("--port", type=int, default=0, help="local review port (default: automatic)")
     parser.add_argument(
         "--serve", action=argparse.BooleanOptionalAction, default=True,
@@ -122,7 +134,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
     try:
-        result = run(args.root, args.output, backend=args.backend, limit=args.limit)
+        result = run(
+            args.root, args.output, backend=args.backend, limit=args.limit,
+            review_limit=args.review_limit,
+        )
         if args.serve:
             serve_review(Path(result["report"]["output_dir"]), args.port, not args.no_open)
     except (OSError, RuntimeError, ValueError) as exc:
