@@ -11,7 +11,7 @@ never moves or deletes a photo**.
    Windows wheel is not available yet:
 
    ```bat
-   setup_windows.bat
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup_windows.ps1
    .venv\Scripts\activate
    ```
 
@@ -116,9 +116,13 @@ resolution — see `docs/ALGORITHM.md §4`.
 1. Install **Python 3.12** (recommended; setup accepts 3.11+) and a current
    **NVIDIA driver** (the CUDA 12.8 runtime ships with the PyTorch wheels — no
    separate CUDA toolkit needed).
-2. Double-click **`setup_windows.bat`**. It creates `.venv`, installs the
+2. Run **`setup_windows.ps1`** from PowerShell. It creates `.venv`, installs the
    CUDA PyTorch wheels, then the rest of `requirements.txt`, and prints whether
-   your GPU is visible. Re-runnable.
+   your GPU is visible. Re-runnable:
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup_windows.ps1
+   ```
 
 No GPU / just trying it out? `setup_windows.bat` falls back to CPU wheels, and
 you can also run everything with the built-in **stub** backend
