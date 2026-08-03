@@ -1,0 +1,112 @@
+bank_version: 1
+model_family: siglip
+prompt_template_notes: >-
+  Fixed English prompts only. Prompt text and order are versioned bank data;
+  callers must supply externally computed finite raw scores for every listed
+  prompt and the generic null prompt. Never generate prompts from photo data.
+generic_null_prompt: an ordinary photo not described by the candidate labels
+tags:
+  INDOOR:
+    namespace: scene_context
+    exclusive_cluster: indoor_outdoor_context
+    positive_prompts:
+      - a photograph taken indoors
+      - an indoor room or interior scene
+      - the main setting is inside a building
+    hard_negative_prompts:
+      - an outdoor photograph in open air
+      - an exterior street or natural outdoor scene
+  OUTDOOR:
+    namespace: scene_context
+    exclusive_cluster: indoor_outdoor_context
+    positive_prompts:
+      - a photograph taken outdoors
+      - an outdoor scene in open air
+      - the main setting is outside a building
+    hard_negative_prompts:
+      - an indoor room or interior photograph
+      - a scene inside a building
+  NIGHT_LOW_LIGHT:
+    namespace: scene_context
+    positive_prompts:
+      - a photograph taken at night in low light
+      - a dimly lit nighttime scene
+      - the main scene is dark or low light
+    hard_negative_prompts:
+      - a brightly lit daytime photograph
+      - a well lit scene in daylight
+  FIREWORKS:
+    namespace: scene_context
+    positive_prompts:
+      - fireworks exploding in the night sky
+      - a photograph of a fireworks display
+      - bright fireworks are the prominent subject
+    hard_negative_prompts:
+      - city lights at night without fireworks
+      - illuminated buildings and street lights at night
+  LANDSCAPE_CITYSCAPE:
+    namespace: scene_context
+    positive_prompts:
+      - a wide landscape or cityscape photograph
+      - a scenic view of land, skyline, or city
+      - the prominent subject is a landscape or cityscape
+    hard_negative_prompts:
+      - a close portrait of one person
+      - a close photograph of food or an object
+  REAL_PERSON_SUBJECT:
+    namespace: subject_protection
+    exclusive_cluster: person_nonhuman_subject
+    positive_prompts:
+      - a real living person is the main subject
+      - a photograph whose prominent subject is a real human person
+      - the main subject is a person, not an image or object
+    hard_negative_prompts:
+      - a printed photograph, poster, or screen showing a person
+      - a doll, mannequin, statue, or fictional character that looks human
+  COSTUME_MASKED_PERSON:
+    namespace: subject_protection
+    exclusive_cluster: person_nonhuman_subject
+    positive_prompts:
+      - a real person wearing a costume or mask is the main subject
+      - a photograph of a costumed or masked human person
+      - the prominent subject is a living person in cosplay or disguise
+    hard_negative_prompts:
+      - a mascot costume with no visible human person
+      - a statue, mannequin, doll, or fictional character in costume
+  NONHUMAN_CHARACTER_DOLL_STATUE:
+    namespace: subject_protection
+    exclusive_cluster: person_nonhuman_subject
+    positive_prompts:
+      - a doll, statue, mannequin, or nonhuman character is the main subject
+      - the prominent subject is a toy, figurine, mascot, or sculpture
+      - a fictional or nonliving character is the main subject
+    hard_negative_prompts:
+      - a real living person as the main subject
+      - a costumed or masked human person as the main subject
+  FOOD_STILL_LIFE:
+    namespace: subject_protection
+    positive_prompts:
+      - food or a still life is the main subject
+      - a close photograph of a meal, dish, or ingredients
+      - the prominent subject is food or arranged objects
+    hard_negative_prompts:
+      - people dining in a restaurant as the main subject
+      - a restaurant interior with people and social context
+  DOCUMENT_SCREENSHOT:
+    namespace: subject_protection
+    positive_prompts:
+      - a document, receipt, or screenshot is the main subject
+      - a photograph of text, a form, or a screen interface
+      - the prominent subject is a document or digital screen
+    hard_negative_prompts:
+      - a natural scene photographed by a camera
+      - a real person as the main subject
+  NO_DOMINANT_SUBJECT:
+    namespace: subject_protection
+    positive_prompts:
+      - a photo with no single dominant subject
+      - a busy scene without one prominent subject
+      - many unrelated elements share attention equally
+    hard_negative_prompts:
+      - a clear portrait with one main person
+      - a close photograph with one obvious main object

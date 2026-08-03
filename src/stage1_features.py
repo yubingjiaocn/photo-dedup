@@ -42,6 +42,7 @@ from . import quality as Q
 from . import exposure
 from . import decision
 from . import eye_detection
+from .scene_router import DecodeState, RoutingInput, SceneRouter
 
 try:  # progress bar is optional
     from tqdm import tqdm
@@ -248,8 +249,15 @@ def _process_batch(
     rows: Sequence[Any],
     cfg: Config,
     eye_detector: Any = None,
+    scene_router: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Compute features for one batch of file rows. Returns feature dicts."""
+    """Compute features for one batch of file rows. Returns feature dicts.
+
+    The router is constructed at batch scope when the caller did not retain a
+    run-scoped instance.  It receives the same decoded RGB ``Image`` used by
+    embeddings and technical detectors; it never opens the source path.
+    """
+    router = scene_router if scene_router is not None else SceneRouter(cfg, provider=None)
     images: List[Image.Image] = []
     hashes: List[str] = []
     valid_rows: List[Any] = []
@@ -263,7 +271,10 @@ def _process_batch(
             valid_rows.append(row)
         except Exception as exc:  # unreadable / corrupt file
             print(f"[stage1][WARN] cannot read {row['path']}: {exc}")
-            out_rows.append(_error_feature_row(int(row["id"])))
+            routing = router.route(RoutingInput(
+                metadata=_routing_metadata(row), decode_state=DecodeState.FAILED
+            ))
+            out_rows.append(_error_feature_row(int(row["id"]), routing=routing))
 
     if not valid_rows:
         return out_rows
@@ -289,6 +300,12 @@ def _process_batch(
                 meta["eye_detection"] = eye_detection.unavailable_result(
                     "DETECTOR_INFERENCE_FAILED"
                 )
+        # Shadow-only, additive metadata.  The provider is intentionally None
+        # until SigLIP is implemented; SceneRouter then emits MODEL_UNAVAILABLE
+        # without model loading, downloads, or network access.
+        meta["routing"] = router.route(RoutingInput(
+            metadata=_routing_metadata(row), image=image
+        ))
         out_rows.append(
             {
                 "file_id": int(row["id"]),
@@ -305,14 +322,34 @@ def _process_batch(
     return out_rows
 
 
-def _error_feature_row(file_id: int) -> Dict[str, Any]:
+def _routing_metadata(row: Any) -> Dict[str, Any]:
+    """Extract only present inventory fields needed by the metadata gate.
+
+    ``sqlite3.Row`` supports subscription and ``keys()`` but not ``get``;
+    tests and callers may use ordinary mappings.  Keeping this adapter narrow
+    avoids adding invented values to routing metadata or changing DB schema.
+    """
+    fields = (
+        "file_kind", "motion_partner_id", "motion_photo", "is_motion_photo",
+        "motion_partner_path", "paired_asset_id",
+    )
+    if isinstance(row, dict):
+        return {field: row[field] for field in fields if field in row}
+    keys = row.keys() if hasattr(row, "keys") else ()
+    return {field: row[field] for field in fields if field in keys}
+
+
+def _error_feature_row(file_id: int, routing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    quality_meta: Dict[str, Any] = {"error": True}
+    if routing is not None:
+        quality_meta["routing"] = routing
     return {
         "file_id": file_id,
         "phash": None,
         "content_sha256": None,
         "dinov2_embedding": None,
         "quality_score": None,
-        "quality_meta": json.dumps({"error": True}),
+        "quality_meta": json.dumps(quality_meta),
         "face_count": 0,
         "faces_json": "[]",
         "status": "done_error",
@@ -331,6 +368,9 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
         if eye_cfg.get("enabled", False)
         else None
     )
+    # Construct once per Stage 1 run.  The current provider is deliberately
+    # absent, so enabled shadow routing records MODEL_UNAVAILABLE safely.
+    scene_router = SceneRouter(cfg, provider=None)
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
@@ -346,7 +386,9 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     t0 = time.time()
     batches = _guarded_batches(pending, batch_size, max_pixels)
     for batch in tqdm(batches, desc="features", unit="batch"):
-        feature_rows = _process_batch(backend, batch, cfg, eye_detector=eye_detector)
+        feature_rows = _process_batch(
+            backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router
+        )
         db.batch_insert_features(conn, feature_rows)
         done += len(feature_rows)
         since_commit += len(feature_rows)

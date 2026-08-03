@@ -51,6 +51,11 @@ features:
     model_path: "face_landmarker.task"  # local under models_dir; no auto-download
     model_sha256: "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
     max_faces: 10
+  scene_routing:
+    enabled: false              # metadata-only shadow router; no model is loaded yet
+    mode: "shadow"              # only supported mode; never affects decisions
+    model: {}                   # reserved for future local SigLIP configuration
+    prompt: {}                  # reserved for future fixed prompt-bank configuration
   yunet_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 cluster:

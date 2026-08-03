@@ -68,6 +68,30 @@ def test_exact_duplicate_auto_remove():
     assert result["members"][1]["decision"] == "AUTO_REMOVE"
 
 
+def test_shadow_routing_metadata_is_invisible_to_p0_decisions():
+    members = [_member(score=80), _member(score=20)]
+    baseline = decision.decide_group(
+        members, 0, {0: .8, 1: .2}, "exact_dup", phash_distances={0: 0, 1: 0},
+        safe_duplicates={0: True, 1: True},
+    )
+    routed = []
+    for index, member in enumerate(members):
+        copy = dict(member)
+        meta = json.loads(copy["quality_meta"])
+        meta["routing"] = {
+            "schema_version": 1,
+            "scene_context": {"state": "UNKNOWN", "tags": [], "reasons": [f"shadow-{index}"]},
+        }
+        copy["quality_meta"] = json.dumps(meta)
+        routed.append(copy)
+    after = decision.decide_group(
+        routed, 0, {0: .8, 1: .2}, "exact_dup", phash_distances={0: 0, 1: 0},
+        safe_duplicates={0: True, 1: True},
+    )
+    assert after == baseline
+    assert [item["decision"] for item in after["members"].values()] == ["KEEP", "AUTO_REMOVE"]
+
+
 def test_phash_near_duplicate_never_auto_without_byte_identity():
     members = [_member(score=80), _member(score=20)]
     result = decision.decide_group(

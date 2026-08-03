@@ -53,6 +53,14 @@ _DEFAULTS: Dict[str, Any] = {
             "model_sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
             "max_faces": 10,
         },
+        "scene_routing": {
+            "enabled": False,
+            "mode": "shadow",
+            # Reserved for the future SigLIP prompt-bank integration.  The
+            # router skeleton never loads or downloads a model.
+            "model": {},
+            "prompt": {},
+        },
         "yunet_url": (
             "https://github.com/opencv/opencv_zoo/raw/main/models/"
             "face_detection_yunet/face_detection_yunet_2023mar.onnx"
