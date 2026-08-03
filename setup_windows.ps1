@@ -21,14 +21,6 @@ function Test-PythonCandidate([string]$Exe, [string[]]$Prefix) {
     }
 }
 
-function Invoke-SelectedPython([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments) {
-    $Prefix = $script:PythonPrefix
-    & $script:PythonExe @Prefix @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python command failed with exit code $LASTEXITCODE"
-    }
-}
-
 Write-Step "[1/5] Checking Python"
 $script:PythonExe = $null
 $script:PythonPrefix = @()
@@ -65,7 +57,10 @@ if ($VersionText -match "Python 3\.14") {
 
 Write-Step "[2/5] Creating virtual environment (.venv)"
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
-    Invoke-SelectedPython @("-m", "venv", ".venv")
+    # Invoke the native command directly. Passing these through a PowerShell
+    # helper caused -m's remaining tokens to be collapsed into " venv .venv".
+    & $PythonExe @PythonPrefix -m venv .venv
+    if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed" }
 }
 else {
     Write-Host ".venv already exists; reusing it."
