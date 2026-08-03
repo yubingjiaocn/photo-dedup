@@ -52,10 +52,21 @@ features:
     model_sha256: "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
     max_faces: 10
   scene_routing:
-    enabled: false              # metadata-only shadow router; no model is loaded yet
+    enabled: false              # opt-in local-only SigLIP shadow provider
     mode: "shadow"              # only supported mode; never affects decisions
-    model: {}                   # reserved for future local SigLIP configuration
-    prompt: {}                  # reserved for future fixed prompt-bank configuration
+    # All identity fields are mandatory when enabled. Relative paths resolve
+    # beside this config file. URLs/model IDs and implicit downloads are rejected.
+    model:
+      path: "./models/siglip-base-patch16-224"
+      revision: "REPLACE_WITH_EXPLICIT_LOCAL_REVISION"
+      sha256: "REPLACE_WITH_64_HEX_DIRECTORY_HASH"
+    prompt:
+      path: "./research/siglip_prompt_bank_v1.yaml"
+      sha256: "REPLACE_WITH_64_HEX_FILE_HASH"
+    runtime:
+      device: "cuda"            # cuda | cpu; RTX 5070 Ti target
+      precision: "float16"      # CUDA: float16/bfloat16/float32; CPU: float32
+      batch_size: 16             # prompt chunk size; OOM fails closed, no fallback
   yunet_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 cluster:

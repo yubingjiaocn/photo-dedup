@@ -75,6 +75,7 @@ def prompt_bank_hash(path: str | Path) -> str:
 def build_shadow_routing_record(
     bank: Mapping[str, Any], raw_scores: Mapping[str, Mapping[str, float]], *,
     model_name: str, model_revision: str,
+    model_audit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Record complete external raw scores as a fail-closed routing record.
 
@@ -92,6 +93,11 @@ def build_shadow_routing_record(
         "prompt_bank_hash": getattr(bank, "file_hash", None) or _hash_bank_object(normalized_bank),
         "shadow_prompt_audit": audit,
     }
+    if model_audit is not None:
+        extra = _mapping(model_audit, "model_audit")
+        if set(extra) & set(model):
+            raise ValueError("model_audit must not override recorder-owned fields")
+        model.update(extra)
     record = safe_default_record(reasons=[ReasonCode.OUT_OF_CALIBRATION_DOMAIN], model=model)
     return validate_routing_record(record)
 

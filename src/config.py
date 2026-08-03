@@ -56,10 +56,9 @@ _DEFAULTS: Dict[str, Any] = {
         "scene_routing": {
             "enabled": False,
             "mode": "shadow",
-            # Reserved for the future SigLIP prompt-bank integration.  The
-            # router skeleton never loads or downloads a model.
             "model": {},
             "prompt": {},
+            "runtime": {},
         },
         "yunet_url": (
             "https://github.com/opencv/opencv_zoo/raw/main/models/"

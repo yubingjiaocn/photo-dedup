@@ -257,7 +257,7 @@ def _process_batch(
     run-scoped instance.  It receives the same decoded RGB ``Image`` used by
     embeddings and technical detectors; it never opens the source path.
     """
-    router = scene_router if scene_router is not None else SceneRouter(cfg, provider=None)
+    router = scene_router if scene_router is not None else _build_scene_router(cfg)
     images: List[Image.Image] = []
     hashes: List[str] = []
     valid_rows: List[Any] = []
@@ -322,6 +322,20 @@ def _process_batch(
     return out_rows
 
 
+def _build_scene_router(cfg: Config, provider: Any = None) -> SceneRouter:
+    """Construct the optional offline provider only when explicitly enabled."""
+    scene_cfg = cfg.features.get("scene_routing", {})
+    if provider is None and isinstance(scene_cfg, dict) and scene_cfg.get("enabled") is True:
+        try:
+            from .siglip_runtime import build_siglip_provider
+
+            provider = build_siglip_provider(cfg)
+        except Exception:
+            # Missing dependencies, artifacts, hashes, or CUDA all fail closed.
+            provider = None
+    return SceneRouter(cfg, provider=provider)
+
+
 def _routing_metadata(row: Any) -> Dict[str, Any]:
     """Extract only present inventory fields needed by the metadata gate.
 
@@ -368,9 +382,9 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
         if eye_cfg.get("enabled", False)
         else None
     )
-    # Construct once per Stage 1 run.  The current provider is deliberately
-    # absent, so enabled shadow routing records MODEL_UNAVAILABLE safely.
-    scene_router = SceneRouter(cfg, provider=None)
+    # Construct once per Stage 1 run. Local runtime failures remain a
+    # MODEL_UNAVAILABLE shadow record and never interrupt existing features.
+    scene_router = _build_scene_router(cfg)
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
