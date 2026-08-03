@@ -1,5 +1,42 @@
 # Photo Dedup
 
+## 5-minute Quick Start (Windows)
+
+This first run only creates a review page. It **never calls `execute_local` and
+never moves or deletes a photo**.
+
+1. Install Python 3.11+ (*Add Python to PATH*), open Command Prompt in this
+   folder, then set up the environment:
+
+   ```bat
+   setup_windows.bat
+   .venv\Scripts\activate
+   ```
+
+2. Smoke-test 20 photos with the lightweight backend (no GPU/models needed):
+
+   ```bat
+   python -m src.run_pipeline --root "D:\Photos" --output "D:\photo-review-smoke" --backend stub --limit 20
+   ```
+
+3. Run the real local models. Start with a limit; omit `--limit` when ready for
+   the whole library:
+
+   ```bat
+   python -m src.run_pipeline --root "D:\Photos" --output "D:\photo-review" --backend torch --limit 100
+   ```
+
+4. The command prints final statistics and the exact review path. Open it:
+
+   ```bat
+   start "" "D:\photo-review\review.html"
+   ```
+
+The command stores its resumable `inventory.sqlite` beside the review output
+and uses a temporary runtime config, so it does not edit `config.yaml`. If a
+run fails, the final `[pipeline][ERROR]` line states the cause. Stub results are
+for checking the workflow; use `torch` before making real review decisions.
+
 Automatically de-duplicate a large local photo library (JPEG + motion photos +
 video), then trash the same photos in Google Photos. Built for a Windows
 desktop with an NVIDIA RTX 5070 Ti (16 GB) and photos on an HDD.

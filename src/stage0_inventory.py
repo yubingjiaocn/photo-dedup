@@ -128,7 +128,11 @@ def _wanted(path: Path, extensions: set[str]) -> bool:
     return path.suffix.lower() in extensions
 
 
-def run(config_path: Optional[str] = None, root_override: Optional[str] = None) -> Dict[str, int]:
+def run(
+    config_path: Optional[str] = None,
+    root_override: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, int]:
     """Run stage 0. Returns stats dict."""
     cfg = load_config(config_path)
     root = Path(root_override) if root_override else cfg.root_path
@@ -146,9 +150,13 @@ def run(config_path: Optional[str] = None, root_override: Optional[str] = None) 
 
     # partner_links: (file_path, partner_path) collected per directory
     for dirpath, _dirs, filenames in tqdm(os.walk(root, followlinks=follow), desc="inventory", unit="dir"):
+        if limit is not None and inserted >= limit:
+            break
         dir_path = Path(dirpath)
         all_entries = [dir_path / name for name in filenames]
-        wanted = [p for p in all_entries if _wanted(p, extensions)]
+        wanted = sorted(p for p in all_entries if _wanted(p, extensions))
+        if limit is not None:
+            wanted = wanted[: limit - inserted]
         if not wanted:
             continue
 
@@ -198,8 +206,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 0: filesystem inventory")
     ap.add_argument("--config", default=None)
     ap.add_argument("--root", default=None, help="override paths.root")
+    ap.add_argument("--limit", type=int, default=None, help="inventory at most N files")
     args = ap.parse_args(argv)
-    run(config_path=args.config, root_override=args.root)
+    if args.limit is not None and args.limit < 1:
+        ap.error("--limit must be at least 1")
+    run(config_path=args.config, root_override=args.root, limit=args.limit)
     return 0
 
 
