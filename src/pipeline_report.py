@@ -107,12 +107,15 @@ def build_performance(
                 else (inventory.get("still_images") or 0) or 0)
     eta_seconds: Optional[float] = None
     eta_basis = "unknown (no images processed in this run)"
-    total_raw = sum(raw_seconds.values())
-    if processed > 0 and scope > 0 and total_raw > 0:
-        eta_seconds = total_raw * (scope / processed)
+    # Only Stage 1 has a representative per-image sample under --limit.
+    # Scaling the whole pipeline would multiply Stage 0's already-completed
+    # directory walk and produce a deceptively large number.
+    sampled_seconds = raw_seconds["stage1"]
+    if processed > 0 and scope > 0 and sampled_seconds > 0:
+        eta_seconds = sampled_seconds * (scope / processed)
         eta_basis = (
-            f"rough linear scale-up: {total_raw:.1f}s for {processed} processed image(s) "
-            f"-> {scope} still image(s) in this inventory"
+            f"rough Stage 1 scale-up: {sampled_seconds:.1f}s for "
+            f"{processed} processed image(s) -> {scope} discovered still image(s)"
         )
     return {
         "stage_seconds": stage_seconds,
@@ -144,15 +147,16 @@ def render_lines(performance: Dict[str, Any], disk: Optional[Dict[str, Any]] = N
         f"({_fmt_rate(performance['stage0_files_per_second'], 'files/s')})",
         f"stage1 processed: {performance['stage1_processed']} images "
         f"({_fmt_rate(performance['stage1_images_per_second'], 'images/s')})",
-        f"still images in this inventory: {performance['inventory_still_images']}",
+        f"discovered still images used for projection: "
+        f"{performance['inventory_still_images']}",
     ]
     if performance["eta_hours"] is not None:
         lines.append(
-            f"ROUGH full-library ETA: {performance['eta_hours']:.2f}h "
+            f"ROUGH full-library Stage 1 ETA: {performance['eta_hours']:.2f}h "
             f"({performance['eta_seconds'] / 60.0:.1f} min) - {performance['eta_basis']}"
         )
     else:
-        lines.append(f"ROUGH full-library ETA: unknown - {performance['eta_basis']}")
+        lines.append(f"ROUGH full-library Stage 1 ETA: unknown - {performance['eta_basis']}")
     lines.append(performance["eta_disclaimer"])
     if disk:
         lines.extend([

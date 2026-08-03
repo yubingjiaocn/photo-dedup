@@ -150,7 +150,9 @@ def run(
             "stage0": stage0_seconds, "stage1": stage1_seconds,
             "stage2": stage2_seconds, "stage3": 0.0,
         }
-        still_images = _still_image_count(db_path)
+        still_images = int(
+            inventory.get("library_still_images") or _still_image_count(db_path)
+        )
         thumb_stats = dict(features.get("thumbnails") or {})
         disk = pipeline_report.thumbnail_disk_report(output_path, still_images, thumb_stats)
         performance = pipeline_report.build_performance(

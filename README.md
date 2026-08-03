@@ -53,9 +53,10 @@ runtime config, so it does not edit `config.yaml`. If a run fails, the final
 workflow; use `torch` before making real review decisions.
 
 The run prints and writes `performance.txt` with each stage's wall time, Stage 0
-files/second, Stage 1 images/second, and a **rough linear** ETA for your whole
-library, scaled from what this run actually processed (there is no hardcoded
-library size). It also reports the thumbnail cache: estimated full-library size,
+files/second, Stage 1 images/second, and a **rough linear Stage 1** ETA for your
+whole library. Even with `--limit`, Stage 0 cheaply counts all matching directory
+entries without opening the unselected photos, so the projection uses the real
+library item count rather than the sample count. It also reports the thumbnail cache: estimated full-library size,
 actual current usage, and free space on the SSD. Below 20 GiB free it warns and
 continues — the pipeline never demands tens of GB of headroom and never aborts
 for space.

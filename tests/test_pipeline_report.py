@@ -30,10 +30,10 @@ def test_eta_scales_from_this_inventory_not_a_hardcoded_library_size():
     performance = pipeline_report.build_performance(
         _timings(), {"files": 100}, {"processed": 100}, library_still_images=100_000
     )
-    # 6s for 100 images -> 6000s for 100k images.
-    assert performance["eta_seconds"] == 6000.0
-    assert abs(performance["eta_hours"] - 6000.0 / 3600.0) < 1e-9
-    assert "100000 still image(s) in this inventory" in performance["eta_basis"]
+    # Stage 1 is the sampled per-image work: 4s/100 -> 4000s/100k.
+    assert performance["eta_seconds"] == 4000.0
+    assert abs(performance["eta_hours"] - 4000.0 / 3600.0) < 1e-9
+    assert "100000 discovered still image(s)" in performance["eta_basis"]
     assert "TiB" not in performance["eta_basis"]
     assert "TiB" not in performance["eta_disclaimer"]
 
@@ -43,9 +43,9 @@ def test_eta_is_clearly_labelled_as_a_rough_linear_estimate():
         _timings(), {"files": 10}, {"processed": 10}, library_still_images=1000
     )
     lines = "\n".join(pipeline_report.render_lines(performance))
-    assert "ROUGH full-library ETA" in lines
+    assert "ROUGH full-library Stage 1 ETA" in lines
     assert "ROUGH LINEAR ESTIMATE ONLY" in lines
-    assert "rough linear scale-up" in lines
+    assert "rough Stage 1 scale-up" in lines
 
 
 def test_eta_is_unknown_without_a_sample():
@@ -55,7 +55,7 @@ def test_eta_is_unknown_without_a_sample():
     assert performance["eta_seconds"] is None
     assert performance["eta_hours"] is None
     assert "unknown" in performance["eta_basis"]
-    assert "ROUGH full-library ETA: unknown" in "\n".join(
+    assert "ROUGH full-library Stage 1 ETA: unknown" in "\n".join(
         pipeline_report.render_lines(performance))
 
 

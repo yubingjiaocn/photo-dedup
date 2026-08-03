@@ -6,8 +6,9 @@ motion-photo classification (embedded / paired). Everything lands in the
 ``files`` table. Re-running is idempotent (``INSERT OR IGNORE`` on path) and
 commits every ``scan.commit_every`` files so a Ctrl+C resumes cleanly.
 
-Only header bytes are read per file (dimensions + EXIF + motion XMP marker),
-so a 66k-file library costs one pass of small reads, not a full 451GB read.
+Only header bytes are read per processed file (dimensions + EXIF + motion XMP
+marker). With ``--limit``, the remaining directory entries are still counted
+without opening them so later size/ETA projections use the real library scope.
 """
 
 from __future__ import annotations
@@ -146,16 +147,21 @@ def run(
 
     inserted = 0
     refreshed = 0
+    discovered_files = 0
+    discovered_still_images = 0
     since_commit = 0
     t0 = time.time()
 
     # partner_links: (file_path, partner_path) collected per directory
     for dirpath, _dirs, filenames in tqdm(os.walk(root, followlinks=follow), desc="inventory", unit="dir"):
-        if limit is not None and inserted >= limit:
-            break
         dir_path = Path(dirpath)
         all_entries = [dir_path / name for name in filenames]
-        wanted = sorted(p for p in all_entries if _wanted(p, extensions))
+        all_wanted = sorted(p for p in all_entries if _wanted(p, extensions))
+        discovered_files += len(all_wanted)
+        discovered_still_images += sum(1 for p in all_wanted if mp.is_image(p))
+        if limit is not None and inserted >= limit:
+            continue
+        wanted = all_wanted
         if limit is not None:
             wanted = wanted[: limit - inserted]
         if not wanted:
@@ -198,6 +204,8 @@ def run(
     stats = {
         "files": db.count_files(conn),
         "still_images": db.count_still_images(conn),
+        "discovered_files": discovered_files,
+        "library_still_images": discovered_still_images,
         "total_bytes": int(conn.execute(
             "SELECT COALESCE(SUM(size_bytes), 0) FROM files").fetchone()[0]),
         "changed_files": refreshed,

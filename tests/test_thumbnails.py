@@ -200,6 +200,32 @@ def test_changed_source_invalidates_the_cached_thumbnail(tmp_path):
     assert fresh_bytes != stale_bytes
 
 
+def test_failed_redecode_removes_stale_thumbnail_file(tmp_path):
+    root = tmp_path / "photos"
+    path = _library(root, 1)[0]
+    config = _config(tmp_path, root)
+    from src import stage0_inventory
+
+    stage0_inventory.run(config_path=config)
+    stage1_features.run(config_path=config, backend_override="stub")
+    conn = db.open_db(tmp_path / "inventory.sqlite")
+    file_id = int(db.get_file_by_path(conn, str(path))["id"])
+    conn.close()
+    cached = thumbnails.thumb_path(thumbnails.thumbs_dir(tmp_path / "output"), file_id)
+    assert cached.is_file()
+
+    path.write_bytes(b"not a jpeg anymore")
+    stage0_inventory.run(config_path=config)
+    result = stage1_features.run(config_path=config, backend_override="stub")
+
+    assert result["thumbnails"]["failed"] == 1
+    assert not cached.exists()
+    conn = db.open_db(tmp_path / "inventory.sqlite")
+    row = conn.execute("SELECT status FROM thumbnails WHERE file_id = ?", (file_id,)).fetchone()
+    assert row["status"] == "error"
+    conn.close()
+
+
 def test_rescan_of_unchanged_files_reports_no_change(tmp_path):
     root = tmp_path / "photos"
     _library(root, 3)

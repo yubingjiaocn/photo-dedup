@@ -164,7 +164,7 @@ def test_performance_and_disk_numbers_are_visible(pipeline):
     text = (output / "performance.txt").read_text(encoding="utf-8")
     for needle in ("stage0 wall time", "stage1 wall time", "stage2 wall time",
                    "stage3 wall time", "files/s", "images/s",
-                   "ROUGH full-library ETA", "ROUGH LINEAR ESTIMATE ONLY",
+                   "ROUGH full-library Stage 1 ETA", "ROUGH LINEAR ESTIMATE ONLY",
                    "Thumbnail cache (SSD)", "estimated full-library usage",
                    "SSD free space", "actual usage"):
         assert needle in text, needle
@@ -175,7 +175,7 @@ def test_performance_and_disk_numbers_are_visible(pipeline):
     assert disk["free_bytes"] is not None
 
     page = (output / "review.html").read_text(encoding="utf-8")
-    assert "ROUGH full-library ETA" in page
+    assert "ROUGH full-library Stage 1 ETA" in page
     assert "SSD free space" in page
 
 

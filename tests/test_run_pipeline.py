@@ -40,7 +40,9 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
 
         return fake
 
-    monkeypatch.setattr(run_pipeline.stage0_inventory, "run", record("stage0", {"files": 2}))
+    monkeypatch.setattr(run_pipeline.stage0_inventory, "run", record(
+        "stage0", {"files": 2, "library_still_images": 20}
+    ))
     monkeypatch.setattr(
         run_pipeline.stage1_features, "run",
         record("stage1", {"processed": 2, "thumbnails": {"created": 2, "cache_files": 2,
@@ -75,6 +77,7 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
     assert all(call[2]["features"]["thumbnails"]["enabled"] is True for call in calls)
     assert calls[1][2]["features"]["thumbnails"]["max_px"] == 320
     assert result["review_html"] == str(output.resolve() / "review.html")
+    assert result["performance"]["inventory_still_images"] == 20
 
 
 def test_pipeline_reports_stage_times_throughput_and_rough_eta(tmp_path, monkeypatch):
@@ -122,13 +125,13 @@ def test_pipeline_reports_stage_times_throughput_and_rough_eta(tmp_path, monkeyp
     text = (output / "performance.txt").read_text(encoding="utf-8")
     assert "stage0 wall time" in text and "stage3 wall time" in text
     assert "files/s" in text and "images/s" in text
-    assert "ROUGH full-library ETA" in text
+    assert "ROUGH full-library Stage 1 ETA" in text
     assert "Thumbnail cache (SSD)" in text
     assert "SSD free space" in text
 
     page = (output / "review.html").read_text(encoding="utf-8")
     assert "Observed performance and thumbnail disk usage" in page
-    assert "ROUGH full-library ETA" in page
+    assert "ROUGH full-library Stage 1 ETA" in page
 
 
 def test_low_disk_space_warns_but_does_not_abort(tmp_path, monkeypatch, capsys):

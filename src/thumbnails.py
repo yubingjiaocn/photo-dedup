@@ -208,6 +208,14 @@ class Thumbnailer:
 
     def _record_failure(self, row: Any, error: str) -> Dict[str, Any]:
         file_id = int(row_value(row, "id"))
+        # A previous successful run may have left a JPEG behind.  Once the
+        # current source identity fails to decode/render, that file is stale
+        # and must not remain available to either the HTTP endpoint or the
+        # static file:// fallback.
+        try:
+            thumb_path(self.directory, file_id).unlink(missing_ok=True)
+        except OSError as exc:
+            error = f"{error}; stale thumbnail cleanup failed: {type(exc).__name__}: {exc}"
         self.failed += 1
         record = {
             "file_id": file_id,
