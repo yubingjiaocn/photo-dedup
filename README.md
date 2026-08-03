@@ -93,6 +93,27 @@ Activate the environment first: `\.venv\Scripts\activate`
    python -m src.stage2_cluster
    ```
 
+### Offline scene/SigLIP shadow calibration (read-only)
+
+After Stage 1 has accumulated `quality_meta.routing` records, create an
+aggregate-only calibration report without opening photos, loading models, or
+modifying decisions/manifests:
+
+```
+python -m src.scene_shadow_report --db inventory.sqlite --output-dir output/scene-shadow
+# Or evaluate a portable JSONL stream of routing records:
+python -m src.scene_shadow_report --jsonl routing-shadow.jsonl --output-dir output/scene-shadow
+```
+
+It writes atomic `scene-shadow-summary.json` and
+`scene-shadow-tag-statistics.csv`, plus a resumable checkpoint. The summary
+contains only anonymous record IDs for malformed inputs, hashes source/config
+identity and prompt-bank/model provenance, and reports raw prompt statistics,
+hard-negative gaps, UNKNOWN/reason distributions, and conflict/missing rates.
+A mixed prompt-bank hash returns a non-zero CLI status and is explicitly marked
+rejected; malformed records/NaN/schema mismatches are counted, never repaired.
+This is **not** a threshold-setting or production-decision tool.
+
 5. **Stage 3 — report + delete lists** (minutes):
    ```
    python -m src.stage3_report
