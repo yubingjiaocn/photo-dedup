@@ -46,6 +46,13 @@ _DEFAULTS: Dict[str, Any] = {
         "yunet_input_width": 640,
         "yunet_score_threshold": 0.6,
         "exposure_long_edge": 512,
+        "eye_detection": {
+            "enabled": False,
+            "mode": "shadow",
+            "model_path": "face_landmarker.task",
+            "model_sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+            "max_faces": 10,
+        },
         "yunet_url": (
             "https://github.com/opencv/opencv_zoo/raw/main/models/"
             "face_detection_yunet/face_detection_yunet_2023mar.onnx"

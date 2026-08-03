@@ -41,6 +41,7 @@ from . import db
 from . import quality as Q
 from . import exposure
 from . import decision
+from . import eye_detection
 
 try:  # progress bar is optional
     from tqdm import tqdm
@@ -246,6 +247,7 @@ def _process_batch(
     backend: Any,
     rows: Sequence[Any],
     cfg: Config,
+    eye_detector: Any = None,
 ) -> List[Dict[str, Any]]:
     """Compute features for one batch of file rows. Returns feature dicts."""
     images: List[Image.Image] = []
@@ -278,6 +280,15 @@ def _process_batch(
             image, faces, int(cfg.features.get("exposure_long_edge", 512))
         )
         meta["detectors"] = decision.detector_extensions()
+        if eye_detector is not None:
+            try:
+                meta["eye_detection"] = eye_detector.analyze(
+                    image, expected_face_count=len(faces)
+                )
+            except Exception:
+                meta["eye_detection"] = eye_detection.unavailable_result(
+                    "DETECTOR_INFERENCE_FAILED"
+                )
         out_rows.append(
             {
                 "file_id": int(row["id"]),
@@ -314,6 +325,12 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     cfg = load_config(config_path)
     conn = db.open_db(cfg.db_path)
     backend = resolve_backend(cfg, backend_override)
+    eye_cfg = cfg.features.get("eye_detection", {})
+    eye_detector = (
+        eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
+        if eye_cfg.get("enabled", False)
+        else None
+    )
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
@@ -329,7 +346,7 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     t0 = time.time()
     batches = _guarded_batches(pending, batch_size, max_pixels)
     for batch in tqdm(batches, desc="features", unit="batch"):
-        feature_rows = _process_batch(backend, batch, cfg)
+        feature_rows = _process_batch(backend, batch, cfg, eye_detector=eye_detector)
         db.batch_insert_features(conn, feature_rows)
         done += len(feature_rows)
         since_commit += len(feature_rows)

@@ -129,6 +129,15 @@ Activate the environment first: `\.venv\Scripts\activate`
 ## Tuning
 
 Everything lives in `config.yaml`; `docs/ALGORITHM.md` explains each value.
+
+### Optional closed-eye shadow metadata
+
+`features.eye_detection` is disabled by default and only writes
+`quality_meta.eye_detection`; it never changes Stage 2 or creates
+`AUTO_REMOVE`. Install `requirements-eyes.txt`, place the configured
+`face_landmarker.task` under `models_dir`, then enable it. No model is
+downloaded automatically. Missing packages/assets and hash failures safely
+record `UNKNOWN` without failing Stage 1.
 Most common tweaks:
 
 - **Automation coverage:** `conservative`, `balanced`, and `aggressive` use

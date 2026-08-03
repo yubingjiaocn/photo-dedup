@@ -1,0 +1,2 @@
+# Optional shadow-only detector; install separately from requirements.txt.
+mediapipe==0.10.21

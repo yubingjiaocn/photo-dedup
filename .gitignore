@@ -40,3 +40,6 @@ Thumbs.db
 
 # Real-GPU smoke test workspace
 /tmp/photo-dedup-smoke-*
+
+# Local private calibration photos
+testdata/
