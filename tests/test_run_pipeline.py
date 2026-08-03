@@ -1,4 +1,7 @@
 from pathlib import Path
+from threading import Thread
+from urllib.error import HTTPError
+from urllib.request import urlopen
 
 import yaml
 
@@ -55,3 +58,49 @@ def test_main_reports_clear_error_for_missing_root(tmp_path, capsys):
     )
     assert status == 1
     assert "photo root is not a directory" in capsys.readouterr().err
+
+
+def test_server_is_local_output_root_and_returns_review(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "review.html").write_text("review-page", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("outside", encoding="utf-8")
+    server, url = run_pipeline.start_review_server(output)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+        assert url.endswith("/review.html")
+        assert urlopen(url).read() == b"review-page"
+        try:
+            urlopen(url.rsplit("/", 1)[0] + "/../secret.txt")
+        except HTTPError as exc:
+            assert exc.code == 404
+        else:
+            raise AssertionError("server escaped its output root")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_main_serves_only_after_pipeline_and_honors_no_open(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "output"
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append("pipeline")
+        return {"report": {"output_dir": str(output)}}
+
+    def fake_serve(path, port, open_browser):
+        calls.append(("serve", path, port, open_browser))
+
+    monkeypatch.setattr(run_pipeline, "run", fake_run)
+    monkeypatch.setattr(run_pipeline, "serve_review", fake_serve)
+    status = run_pipeline.main(
+        ["--root", str(root), "--output", str(output), "--port", "8765", "--no-open"]
+    )
+    assert status == 0
+    assert calls == ["pipeline", ("serve", output, 8765, False)]

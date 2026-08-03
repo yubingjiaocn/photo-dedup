@@ -26,13 +26,18 @@ never moves or deletes a photo**.
    python -m src.run_pipeline --root "D:\Photos" --output "D:\photo-review" --backend torch --limit 100
    ```
 
-4. The command prints final statistics and the exact review path. Open it:
+4. The command starts a local-only web server and opens the review automatically.
+   It prints a URL such as `http://127.0.0.1:54321/review.html`; press Ctrl+C
+   when finished. If browser auto-open is unwanted, add `--no-open`. To use a
+   fixed port, add `--port 8765`. To only generate files without serving, add
+   `--no-serve` and open the HTML manually:
 
    ```bat
    start "" "D:\photo-review\review.html"
    ```
 
-The command stores its resumable `inventory.sqlite` beside the review output
+The server uses only Python's standard library, listens on `127.0.0.1`, and
+serves only the output folder. The command stores its resumable `inventory.sqlite` beside the review output
 and uses a temporary runtime config, so it does not edit `config.yaml`. If a
 run fails, the final `[pipeline][ERROR]` line states the cause. Stub results are
 for checking the workflow; use `torch` before making real review decisions.

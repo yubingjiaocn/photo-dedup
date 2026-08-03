@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import functools
+import http.server
 import sys
 import tempfile
+import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,6 +15,34 @@ import yaml
 
 from .config import load_config
 from . import stage0_inventory, stage1_features, stage2_cluster, stage3_report
+
+
+def start_review_server(output: Path, port: int = 0) -> tuple[http.server.ThreadingHTTPServer, str]:
+    """Bind a local-only static server rooted strictly at the output directory."""
+    output = output.resolve()
+    if not (output / "review.html").is_file():
+        raise FileNotFoundError(f"review HTML does not exist: {output / 'review.html'}")
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(output))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    url = f"http://127.0.0.1:{server.server_port}/review.html"
+    return server, url
+
+
+def serve_review(output: Path, port: int = 0, open_browser: bool = True) -> None:
+    """Serve until Ctrl+C, optionally opening the default browser."""
+    server, url = start_review_server(output, port)
+    print(f"[pipeline] local review URL: {url}")
+    if open_browser:
+        opened = webbrowser.open(url)
+        if not opened:
+            print("[pipeline] browser did not open automatically; paste the URL above into a browser")
+    print("[pipeline] serving review locally; press Ctrl+C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[pipeline] review server stopped")
+    finally:
+        server.server_close()
 
 
 def _runtime_config(root: Path, output: Path, backend: str) -> dict[str, Any]:
@@ -83,9 +114,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", required=True, help="directory for DB and review files")
     parser.add_argument("--backend", choices=("torch", "stub"), default="torch")
     parser.add_argument("--limit", type=int, default=None, help="scan/process at most N files")
+    parser.add_argument("--port", type=int, default=0, help="local review port (default: automatic)")
+    parser.add_argument(
+        "--serve", action=argparse.BooleanOptionalAction, default=True,
+        help="serve the review on 127.0.0.1 after the pipeline (default: enabled)",
+    )
+    parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
     try:
-        run(args.root, args.output, backend=args.backend, limit=args.limit)
+        result = run(args.root, args.output, backend=args.backend, limit=args.limit)
+        if args.serve:
+            serve_review(Path(result["report"]["output_dir"]), args.port, not args.no_open)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
         return 1
