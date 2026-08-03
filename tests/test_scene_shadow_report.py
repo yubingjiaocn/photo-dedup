@@ -112,9 +112,10 @@ def test_identity_mixing_and_revision_display_semantics(tmp_path, field, value):
     assert len(report["siglip"]["model_revisions"]) == (2 if field == "revision" else 1)
 
 
-def test_missing_identity_rejected_and_cli_is_nonzero(tmp_path):
+@pytest.mark.parametrize("missing", ["model_sha256", "runtime"])
+def test_missing_identity_rejected_and_cli_is_nonzero(tmp_path, missing):
     record = _record()
-    del record["model"]["model_sha256"]
+    del record["model"][missing]
     source = tmp_path / "routing.jsonl"
     _jsonl(source, [record])
     report = run(jsonl_path=str(source), output_dir=str(tmp_path / "out"))
@@ -129,6 +130,7 @@ def test_empty_input_atomic_outputs_and_no_source_path_leak(tmp_path):
     report = run(jsonl_path=str(secret), output_dir=str(out))
     rendered = json.dumps(report)
     assert report["records"]["seen"] == 0
+    assert report["status"] == "REJECTED_NO_VALID_RECORDS"
     assert secret.name not in rendered and str(secret) not in rendered
     assert not list(out.glob(".*.tmp"))
     saved = json.loads((out / "scene-shadow-summary.json").read_text())

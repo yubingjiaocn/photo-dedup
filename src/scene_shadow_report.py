@@ -148,12 +148,9 @@ def _record_error(state: dict[str, Any], anon_id: str, error: Exception, *, iden
 def _calibration_identity(record: Mapping[str, Any]) -> tuple[str, str]:
     model = record["model"]
     runtime = model.get("runtime")
-    if runtime is None:
-        device = precision = "UNRECORDED"
-    elif isinstance(runtime, Mapping):
-        device, precision = runtime.get("device"), runtime.get("precision")
-    else:
-        raise CalibrationIdentityError("runtime identity must be an object")
+    if not isinstance(runtime, Mapping):
+        raise CalibrationIdentityError("runtime identity must be a complete object")
+    device, precision = runtime.get("device"), runtime.get("precision")
     values = {
         "name": model.get("name"), "revision": model.get("revision"), "model_sha256": model.get("model_sha256"),
         "prompt_bank_hash": model.get("prompt_bank_hash"), "bank_version": model.get("bank_version"),
@@ -242,6 +239,8 @@ def _summary(state: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[st
     identities = dict(state["identities"])
     if state["identity_errors"]:
         status = "REJECTED_MISSING_IDENTITY"
+    elif not identities:
+        status = "REJECTED_NO_VALID_RECORDS"
     elif len(identities) > 1:
         status = "REJECTED_MIXED_IDENTITY"
     else:
