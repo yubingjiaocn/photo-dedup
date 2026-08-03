@@ -22,7 +22,8 @@ function Test-PythonCandidate([string]$Exe, [string[]]$Prefix) {
 }
 
 function Invoke-SelectedPython([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments) {
-    & $script:PythonExe @script:PythonPrefix @Arguments
+    $Prefix = $script:PythonPrefix
+    & $script:PythonExe @Prefix @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Python command failed with exit code $LASTEXITCODE"
     }
@@ -55,7 +56,7 @@ Recommended fallback: winget install -e --id Python.Python.3.12
 "@
 }
 
-$VersionText = (& $script:PythonExe @script:PythonPrefix --version 2>&1 | Out-String).Trim()
+$VersionText = (& $PythonExe @PythonPrefix --version 2>&1 | Out-String).Trim()
 Write-Host "Using: $script:PythonExe $($script:PythonPrefix -join ' ')"
 Write-Host $VersionText
 if ($VersionText -match "Python 3\.14") {
