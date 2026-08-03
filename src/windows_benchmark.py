@@ -163,6 +163,8 @@ def _phase(fn: Callable[[], Any]) -> Tuple[Dict[str, Any], Any]:
     started = time.perf_counter()
     try:
         value = fn()
+        if torch:
+            torch.cuda.synchronize()
         status = value.get("status", "PROCESSED") if isinstance(value, dict) else "PROCESSED"
         outcome: Dict[str, Any] = {"seconds": time.perf_counter() - started, "status": status,
                                    "processed": int(status != "SKIPPED"), "skipped": int(status == "SKIPPED"), "errors": 0}
@@ -171,7 +173,6 @@ def _phase(fn: Callable[[], Any]) -> Tuple[Dict[str, Any], Any]:
         outcome = {"seconds": time.perf_counter() - started, "status": "ERROR", "processed": 0,
                    "skipped": 0, "errors": 1, "error": type(exc).__name__}
     if torch:
-        torch.cuda.synchronize()
         outcome["peak_gpu_mb"] = float(torch.cuda.max_memory_allocated() / 1024**2)
     else:
         outcome["peak_gpu_mb"] = None
@@ -181,6 +182,31 @@ def _phase(fn: Callable[[], Any]) -> Tuple[Dict[str, Any], Any]:
 def _skipped(reason: str) -> Dict[str, Any]:
     return {"seconds": 0.0, "status": "SKIPPED", "processed": 0, "skipped": 1, "errors": 0,
             "reason": reason, "peak_gpu_mb": None}
+
+
+def _valid_phase(value: Any) -> bool:
+    """Accept only fully formed, finite checkpoint records from this harness."""
+    if not isinstance(value, dict) or set(("seconds", "status", "processed", "skipped", "errors", "peak_gpu_mb")) - set(value):
+        return False
+    seconds, peak = value["seconds"], value["peak_gpu_mb"]
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds < 0:
+        return False
+    if peak is not None and (not isinstance(peak, (int, float)) or isinstance(peak, bool) or not math.isfinite(peak) or peak < 0):
+        return False
+    if value["status"] not in {"PROCESSED", "SKIPPED", "ERROR"}:
+        return False
+    for key in ("processed", "skipped", "errors"):
+        if not isinstance(value[key], int) or isinstance(value[key], bool) or value[key] not in {0, 1}:
+            return False
+    expected = {"PROCESSED": (1, 0, 0), "SKIPPED": (0, 1, 0), "ERROR": (0, 0, 1)}[value["status"]]
+    return (value["processed"], value["skipped"], value["errors"]) == expected
+
+
+def _valid_completed(value: Any, tokens: set[str]) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(tokens):
+        return False
+    return all(isinstance(record, dict) and set(record) == {"decode", "siglip", "stage1"}
+               and all(_valid_phase(record[name]) for name in record) for record in value.values())
 
 
 def run(*, sample_dir: Optional[str] = None, fixture_manifest: Optional[str] = None,
@@ -204,8 +230,14 @@ def run(*, sample_dir: Optional[str] = None, fixture_manifest: Optional[str] = N
     completed: Dict[str, Any] = {}
     resume_status = "NEW"
     if state_path.exists():
-        previous = json.loads(state_path.read_text(encoding="utf-8"))
-        if all(previous.get(k) == v for k, v in identity.items()) and isinstance(previous.get("completed"), dict):
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = None
+        tokens = {_path_token(path) for path in paths}
+        if not isinstance(previous, dict) or not _valid_completed(previous.get("completed"), tokens):
+            resume_status = "STATE_INVALID_RESTARTED"
+        elif all(previous.get(k) == v for k, v in identity.items()):
             completed, resume_status = previous["completed"], "RESUMED"
         else:
             resume_status = "STATE_MISMATCH_RESTARTED"

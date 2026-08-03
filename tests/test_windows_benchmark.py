@@ -33,12 +33,77 @@ def test_limit_dry_run_and_path_privacy(tmp_path):
 def test_state_identity_mismatch_restarts_not_resumes(tmp_path):
     root, state = _sample(tmp_path), tmp_path / "state.json"
     paths, selection = benchmark._samples(str(root), None, None)
+    valid = {name: benchmark._skipped("test") for name in ("decode", "siglip", "stage1")}
     state.write_text(json.dumps({"state_version": 2, "schema_version": 1, "config_hash": "old",
         "sample_set_hash": benchmark._hash(selection), "model_hash": "old", "runner_spec": "builtin",
-        "completed": {benchmark._path_token(paths[0]): {}}}))
+        "completed": {benchmark._path_token(paths[0]): valid}}))
     result = benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out.json"))
     assert result["resume_status"] == "STATE_MISMATCH_RESTARTED"
     assert result["phases"]["decode"]["processed"] == 2
+
+
+def test_truncated_or_malicious_state_safely_restarts(tmp_path):
+    root, state = _sample(tmp_path), tmp_path / "state.json"
+    state.write_text('{"completed":')
+    result = benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out.json"))
+    assert result["resume_status"] == "STATE_INVALID_RESTARTED"
+    state.write_text(json.dumps({"completed": {"foreign": {"decode": {"seconds": float("inf")}}}}))
+    result = benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out2.json"))
+    assert result["resume_status"] == "STATE_INVALID_RESTARTED"
+
+
+def test_normal_interrupt_checkpoint_resumes(tmp_path, monkeypatch):
+    root, state = _sample(tmp_path), tmp_path / "state.json"
+    class Runner:
+        calls = 0
+        model_descriptor = {"test": "resume"}
+        def siglip(self, image):
+            self.calls += 1
+            if self.calls == 2:
+                raise KeyboardInterrupt()
+            return {"status": "SKIPPED"}
+        def stage1(self, image):
+            return {}
+    runner = Runner()
+    monkeypatch.setattr(benchmark, "_load_runner", lambda _: runner)
+    with pytest.raises(KeyboardInterrupt):
+        benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out.json"))
+    runner.calls = 0
+    result = benchmark.run(sample_dir=str(root), state=str(state), output=str(tmp_path / "out.json"))
+    assert result["resume_status"] == "RESUMED"
+
+
+def test_cuda_phase_sync_brackets_elapsed_and_sync_failure_is_error(monkeypatch):
+    events = []
+    class CUDA:
+        def synchronize(self):
+            events.append("sync")
+        def reset_peak_memory_stats(self):
+            events.append("reset")
+        def max_memory_allocated(self):
+            events.append("peak")
+            return 1024
+    class Torch:
+        cuda = CUDA()
+    ticks = iter((10.0, 13.0))
+    monkeypatch.setattr(benchmark, "_cuda", lambda: Torch())
+    monkeypatch.setattr(benchmark.time, "perf_counter", lambda: (events.append("clock") or next(ticks)))
+    phase, _ = benchmark._phase(lambda: events.append("fn") or {})
+    assert events == ["sync", "reset", "clock", "fn", "sync", "clock", "peak"]
+    assert phase["seconds"] == 3.0 and phase["errors"] == 0
+
+    class BadCUDA(CUDA):
+        calls = 0
+        def synchronize(self):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("async failure")
+    class BadTorch:
+        cuda = BadCUDA()
+    monkeypatch.setattr(benchmark, "_cuda", lambda: BadTorch())
+    monkeypatch.setattr(benchmark.time, "perf_counter", lambda: 20.0)
+    phase, _ = benchmark._phase(lambda: {})
+    assert phase["status"] == "ERROR" and phase["errors"] == 1
 
 
 def test_atomic_writer_keeps_old_output_when_replace_fails(tmp_path, monkeypatch):
