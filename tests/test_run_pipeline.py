@@ -148,11 +148,36 @@ def test_low_disk_space_warns_but_does_not_abort(tmp_path, monkeypatch, capsys):
 
 
 def test_main_reports_clear_error_for_missing_root(tmp_path, capsys):
+    output = tmp_path / "out"
     status = run_pipeline.main(
-        ["--root", str(tmp_path / "missing"), "--output", str(tmp_path / "out")]
+        ["--root", str(tmp_path / "missing"), "--output", str(output)]
     )
     assert status == 1
     assert "photo root is not a directory" in capsys.readouterr().err
+    log = (output / "photo-dedup.log").read_text(encoding="utf-8")
+    assert "[diagnostics] Python:" in log
+    assert "FileNotFoundError" in log
+    assert "photo root is not a directory" in log
+
+
+def test_main_writes_successful_console_output_to_diagnostic_log(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "output"
+
+    def fake_run(*_args, **_kwargs):
+        print("pipeline diagnostic marker")
+        return {"report": {"output_dir": str(output)}}
+
+    monkeypatch.setattr(run_pipeline, "run", fake_run)
+    status = run_pipeline.main(
+        ["--root", str(root), "--output", str(output), "--no-serve"]
+    )
+
+    assert status == 0
+    log = (output / "photo-dedup.log").read_text(encoding="utf-8")
+    assert "pipeline diagnostic marker" in log
+    assert "backend='torch'" in log
 
 
 def test_server_is_local_output_root_and_returns_review(tmp_path):

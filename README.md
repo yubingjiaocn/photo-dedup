@@ -45,6 +45,13 @@ never moves or deletes a photo**.
    With `--no-serve` the page shows a small static preview only; the full paged
    ALL/MAYBE/UNKNOWN/GROUPS browsing needs the local server.
 
+   Every run also appends a diagnostic log to
+   **`<output>\photo-dedup.log`**. It captures the console output, Python and
+   platform details, Torch/CUDA/GPU detection, selected options, and complete
+   error tracebacks. If something fails, send that file for diagnosis. The log
+   includes local root/output paths and may include filenames from errors, but
+   never image bytes or embeddings.
+
 The server uses only Python's standard library, listens on `127.0.0.1`, and
 serves the output folder plus a read-only paged API. The command stores its
 resumable `inventory.sqlite` beside the review output and uses a temporary

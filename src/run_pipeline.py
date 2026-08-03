@@ -11,10 +11,14 @@ Boundaries this module keeps (deliberately, and tested):
 from __future__ import annotations
 
 import argparse
+import contextlib
+import datetime as dt
 import http.server
+import platform
 import sys
 import tempfile
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
@@ -32,6 +36,52 @@ from . import (
     thumbnails,
 )
 from .config import load_config
+
+
+class _Tee:
+    """Mirror console output to a UTF-8 diagnostic log."""
+
+    def __init__(self, console: Any, log_file: Any) -> None:
+        self.console = console
+        self.log_file = log_file
+
+    def write(self, text: str) -> int:
+        self.console.write(text)
+        self.log_file.write(text)
+        self.log_file.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.log_file.flush()
+
+
+def _print_runtime_diagnostics(args: argparse.Namespace, log_path: Path) -> None:
+    """Print enough local runtime context to diagnose a Windows failure."""
+    print("\n" + "=" * 72)
+    print(f"[diagnostics] run started UTC: {dt.datetime.now(dt.timezone.utc).isoformat()}")
+    print(f"[diagnostics] log file: {log_path}")
+    print(f"[diagnostics] Python: {sys.version.replace(chr(10), ' ')}")
+    print(f"[diagnostics] platform: {platform.platform()}")
+    print(f"[diagnostics] executable: {sys.executable}")
+    print(
+        "[diagnostics] options: "
+        f"root={args.root!r}, output={args.output!r}, backend={args.backend!r}, "
+        f"limit={args.limit!r}, review_limit={args.review_limit}, "
+        f"thumb_px={args.thumb_px}, serve={args.serve}, port={args.port}"
+    )
+    try:
+        import torch
+
+        print(
+            "[diagnostics] torch: "
+            f"version={torch.__version__}, cuda_available={torch.cuda.is_available()}, "
+            f"cuda_version={torch.version.cuda}"
+        )
+        if torch.cuda.is_available():
+            print(f"[diagnostics] GPU: {torch.cuda.get_device_name(0)}")
+    except Exception as exc:
+        print(f"[diagnostics] torch probe failed: {type(exc).__name__}: {exc}")
 
 
 def _elapsed(call: Any, /, *args: Any, **kwargs: Any) -> tuple[Any, float]:
@@ -228,17 +278,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
+    output_path = Path(args.output).expanduser().resolve()
     try:
-        result = run(
-            args.root, args.output, backend=args.backend, limit=args.limit,
-            review_limit=args.review_limit, thumb_px=args.thumb_px,
-        )
-        if args.serve:
-            serve_review(Path(result["report"]["output_dir"]), args.port, not args.no_open)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
+        output_path.mkdir(parents=True, exist_ok=True)
+        log_path = output_path / "photo-dedup.log"
+        with log_path.open("a", encoding="utf-8", buffering=1) as log_file:
+            with contextlib.redirect_stdout(_Tee(sys.stdout, log_file)), \
+                    contextlib.redirect_stderr(_Tee(sys.stderr, log_file)):
+                _print_runtime_diagnostics(args, log_path)
+                try:
+                    result = run(
+                        args.root, args.output, backend=args.backend, limit=args.limit,
+                        review_limit=args.review_limit, thumb_px=args.thumb_px,
+                    )
+                    if args.serve:
+                        serve_review(
+                            Path(result["report"]["output_dir"]), args.port, not args.no_open
+                        )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    return 1
+                except Exception as exc:  # unexpected failures must still be diagnosable
+                    print(
+                        f"[pipeline][UNEXPECTED ERROR] {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    traceback.print_exc(file=sys.stderr)
+                    return 1
+        return 0
+    except OSError as exc:
+        print(f"[pipeline][ERROR] cannot create diagnostic log in {output_path}: {exc}",
+              file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
