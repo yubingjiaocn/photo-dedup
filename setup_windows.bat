@@ -17,10 +17,25 @@ cd /d "%~dp0"
 echo.
 echo === [1/5] Checking Python ===
 set "PY="
-py -3.12 --version >nul 2>&1 && set "PY=py -3.12"
-if not defined PY py -3.11 --version >nul 2>&1 && set "PY=py -3.11"
+REM Willy's workstation currently uses 3.14; try installed launcher versions
+REM explicitly. Avoid Python comparison expressions here: cmd.exe parsing of
+REM redirection characters inside parenthesised blocks is fragile.
+py -3.14 --version >nul 2>&1
+if not errorlevel 1 set "PY=py -3.14"
 if not defined PY (
-    python -c "import sys; raise SystemExit(0 if sys.version_info ^>= (3,11) else 1)" >nul 2>&1
+    py -3.13 --version >nul 2>&1
+    if not errorlevel 1 set "PY=py -3.13"
+)
+if not defined PY (
+    py -3.12 --version >nul 2>&1
+    if not errorlevel 1 set "PY=py -3.12"
+)
+if not defined PY (
+    py -3.11 --version >nul 2>&1
+    if not errorlevel 1 set "PY=py -3.11"
+)
+if not defined PY (
+    python --version >nul 2>&1
     if !errorlevel! equ 0 set "PY=python"
 )
 if not defined PY (
@@ -34,7 +49,7 @@ if not defined PY (
 )
 echo Using: %PY%
 %PY% --version
-%PY% -c "import sys; print('[WARN] Python 3.14 is being tried as requested; if a dependency has no wheel, install 3.12 side-by-side.') if sys.version_info ^>= (3,14) else None"
+%PY% -c "import sys; print('[WARN] Python 3.14 best-effort mode: if a dependency has no wheel, the exact package error will be shown.') if sys.version_info[:2] == (3, 14) else None"
 
 echo.
 echo === [2/5] Creating virtual environment (.venv) ===
