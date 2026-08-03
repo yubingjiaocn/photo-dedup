@@ -91,6 +91,7 @@ def build_shadow_routing_record(
         "name": name,
         "revision": revision,
         "prompt_bank_hash": getattr(bank, "file_hash", None) or _hash_bank_object(normalized_bank),
+        "bank_version": normalized_bank["bank_version"],
         "shadow_prompt_audit": audit,
     }
     if model_audit is not None:

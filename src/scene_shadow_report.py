@@ -1,10 +1,4 @@
-"""Offline, fail-closed aggregation for SigLIP shadow-routing records.
-
-This module only reads routing metadata already recorded in SQLite or JSONL.  It
-never opens source photos, writes decisions/manifests, chooses thresholds, or
-loads a model.  Its reports contain aggregate evidence and stable anonymous
-record IDs only.
-"""
+"""Offline, fail-closed aggregation for SigLIP shadow-routing records."""
 from __future__ import annotations
 
 import argparse
@@ -13,27 +7,50 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import sqlite3
 import sys
-from collections import Counter
+import tempfile
+from contextlib import contextmanager
+from itertools import chain
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from .routing_schema import SCENE_TAGS, SUBJECT_TAGS, validate_routing_record
+from .scene_checkpoint import CHECKPOINT_SCHEMA_VERSION, equivalent, json_safe, new_state, restore_checkpoint
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 AUDIT_FIELDS = ("positive_mean", "positive_median", "positive_range", "positive_std", "hard_negative_max", "hard_negative_gap")
+IDENTITY_KEYS = ("name", "revision", "model_sha256", "prompt_bank_hash", "bank_version", "routing_schema_version", "device", "precision")
+
+
+class CalibrationIdentityError(ValueError):
+    """A record cannot participate in calibration without a complete identity."""
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        _fsync_directory(path.parent)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _sha256(path: Path) -> str:
@@ -46,71 +63,62 @@ def _sha256(path: Path) -> str:
 
 def _source_identity(path: Path, kind: str) -> dict[str, Any]:
     stat = path.stat()
-    identity = {"kind": kind, "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
-                "source_name_hash": hashlib.sha256(str(path.resolve()).encode()).hexdigest()}
-    # JSONL is normally a portable, modest shadow export; a byte hash prevents
-    # resuming an altered stream.  SQLite can be large, so its stat identity is
-    # deliberate and is recorded as a limitation rather than silently hashing it.
+    identity = {"kind": kind, "size_bytes": stat.st_size, "content_sha256": _sha256(path)}
     if kind == "jsonl":
-        identity["content_sha256"] = _sha256(path)
+        identity["source_name_hash"] = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
     return identity
 
 
-def _new_state(identity: Mapping[str, Any], config_hash: str | None) -> dict[str, Any]:
-    return {"checkpoint_schema_version": REPORT_SCHEMA_VERSION, "input_identity": dict(identity),
-            "config_sha256": config_hash, "next_index": 0, "seen": 0, "valid": 0, "invalid": 0,
-            "unknown": {"scene_context": 0, "subject_protection": 0}, "reasons": Counter(),
-            "unknown_reasons": {"scene_context": Counter(), "subject_protection": Counter()},
-            "conflict_records": 0, "missing_records": 0, "tag_present": Counter(), "stats": {},
-            "prompt_hashes": Counter(), "model_revisions": Counter(), "bad_records": []}
-
-
-def _load_checkpoint(path: Path, identity: Mapping[str, Any], config_hash: str | None) -> dict[str, Any]:
+@contextmanager
+def _fixed_source(path: Path, kind: str) -> Iterator[tuple[Path, dict[str, Any]]]:
+    if kind == "jsonl":
+        yield path, _source_identity(path, kind)
+        return
+    temp_dir = Path(tempfile.mkdtemp(prefix="scene-shadow-snapshot-"))
+    snapshot = temp_dir / "snapshot.sqlite"
+    source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    destination = sqlite3.connect(snapshot)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("checkpoint_schema_version") != REPORT_SCHEMA_VERSION:
-            raise ValueError("checkpoint schema mismatch")
-        if raw.get("input_identity") != dict(identity) or raw.get("config_sha256") != config_hash:
-            raise ValueError("checkpoint input/config mismatch")
-        return _restore_state(raw)
+        source.backup(destination)
+        destination.close()
+        source.close()
+        yield snapshot, _source_identity(snapshot, kind)
+    finally:
+        destination.close()
+        source.close()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _load_raw_checkpoint(path: Path, identity: Mapping[str, Any], config_hash: str | None) -> dict[str, Any] | None:
+    try:
+        return restore_checkpoint(json.loads(path.read_text(encoding="utf-8")), identity, config_hash)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return _new_state(identity, config_hash)
+        return None
 
 
-def _restore_state(raw: Mapping[str, Any]) -> dict[str, Any]:
-    state = dict(raw)
-    for name in ("reasons", "tag_present", "prompt_hashes", "model_revisions"):
-        state[name] = Counter(state.get(name, {}))
-    state["unknown_reasons"] = {key: Counter(value) for key, value in state.get("unknown_reasons", {}).items()}
-    state.setdefault("stats", {})
-    state.setdefault("bad_records", [])
-    return state
-
-
-def _iter_jsonl(path: Path) -> Iterator[tuple[int, str, Any]]:
-    with path.open(encoding="utf-8") as handle:
+def _iter_jsonl(path: Path) -> Iterator[tuple[int, str, Any, bytes]]:
+    with path.open("rb") as handle:
         for index, line in enumerate(handle):
-            if not line.strip():
-                yield index, f"jsonl:{index + 1}", ValueError("blank JSONL line")
-                continue
+            anon_id = f"jsonl:{index + 1}"
             try:
                 value = json.loads(line)
                 routing = value.get("routing", value) if isinstance(value, dict) else value
-                yield index, f"jsonl:{index + 1}", routing
-            except json.JSONDecodeError as exc:
-                yield index, f"jsonl:{index + 1}", exc
+                yield index, anon_id, routing, line
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                yield index, anon_id, exc, line
 
 
-def _iter_db(path: Path) -> Iterator[tuple[int, str, Any]]:
+def _iter_db(path: Path) -> Iterator[tuple[int, str, Any, bytes]]:
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         query = "SELECT f.id, fe.quality_meta FROM features fe JOIN files f ON f.id=fe.file_id ORDER BY f.id"
         for index, (file_id, raw_meta) in enumerate(connection.execute(query)):
+            canonical = json.dumps([file_id, raw_meta], ensure_ascii=False, separators=(",", ":")).encode()
             try:
                 meta = json.loads(raw_meta)
-                yield index, f"db:{file_id}", meta.get("routing") if isinstance(meta, dict) else None
+                yield index, f"db:{file_id}", meta.get("routing") if isinstance(meta, dict) else None, canonical
             except (TypeError, json.JSONDecodeError) as exc:
-                yield index, f"db:{file_id}", exc
+                yield index, f"db:{file_id}", exc, canonical
     finally:
         connection.close()
 
@@ -130,10 +138,37 @@ def _add_stat(state: dict[str, Any], key: str, value: Any) -> None:
     item["max"] = max(item["max"], value)
 
 
-def _record_error(state: dict[str, Any], anon_id: str, error: Exception) -> None:
+def _record_error(state: dict[str, Any], anon_id: str, error: Exception, *, identity: bool = False) -> None:
     state["invalid"] += 1
+    state["identity_errors"] += int(identity)
     if len(state["bad_records"]) < 20:
         state["bad_records"].append({"record_id": anon_id, "error": str(error)[:240]})
+
+
+def _calibration_identity(record: Mapping[str, Any]) -> tuple[str, str]:
+    model = record["model"]
+    runtime = model.get("runtime")
+    if runtime is None:
+        device = precision = "UNRECORDED"
+    elif isinstance(runtime, Mapping):
+        device, precision = runtime.get("device"), runtime.get("precision")
+    else:
+        raise CalibrationIdentityError("runtime identity must be an object")
+    values = {
+        "name": model.get("name"), "revision": model.get("revision"), "model_sha256": model.get("model_sha256"),
+        "prompt_bank_hash": model.get("prompt_bank_hash"), "bank_version": model.get("bank_version"),
+        "routing_schema_version": record.get("schema_version"), "device": device, "precision": precision,
+    }
+    if any(isinstance(values[key], bool) or not isinstance(values[key], (str, int)) or values[key] == "" for key in IDENTITY_KEYS):
+        raise CalibrationIdentityError("missing complete calibration identity")
+    if not isinstance(values["bank_version"], int) or values["bank_version"] < 1:
+        raise CalibrationIdentityError("invalid bank_version identity")
+    for key in ("model_sha256", "prompt_bank_hash"):
+        value = values[key]
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise CalibrationIdentityError(f"invalid {key} identity")
+    identity = json.dumps(values, sort_keys=True, separators=(",", ":"))
+    return identity, f"{values['name']}@{values['revision']}"
 
 
 def _consume(state: dict[str, Any], anon_id: str, raw: Any) -> None:
@@ -143,22 +178,22 @@ def _consume(state: dict[str, Any], anon_id: str, raw: Any) -> None:
         return
     try:
         record = validate_routing_record(raw)
-        model = record["model"]
-        prompt_hash = model.get("prompt_bank_hash")
-        audit = model.get("shadow_prompt_audit")
-        if not isinstance(prompt_hash, str) or len(prompt_hash) != 64 or not isinstance(audit, Mapping):
-            raise ValueError("missing SigLIP prompt-bank provenance")
-        tags = audit.get("tags")
-        expected_tags = SCENE_TAGS | SUBJECT_TAGS
-        if not isinstance(tags, Mapping) or set(tags) != expected_tags:
+        identity, revision = _calibration_identity(record)
+        audit = record["model"].get("shadow_prompt_audit")
+        tags = audit.get("tags") if isinstance(audit, Mapping) else None
+        if not isinstance(tags, Mapping) or set(tags) != SCENE_TAGS | SUBJECT_TAGS:
             raise ValueError("shadow prompt audit does not cover routing schema tags")
+        stat_values = []
         for tag, values in tags.items():
             if not isinstance(values, Mapping):
                 raise ValueError(f"audit.{tag} must be an object")
             for field in AUDIT_FIELDS:
-                _add_stat(state, f"{tag}.{field}", values.get(field))
-        state["prompt_hashes"][prompt_hash] += 1
-        state["model_revisions"][f"{model.get('name', '')}@{model.get('revision', '')}"] += 1
+                key = f"{tag}.{field}"
+                stat_values.append((key, _finite(values.get(field), key)))
+        for key, value in stat_values:
+            _add_stat(state, key, value)
+        state["identities"][identity] += 1
+        state["model_revisions"][revision] += 1
         for namespace in ("scene_context", "subject_protection"):
             value = record[namespace]
             state["reasons"].update(value["reasons"])
@@ -169,95 +204,116 @@ def _consume(state: dict[str, Any], anon_id: str, raw: Any) -> None:
                 state["tag_present"][tag["code"]] += 1
         quality = record["quality_evidence"]
         state["reasons"].update(quality["reasons"])
-        if quality["conflicts"]:
-            state["conflict_records"] += 1
-        if quality["missing"]:
-            state["missing_records"] += 1
+        state["conflict_records"] += int(bool(quality["conflicts"]))
+        state["missing_records"] += int(bool(quality["missing"]))
         state["valid"] += 1
+    except CalibrationIdentityError as exc:
+        _record_error(state, anon_id, exc, identity=True)
     except (TypeError, ValueError, KeyError) as exc:
         _record_error(state, anon_id, exc)
 
 
-def _checkpoint_payload(state: Mapping[str, Any]) -> dict[str, Any]:
-    return _json_safe(state)
+def _advance_digest(state: dict[str, Any], raw_bytes: bytes) -> None:
+    previous = bytes.fromhex(state["prefix_digest"])
+    state["prefix_digest"] = hashlib.sha256(previous + raw_bytes).hexdigest()
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Counter):
-        return dict(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    return value
+def _validated_resume(iterator: Iterator[tuple[int, str, Any, bytes]], saved: dict[str, Any] | None,
+                      identity: Mapping[str, Any], config_hash: str | None) -> tuple[dict[str, Any], list[tuple[int, str, Any, bytes]]]:
+    state = new_state(identity, config_hash)
+    buffered = []
+    if saved is None:
+        return state, buffered
+    target = saved["next_index"]
+    for item in iterator:
+        if item[0] >= target:
+            buffered.append(item)
+            break
+        _consume(state, item[1], item[2])
+        _advance_digest(state, item[3])
+        state["next_index"] = item[0] + 1
+    if state["next_index"] != target or not equivalent(state, saved):
+        return new_state(identity, config_hash), []
+    return saved, buffered
 
 
 def _summary(state: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[str, Any]:
     valid = state["valid"]
-    hashes = dict(state["prompt_hashes"])
-    mixed = len(hashes) > 1
-    aggregate_stats = {key: {"count": item["count"], "mean": item["sum"] / item["count"],
-                              "min": item["min"], "max": item["max"]}
-                       for key, item in state["stats"].items() if item["count"]}
-    return {"report_schema_version": REPORT_SCHEMA_VERSION, "provenance": dict(provenance),
-            "status": "REJECTED_MIXED_PROMPT_HASH" if mixed else "OK",
+    identities = dict(state["identities"])
+    if state["identity_errors"]:
+        status = "REJECTED_MISSING_IDENTITY"
+    elif len(identities) > 1:
+        status = "REJECTED_MIXED_IDENTITY"
+    else:
+        status = "OK"
+    aggregate = {key: {"count": item["count"], "mean": item["sum"] / item["count"], "min": item["min"], "max": item["max"]}
+                 for key, item in state["stats"].items() if item["count"]}
+    return {"report_schema_version": REPORT_SCHEMA_VERSION, "provenance": dict(provenance), "status": status,
             "records": {"seen": state["seen"], "valid": valid, "invalid": state["invalid"],
                         "invalid_rate": state["invalid"] / state["seen"] if state["seen"] else 0.0},
             "unknown": {key: {"count": value, "coverage": value / valid if valid else 0.0,
-                                "reasons": dict(state["unknown_reasons"][key])}
-                        for key, value in state["unknown"].items()},
+                              "reasons": dict(state["unknown_reasons"][key])} for key, value in state["unknown"].items()},
             "reasons": dict(state["reasons"]), "tag_present": dict(state["tag_present"]),
             "quality_evidence": {"conflict_records": state["conflict_records"], "missing_records": state["missing_records"],
-                "conflict_rate": state["conflict_records"] / valid if valid else 0.0,
-                "missing_rate": state["missing_records"] / valid if valid else 0.0},
-            "siglip": {"prompt_bank_hashes": hashes, "model_revisions": dict(state["model_revisions"]),
-                         "raw_statistics": aggregate_stats}, "bad_records": state["bad_records"]}
+                                 "conflict_rate": state["conflict_records"] / valid if valid else 0.0,
+                                 "missing_rate": state["missing_records"] / valid if valid else 0.0},
+            "siglip": {"calibration_identities": identities, "model_revisions": dict(state["model_revisions"]),
+                       "raw_statistics": aggregate}, "bad_records": state["bad_records"]}
 
 
 def _write_csv(path: Path, report: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temp.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["tag", "metric", "count", "mean", "min", "max"])
-        writer.writeheader()
-        for key, values in sorted(report["siglip"]["raw_statistics"].items()):
-            tag, metric = key.split(".", 1)
-            writer.writerow({"tag": tag, "metric": metric, **values})
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["tag", "metric", "count", "mean", "min", "max"])
+            writer.writeheader()
+            for key, values in sorted(report["siglip"]["raw_statistics"].items()):
+                tag, metric = key.split(".", 1)
+                writer.writerow({"tag": tag, "metric": metric, **values})
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        _fsync_directory(path.parent)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def run(*, db_path: str | None = None, jsonl_path: str | None = None, output_dir: str = "output",
         config_path: str | None = None, checkpoint_every: int = 250, stop_after: int | None = None) -> dict[str, Any]:
     if bool(db_path) == bool(jsonl_path):
         raise ValueError("provide exactly one of db_path or jsonl_path")
-    source = Path(db_path or jsonl_path or "")
-    kind = "db" if db_path else "jsonl"
-    identity = _source_identity(source, kind)
+    source, kind = Path(db_path or jsonl_path or ""), "db" if db_path else "jsonl"
     config_hash = _sha256(Path(config_path)) if config_path else None
-    out = Path(output_dir)
-    checkpoint = out / "scene-shadow.checkpoint.json"
-    state = _load_checkpoint(checkpoint, identity, config_hash)
-    iterator = _iter_db(source) if kind == "db" else _iter_jsonl(source)
-    completed = True
-    for index, anon_id, raw in iterator:
-        if index < state["next_index"]:
-            continue
-        _consume(state, anon_id, raw)
-        state["next_index"] = index + 1
-        if checkpoint_every > 0 and state["seen"] % checkpoint_every == 0:
-            _atomic_json(checkpoint, _checkpoint_payload(state))
-        if stop_after is not None and state["seen"] >= stop_after:
-            completed = False
-            break
-    _atomic_json(checkpoint, _checkpoint_payload(state))
-    provenance = {"input": identity, "config_sha256": config_hash, "checkpoint_used": checkpoint.name,
-                  "offline": True, "source_paths_omitted": True, "production_thresholds": "not_set"}
-    report = _summary(state, provenance)
-    if completed:
-        _atomic_json(out / "scene-shadow-summary.json", report)
-        _write_csv(out / "scene-shadow-tag-statistics.csv", report)
-    return report
+    out, checkpoint = Path(output_dir), Path(output_dir) / "scene-shadow.checkpoint.json"
+    with _fixed_source(source, kind) as (fixed, identity):
+        saved = _load_raw_checkpoint(checkpoint, identity, config_hash)
+        iterator = _iter_db(fixed) if kind == "db" else _iter_jsonl(fixed)
+        state, buffered = _validated_resume(iterator, saved, identity, config_hash)
+        prefix_verified = saved is not None and state is saved
+        if saved is not None and state is not saved:
+            iterator = _iter_db(fixed) if kind == "db" else _iter_jsonl(fixed)
+        completed = True
+        for index, anon_id, raw, raw_bytes in chain(buffered, iterator):
+            if index < state["next_index"]:
+                continue
+            _consume(state, anon_id, raw)
+            _advance_digest(state, raw_bytes)
+            state["next_index"] = index + 1
+            if checkpoint_every > 0 and state["seen"] % checkpoint_every == 0:
+                _atomic_json(checkpoint, json_safe(state))
+            if stop_after is not None and state["seen"] >= stop_after:
+                completed = False
+                break
+        _atomic_json(checkpoint, json_safe(state))
+        provenance = {"input": identity, "config_sha256": config_hash, "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                      "checkpoint_prefix_verified": prefix_verified, "sqlite_snapshot": kind == "db",
+                      "offline": True, "source_paths_omitted": True, "production_thresholds": "not_set"}
+        report = _summary(state, provenance)
+        if completed:
+            _atomic_json(out / "scene-shadow-summary.json", report)
+            _write_csv(out / "scene-shadow-tag-statistics.csv", report)
+        return report
 
 
 def main(argv: list[str] | None = None) -> int:
