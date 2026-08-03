@@ -5,8 +5,10 @@
 This first run only creates a review page. It **never calls `execute_local` and
 never moves or deletes a photo**.
 
-1. Install Python 3.11+ (*Add Python to PATH*), open Command Prompt in this
-   folder, then set up the environment:
+1. Install **Python 3.12** (recommended; 3.11+ is accepted), open Command Prompt
+   or PowerShell in this folder, then set up the environment. Python 3.14 is
+   allowed on a best-effort basis; setup will report the exact package if its
+   Windows wheel is not available yet:
 
    ```bat
    setup_windows.bat
@@ -111,8 +113,8 @@ resolution — see `docs/ALGORITHM.md §4`.
 
 ## Install (Windows)
 
-1. Install **Python 3.11+** (tick *"Add python.exe to PATH"*) and a current
-   **NVIDIA driver** (CUDA 12.x runtime ships with the PyTorch wheels — no
+1. Install **Python 3.12** (recommended; setup accepts 3.11+) and a current
+   **NVIDIA driver** (the CUDA 12.8 runtime ships with the PyTorch wheels — no
    separate CUDA toolkit needed).
 2. Double-click **`setup_windows.bat`**. It creates `.venv`, installs the
    CUDA PyTorch wheels, then the rest of `requirements.txt`, and prints whether

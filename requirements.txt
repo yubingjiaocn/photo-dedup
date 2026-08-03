@@ -1,13 +1,13 @@
 # =============================================================================
 # Photo Dedup — Python dependencies
 # =============================================================================
-# Target: Windows 11 + NVIDIA RTX 5070 Ti (16GB) + CUDA 12.x + Python 3.11
+# Target: Windows 11 + NVIDIA RTX 5070 Ti (16GB) + PyTorch cu128 + Python 3.12
 #
 # IMPORTANT ordering note:
 #   PyTorch CUDA wheels are NOT on PyPI. Install torch FIRST from the CUDA
 #   index, THEN the rest of this file. `setup_windows.bat` does this for you.
 #
-#       pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#       pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 #       pip install -r requirements.txt
 #
 # The core pipeline (stage0/2/3/execute) + all tests run WITHOUT torch using
