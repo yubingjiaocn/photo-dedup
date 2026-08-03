@@ -1,4 +1,4 @@
-"""Stage 4 (local) -- execute the local deletions from ``delete_local.txt``.
+"""Stage 4 (local) -- move AUTO_REMOVE items to recoverable trash.
 
 Safety-first defaults (from config.yaml):
   * ``execute.dry_run: true``  -> writes a plan, touches nothing.
@@ -12,7 +12,6 @@ Usage
 -----
     python -m src.execute_local                      # honor config (dry_run first!)
     python -m src.execute_local --no-dry-run         # actually move to _trash
-    python -m src.execute_local --mode delete --no-dry-run   # hard delete (risky)
     python -m src.execute_local --undo E:/Photos/_trash/2026-07-23_101500
 """
 
@@ -84,19 +83,6 @@ def move_files(files: List[Path], root: Path, trash_root: Path) -> dict:
     return {"moved": moved, "missing": missing, "session_dir": str(session_dir)}
 
 
-def delete_files(files: List[Path]) -> dict:
-    """Hard-delete files (no undo). Use only after reviewing a move run."""
-    deleted = 0
-    missing = 0
-    for src in tqdm(files, desc="delete", unit="file"):
-        if not src.exists():
-            missing += 1
-            continue
-        src.unlink()
-        deleted += 1
-    return {"deleted": deleted, "missing": missing}
-
-
 def undo(session_dir: Path) -> dict:
     """Restore a previous move session from its undo manifest."""
     manifest_path = session_dir / UNDO_MANIFEST
@@ -154,8 +140,6 @@ def run(
 
     if mode == "move":
         result = move_files(files, cfg.root_path, cfg.trash_path)
-    elif mode == "delete":
-        result = delete_files(files)
     else:
         raise ValueError(f"unknown mode: {mode}")
     print(f"[execute] done -> {result}")
@@ -165,7 +149,8 @@ def run(
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 4: execute local deletions")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--mode", default=None, choices=["move", "delete"])
+    ap.add_argument("--mode", default=None, choices=["move"],
+                    help="automatic items may only be moved to recoverable trash")
     ap.add_argument("--no-dry-run", dest="dry_run", action="store_false", default=None,
                     help="actually perform the move/delete")
     ap.add_argument("--dry-run", dest="dry_run", action="store_true", default=None,

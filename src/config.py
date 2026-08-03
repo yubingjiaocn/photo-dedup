@@ -44,6 +44,7 @@ _DEFAULTS: Dict[str, Any] = {
         "iqa_clipiqa": True,
         "yunet_input_width": 640,
         "yunet_score_threshold": 0.6,
+        "exposure_long_edge": 512,
         "yunet_url": (
             "https://github.com/opencv/opencv_zoo/raw/main/models/"
             "face_detection_yunet/face_detection_yunet_2023mar.onnx"
@@ -64,6 +65,9 @@ _DEFAULTS: Dict[str, Any] = {
         "weight_face": 0.3,
         "weight_resolution": 0.1,
         "resolution_ref_mp": 12.0,
+    },
+    "decision": {
+        "profile": "balanced",
     },
     "execute": {
         "mode": "move",
@@ -111,7 +115,7 @@ class Config:
     def __init__(self, data: Dict[str, Any], source: Path | None = None) -> None:
         self._data = data
         self.source = source
-        for section in ("paths", "scan", "features", "cluster", "quality", "execute"):
+        for section in ("paths", "scan", "features", "cluster", "quality", "decision", "execute"):
             setattr(self, section, Section(data.get(section, {})))
 
     # -- resolved paths -----------------------------------------------------

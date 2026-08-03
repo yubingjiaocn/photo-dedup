@@ -1,7 +1,7 @@
 @echo off
 REM ===========================================================================
 REM  Photo Dedup - one-shot Windows environment setup
-REM  Target: Windows 11 + NVIDIA RTX 5070 Super + CUDA 12.x + Python 3.11+
+REM  Target: Windows 11 + NVIDIA RTX 5070 Ti + CUDA 12.x + Python 3.11+
 REM ===========================================================================
 REM  What this does:
 REM    1. Creates a local virtual environment in .venv

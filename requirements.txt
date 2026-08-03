@@ -1,7 +1,7 @@
 # =============================================================================
 # Photo Dedup — Python dependencies
 # =============================================================================
-# Target: Windows 11 + NVIDIA RTX 5070 Super (16GB) + CUDA 12.x + Python 3.11
+# Target: Windows 11 + NVIDIA RTX 5070 Ti (16GB) + CUDA 12.x + Python 3.11
 #
 # IMPORTANT ordering note:
 #   PyTorch CUDA wheels are NOT on PyPI. Install torch FIRST from the CUDA

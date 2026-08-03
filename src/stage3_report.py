@@ -23,10 +23,9 @@ import io
 import json
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import Config, load_config
+from .config import load_config
 from . import db
 
 
@@ -58,12 +57,13 @@ def _partner_path(conn, file_id: Optional[int]) -> Optional[str]:
 
 
 def collect_deletions(conn) -> Dict[str, Any]:
-    """Walk groups; return keep/delete records + motion-partner-expanded paths."""
+    """Collect only AUTO_REMOVE manifests; retain review queues separately."""
     groups_out: List[Dict[str, Any]] = []
     delete_paths: List[str] = []
     cloud_items: List[Dict[str, Any]] = []
     total_delete_bytes = 0
     seen_delete: set[str] = set()
+    queues: Dict[str, List[Dict[str, Any]]] = {"MAYBE": [], "UNKNOWN": []}
 
     for grp in db.iter_groups(conn):
         members = db.group_members(conn, grp["id"])
@@ -76,11 +76,17 @@ def collect_deletions(conn) -> Dict[str, Any]:
                 "exif_datetime": m["exif_datetime"], "quality_score": m["quality_score"],
                 "face_count": m["face_count"], "reason": m["reason"],
                 "motion_partner_id": m["motion_partner_id"], "is_keep": bool(m["is_keep"]),
+                "decision": m["decision"] or ("KEEP" if m["is_keep"] else "UNKNOWN"),
+                "confidence": m["confidence"], "evidence": _json_obj(m["evidence_json"]),
+                "quality_meta": _json_obj(m["quality_meta"]),
             }
-            if rec["is_keep"]:
+            if rec["decision"] == "KEEP":
                 keep_rec = rec
-            else:
+            elif rec["decision"] == "AUTO_REMOVE":
                 del_recs.append(rec)
+            elif rec["decision"] in queues:
+                rec["risk"] = _risk(rec)
+                queues[rec["decision"]].append(rec)
 
         for rec in del_recs:
             for p, size in _expand_with_partner(conn, rec):
@@ -106,7 +112,24 @@ def collect_deletions(conn) -> Dict[str, Any]:
         "delete_paths": delete_paths,
         "cloud_items": cloud_items,
         "total_delete_bytes": total_delete_bytes,
+        "queues": {k: sorted(v, key=lambda x: x["risk"], reverse=True) for k, v in queues.items()},
     }
+
+
+def _json_obj(raw: Optional[str]) -> Dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _risk(rec: Dict[str, Any]) -> float:
+    ev = rec.get("evidence") or {}
+    margin = abs(float(ev.get("pair_margin", 0.0)))
+    exposure = (rec.get("quality_meta") or {}).get("exposure", {})
+    return max(0.0, 1.0 - margin, float(exposure.get("clip_hi", 0.0)),
+               float(exposure.get("clip_lo", 0.0)))
 
 
 def _expand_with_partner(conn, rec: Dict[str, Any]) -> List[tuple]:
@@ -138,6 +161,7 @@ _HTML_HEAD = """<!DOCTYPE html>
  .row{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
  .keep{border:2px solid #4c9;padding:6px;border-radius:6px}
  .del{border:2px solid #c55;padding:6px;border-radius:6px;opacity:.9}
+ .maybe{border-color:#fc3}.unknown{border-color:#999}
  .cap{font-size:11px;color:#bbb;max-width:210px;word-break:break-all}
  img{display:block;border-radius:4px}
  .tag{font-size:11px;padding:2px 6px;border-radius:4px;color:#000}
@@ -148,8 +172,9 @@ _HTML_HEAD = """<!DOCTYPE html>
 
 def _img_block(rec: Dict[str, Any], max_px: int, is_keep: bool, thumbs: bool = True) -> str:
     uri = thumb_data_uri(rec["path"], max_px) if thumbs else None
-    tag = '<span class="tag tk">KEEP</span>' if is_keep else '<span class="tag td">DELETE</span>'
-    cls = "keep" if is_keep else "del"
+    decision = rec.get("decision", "KEEP" if is_keep else "AUTO_REMOVE")
+    tag = f'<span class="tag {"tk" if decision == "KEEP" else "td"}">{decision}</span>'
+    cls = "keep" if decision == "KEEP" else f'del {decision.lower()}'
     if uri:
         img = f'<img src="{uri}" width="{max_px}">'
     else:
@@ -157,9 +182,17 @@ def _img_block(rec: Dict[str, Any], max_px: int, is_keep: bool, thumbs: bool = T
         img = '<div style="width:%dpx;color:#888">%s</div>' % (max_px, note)
     score = rec.get("quality_score")
     score_txt = f"{score:.1f}" if isinstance(score, (int, float)) else "?"
+    exp = (rec.get("quality_meta") or {}).get("exposure", {})
+    exp_txt = ""
+    if exp:
+        exp_txt = (
+            f'<br>clip={float(exp.get("clip_hi", 0)):.1%}/{float(exp.get("clip_lo", 0)):.1%} '
+            f'anchor={float(exp.get("anchor_mass", 0)):.1%} '
+            f'entropy={float(exp.get("entropy_nonclip", 0)):.2f}'
+        )
     cap = (
         f'{tag}<br>{html.escape(rec["basename"])}<br>'
-        f'{rec["width"]}x{rec["height"]} | q={score_txt} | faces={rec["face_count"]}<br>'
+        f'{rec["width"]}x{rec["height"]} | q={score_txt} | faces={rec["face_count"]}{exp_txt}<br>'
         f'{html.escape(str(rec["reason"] or ""))}'
     )
     return f'<div class="{cls}">{img}<div class="cap">{cap}</div></div>'
@@ -186,6 +219,12 @@ def render_html(data: Dict[str, Any], thumbs: bool = True) -> str:
         for d in g["deletes"]:
             parts.append(_img_block(d, 150, False, thumbs))
         parts.append("</div></div>")
+    for state in ("MAYBE", "UNKNOWN"):
+        parts.append(f'<h1>{state} review queue ({len(data["queues"][state])})</h1>')
+        parts.append('<div class="row">')
+        for rec in data["queues"][state]:
+            parts.append(_img_block(rec, 150, False, thumbs))
+        parts.append('</div>')
     parts.append("</body></html>")
     return "".join(parts)
 
@@ -199,6 +238,7 @@ def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     data = collect_deletions(conn)
+    data["decision_stats"] = _json_obj(db.get_meta(conn, "stage2_stats", "{}"))
 
     # delete_local.txt
     local_txt = out_dir / "delete_local.txt"
@@ -225,9 +265,15 @@ def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str,
         fh.write(f"groups: {len(data['groups'])}\n")
         fh.write(f"files to delete (incl. motion sidecars): {len(data['delete_paths'])}\n")
         fh.write(f"cloud items to trash: {len(data['cloud_items'])}\n")
+        fh.write(f"maybe review: {len(data['queues']['MAYBE'])}\n")
+        fh.write(f"unknown review: {len(data['queues']['UNKNOWN'])}\n")
+        stats = data["decision_stats"]
+        fh.write(f"auto coverage: {float(stats.get('auto_coverage', 0)):.1%}\n")
+        fh.write("decision reasons: " + json.dumps(stats.get("reasons", {}), ensure_ascii=False) + "\n")
         fh.write(f"reclaimable: {gb:.2f} GB ({data['total_delete_bytes']} bytes)\n")
 
     db.set_meta(conn, "stage3_done_at", str(int(time.time())))
+    conn.commit()
     conn.close()
     print(
         f"[stage3] wrote {review.name}, {local_txt.name}, {cloud_json.name}, "
@@ -237,6 +283,8 @@ def run(config_path: Optional[str] = None, no_thumbs: bool = False) -> Dict[str,
         "groups": len(data["groups"]),
         "delete_files": len(data["delete_paths"]),
         "cloud_items": len(data["cloud_items"]),
+        "maybe": len(data["queues"]["MAYBE"]),
+        "unknown": len(data["queues"]["UNKNOWN"]),
         "reclaim_gb": gb,
         "output_dir": str(out_dir),
     }

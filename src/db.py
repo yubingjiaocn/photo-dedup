@@ -57,7 +57,11 @@ CREATE TABLE IF NOT EXISTS groups (
   group_type TEXT,              -- 'exact_dup' | 'burst' | 'similar_scene'
   keep_file_id INTEGER,
   member_count INTEGER,
-  created_at INTEGER
+  created_at INTEGER,
+  decision_state TEXT,
+  confidence REAL,
+  policy_version TEXT,
+  decision_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS group_members (
@@ -65,6 +69,10 @@ CREATE TABLE IF NOT EXISTS group_members (
   file_id INTEGER,
   is_keep INTEGER,              -- SQLite has no bool; 0/1
   reason TEXT,
+  decision TEXT,
+  confidence REAL,
+  evidence_json TEXT,
+  user_override TEXT,
   PRIMARY KEY (group_id, file_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gm_file ON group_members(file_id);
@@ -99,8 +107,24 @@ def open_db(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add P0 decision columns to databases created by pre-P0 releases."""
+    additions = {
+        "groups": {"decision_state": "TEXT", "confidence": "REAL",
+                   "policy_version": "TEXT", "decision_json": "TEXT"},
+        "group_members": {"decision": "TEXT", "confidence": "REAL",
+                          "evidence_json": "TEXT", "user_override": "TEXT"},
+    }
+    for table, columns in additions.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
 
 # --- files -----------------------------------------------------------------
@@ -234,15 +258,18 @@ def insert_group(
     keep_file_id: int,
     members: Sequence[Tuple[int, bool, str]],
     created_at: int,
+    *, decision_state: str | None = None, confidence: float | None = None,
+    policy_version: str | None = None, decision_json: str | None = None,
 ) -> int:
     """Insert one group + its members.
 
     ``members`` is a sequence of ``(file_id, is_keep, reason)``.
     """
     cur = conn.execute(
-        "INSERT INTO groups (group_type, keep_file_id, member_count, created_at) "
-        "VALUES (?, ?, ?, ?)",
-        (group_type, keep_file_id, len(members), created_at),
+        "INSERT INTO groups (group_type, keep_file_id, member_count, created_at, "
+        "decision_state, confidence, policy_version, decision_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (group_type, keep_file_id, len(members), created_at, decision_state,
+         confidence, policy_version, decision_json),
     )
     group_id = int(cur.lastrowid)
     conn.executemany(
@@ -251,6 +278,15 @@ def insert_group(
         [(group_id, fid, 1 if keep else 0, reason) for (fid, keep, reason) in members],
     )
     return group_id
+
+
+def update_member_decisions(conn: sqlite3.Connection, group_id: int,
+                            records: Sequence[Dict[str, Any]]) -> None:
+    conn.executemany(
+        "UPDATE group_members SET decision=:decision, confidence=:confidence, "
+        "reason=:reason, evidence_json=:evidence_json WHERE group_id=:group_id AND file_id=:file_id",
+        [{**r, "group_id": group_id} for r in records],
+    )
 
 
 def iter_groups(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:

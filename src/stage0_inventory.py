@@ -70,7 +70,7 @@ def read_image_header(path: Path) -> Dict[str, object]:
         "width": None, "height": None, "exif_datetime": None, "exif_timestamp": None,
     }
     try:
-        from PIL import Image, ExifTags
+        from PIL import Image
 
         with Image.open(path) as img:
             result["width"], result["height"] = img.size

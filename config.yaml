@@ -41,6 +41,7 @@ features:
   iqa_clipiqa: true
   yunet_input_width: 640         # long-edge resize before face detection
   yunet_score_threshold: 0.6
+  exposure_long_edge: 512       # raw exposure metrics; changing this requires Stage 1 + recalibration
   yunet_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 cluster:
@@ -59,6 +60,11 @@ quality:
   weight_resolution: 0.1
   resolution_ref_mp: 12.0        # megapixels that map to full resolution_bonus=1.0
 
+decision:
+  # conservative | balanced | aggressive. Profiles only change abstention
+  # coverage; exact duplicates and clear hard exposure failures override.
+  profile: "balanced"
+
 execute:
-  mode: "move"                   # move | delete
+  mode: "move"                   # automatic decisions are always recoverable
   dry_run: true                  # first run: true (writes plan, touches nothing)

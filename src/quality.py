@@ -18,7 +18,7 @@ See docs/ALGORITHM.md for the reasoning behind each weight.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 

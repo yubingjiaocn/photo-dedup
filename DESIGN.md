@@ -34,9 +34,9 @@ Willy 的典型 case：**打卡照**——景点/建筑/物件是主体，人在
 
 E:\ 是机械盘，随机读慢。**所有涉及原图读取的操作必须一次顺序遍历完成**，中间结果落 SQLite，后续聚类/打分复用缓存。可断点续跑（每 100 张 commit 一次）。
 
-### 4. 5070S GPU
+### 4. 5070 Ti GPU
 
-有 16GB VRAM（RTX 5070 Super）。可跑：
+有 16GB VRAM（RTX 5070 Ti）。可跑：
 - DINOv2-base（~86M 参数，224x224 输入，batch 32 完全没问题）
 - pyiqa 的 MUSIQ / CLIP-IQA（预训练模型，几百 MB）
 - YuNet 人脸检测（ONNX，CPU 都够，GPU 更快）
@@ -102,7 +102,7 @@ CREATE TABLE features (
 4. 缩放到 640 宽度送 YuNet → face bbox + landmarks + confidence
 5. 每 100 张 commit 一次，支持 Ctrl+C 断点续跑
 
-**性能预期**：DINOv2-base + MUSIQ + YuNet 在 5070S 上估计 20-50 张/秒，6.6 万张 GPU 阶段 30-60 分钟。加上 HDD 顺序读 IO，整个 Stage 1 估计 2-4 小时。
+**性能预期**：DINOv2-base + MUSIQ + YuNet 在 5070 Ti 上估计 20-50 张/秒，6.6 万张 GPU 阶段 30-60 分钟。加上 HDD 顺序读 IO，整个 Stage 1 估计 2-4 小时。
 
 ### Stage 2: 聚类（CPU，快）
 
@@ -162,7 +162,7 @@ Willy 用浏览器打开 `review.html` 抽样看几十组，OK 再执行删除�
 **本地**（脚本）：
 ```
 python execute_local.py --mode move    # 移到 E:\Photos\_trash\YYYY-MM-DD_HHMMSS\
-python execute_local.py --mode delete  # 直接删（不推荐首次跑）
+自动清理只允许 move/trash；永久删除不由本 pipeline 执行。
 ```
 
 **云端**（GPTK console 脚本）：

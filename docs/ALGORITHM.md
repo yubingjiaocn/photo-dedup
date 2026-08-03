@@ -43,7 +43,7 @@ where the person clearly moved.
     separates "same viewpoint of the same place" from "different place". CLIP
     leans more on semantic category ("a beach") and would happily call two
     *different* beaches similar — bad for de-dup.
-  - `-base` (86M) is the accuracy/VRAM sweet spot on a 16 GB RTX 5070 Super;
+  - `-base` (86M) is the accuracy/VRAM sweet spot on a 16 GB RTX 5070 Ti;
     `-small` trades away discrimination we actually need, `-large`/`-giant`
     give marginal gains for much more VRAM and time.
 - **Cosine similarity** is the comparison metric (embeddings are L2-normalised).
@@ -67,6 +67,17 @@ where the person clearly moved.
   beats one where the face is blurry).
 - `yunet_score_threshold: 0.6` — ignore low-confidence detections that are
   often texture false-positives.
+
+### Explainable exposure features (numpy/OpenCV)
+
+During the same Stage 1 decode, the image is reduced to a 512 px long edge and
+raw metrics are stored under `quality_meta.exposure`: all-channel highlight and
+shadow clipping ratios, largest connected clipping regions, usable-tone mass,
+mid-tone anchor mass, non-clipped luminance entropy, mean luminance, plus the
+same metrics for each already-detected face ROI. Labels are derived in Stage 2,
+so changing decision thresholds does not re-read images. Reject requires
+multiple conditions; silhouettes and local highlights are protected by anchor,
+connected-region, entropy, and face-ROI gates.
 
 ---
 
@@ -187,4 +198,12 @@ but off by default to preserve stage 0's small-read budget on the HDD.
   tree, with an `_undo_manifest.json` enabling `--undo`.
 - Cloud deletes go to the Google Photos **trash** (60-day recovery).
 
-Nothing in this pipeline is irreversible by default.
+Stage 2 emits `KEEP/AUTO_REMOVE/MAYBE/UNKNOWN` with a mandatory keeper floor.
+`similar_scene` never auto-removes by default. Stage 3 manifests contain only
+`AUTO_REMOVE`; Maybe and Unknown are shown separately in risk order. Stage 4
+accepts only recoverable `move`, so automatic decisions cannot hard-delete.
+
+Profiles (`conservative`, default `balanced`, `aggressive`) tune abstention
+margin, while exact duplicates and clear hard exposure failures take the safe
+automatic lane. Closed-eye and OFIQ hooks exist but remain disabled/unknown
+until their models are validated.

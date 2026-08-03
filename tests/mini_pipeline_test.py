@@ -3,15 +3,15 @@
 Scenario (all using the deterministic 'stub' feature backend, no GPU):
 
   * BURST     -- 3 near-identical frames, seconds apart, no person
-                 -> must collapse into exactly ONE group (keep 1, delete 2).
+                 -> one group; uncertain non-keepers go to Maybe.
   * CHECK-IN  -- 3 frames of the same background with a "person" (red block)
                  at very different positions, seconds apart
                  -> must NOT group (the face-position guard splits them).
   * INDEPENDENT -- 4 distinct scenes, far apart in time
                  -> must NOT group.
 
-Assertion: stage 2 produces exactly 1 group, and it is the burst group;
-stage 3 lists exactly 2 files to delete.
+Assertion: stage 2 produces exactly 1 group and preserves its keeper;
+stage 3 excludes Maybe from manifests.
 
 Design notes to keep the synthetic data honest:
   * Backgrounds use LOW red (R < ~60) so the stub face detector (which keys on
@@ -138,7 +138,8 @@ def test_mini_pipeline(tmp_path):
     # Stage 2: cluster
     stats = s2.run(config_path=cfg_path)
     assert stats["groups"] == 1, f"expected exactly 1 group, got {stats}"
-    assert stats["to_delete"] == 2
+    assert stats["to_delete"] == 0
+    assert stats["maybe"] == 2
 
     # Verify the single group is the BURST group (all members at 12:00:xx).
     conn = db.open_db(tmp_path / "inventory.sqlite")
@@ -153,15 +154,16 @@ def test_mini_pipeline(tmp_path):
     # Stage 3: report + delete lists
     rep = s3.run(config_path=cfg_path)
     assert rep["groups"] == 1
-    assert rep["delete_files"] == 2
+    assert rep["delete_files"] == 0
+    assert rep["maybe"] == 2
 
     out = tmp_path / "output"
     assert (out / "review.html").exists()
     assert (out / "summary.txt").exists()
     dl = (out / "delete_local.txt").read_text(encoding="utf-8").strip().splitlines()
-    assert len(dl) == 2
+    assert dl == []
     cloud = (out / "delete_cloud.json").read_text(encoding="utf-8")
-    assert cloud.count("filename") == 2
+    assert cloud.count("filename") == 0
 
 
 if __name__ == "__main__":

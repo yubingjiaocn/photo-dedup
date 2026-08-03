@@ -2,12 +2,12 @@
 
 Automatically de-duplicate a large local photo library (JPEG + motion photos +
 video), then trash the same photos in Google Photos. Built for a Windows
-desktop with an NVIDIA RTX 5070 Super (16 GB) and photos on an HDD.
+desktop with an NVIDIA RTX 5070 Ti (16 GB) and photos on an HDD.
 
-It is **automatic** — you never hand-inspect every group. You *can* open a
-review page to spot-check before anything is deleted, and nothing is deleted
-irreversibly by default (local files move to a trash folder with one-command
-undo; cloud deletes go to Google's 60-day trash).
+It is **selectively automatic** — clear exact duplicates and hard exposure
+failures become `AUTO_REMOVE`; only boundary cases go to `MAYBE`, and missing
+features become `UNKNOWN`. Every group has a `KEEP`. Automatic items can only
+move to recoverable trash (local undo / Google's trash), never permanent delete.
 
 > Read `docs/ALGORITHM.md` for *why* every threshold is what it is. Read
 > `DESIGN.md` for the original design.
@@ -79,7 +79,7 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    python -m src.stage1_features
    ```
-   *~1–4 h for 66k files; ~20–50 img/s on the 5070 S. Commits every 100 images,
+   *~1–4 h for 66k files; ~20–50 img/s on the 5070 Ti. Commits every 100 images,
    so re-running continues where it stopped.*
 
 4. **Stage 2 — cluster** (CPU, minutes). Re-run freely after tweaking thresholds
@@ -92,8 +92,9 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    python -m src.stage3_report
    ```
-   Produces in `output/`: `review.html`, `delete_local.txt`,
-   `delete_cloud.json`, `summary.txt`.
+   Produces in `output/`: `review.html` (separate risk-sorted Maybe/Unknown
+   queues), `delete_local.txt`, `delete_cloud.json`, `summary.txt`. Manifests
+   contain only `AUTO_REMOVE` decisions.
 
 6. **Review** — open `output/review.html` in a browser. Each group shows the
    keeper vs the delete candidates with scores. Spot-check a few dozen groups.
@@ -108,8 +109,7 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    python -m src.execute_local --undo E:/Photos/_trash/2026-07-23_101500
    ```
-   (Hard delete instead of move: `--mode delete --no-dry-run`. Not recommended
-   for the first pass.)
+   Permanent deletion is intentionally unavailable for automatic decisions.
 
 8. **Delete in Google Photos** — install **Tampermonkey** + the
    **Google Photos Toolkit** userscript, open `photos.google.com`, open the
@@ -124,6 +124,10 @@ Activate the environment first: `\.venv\Scripts\activate`
 
 Everything lives in `config.yaml`; `docs/ALGORITHM.md` explains each value.
 Most common tweaks:
+
+- **Automation coverage:** set `decision.profile` to `conservative`, `balanced`
+  (default), or `aggressive`. Exact duplicates and clear hard defects remain
+  automatic; profiles mainly change how much of the boundary becomes Maybe.
 
 - **Over-merging** (different photos grouped)? Raise `cluster.dinov2_threshold`
   (0.92 → 0.94) and/or lower `cluster.face_pose_shift_ratio` (0.30 → 0.20, more

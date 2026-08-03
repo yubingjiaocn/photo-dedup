@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -40,6 +39,7 @@ import numpy as np
 from .config import Config, load_config
 from . import db
 from . import quality as Q
+from . import decision as D
 
 PRIORITY = {"exact_dup": 3, "burst": 2, "similar_scene": 1}
 
@@ -299,7 +299,9 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
     db.clear_groups(conn)
     created_at = int(time.time())
     group_count = 0
-    delete_count = 0
+    decision_counts = {k: 0 for k in D.VALID_DECISIONS}
+    reason_counts: Dict[str, int] = {}
+    profile = str(cfg.decision.get("profile", "balanced"))
     for root, member_idx in comps.items():
         if len(member_idx) < 2:
             continue
@@ -307,24 +309,60 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         keep_local, scores = select_keep(members, cfg)
         keep_file_id = int(rows[member_idx[keep_local]]["id"])
         gtype = comp_type.get(root, "burst")
+        keep_hash = rows[member_idx[keep_local]]["phash"]
+        distances = {
+            local: Q.hamming(keep_hash, rows[gi]["phash"])
+            for local, gi in enumerate(member_idx)
+        }
+        # DSU reachability is not enough: require every burst member to remain
+        # close to the selected representative, preventing A~B~C chaining from
+        # turning an outlier into an automatic removal.
+        purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
+                     for gi in member_idx)
+        group_trusted = gtype == "exact_dup" or (
+            gtype == "burst" and purity >= float(cc.get("dinov2_threshold", 0.92))
+        )
+        result = D.decide_group(
+            members, keep_local, scores, gtype, profile=profile,
+            phash_distances=distances, group_trusted=group_trusted,
+        )
         member_tuples = []
         for local, gi in enumerate(member_idx):
             fid = int(rows[gi]["id"])
             is_keep = local == keep_local
-            reason = (
-                f"keep score={scores[local]:.3f}"
-                if is_keep
-                else f"dup of {keep_file_id} score={scores[local]:.3f}"
-            )
+            record = result["members"][local]
+            reason = record["reason"]
             member_tuples.append((fid, is_keep, reason))
-            if not is_keep:
-                delete_count += 1
-        db.insert_group(conn, gtype, keep_file_id, member_tuples, created_at)
+            decision_counts[record["decision"]] += 1
+            reason_counts[reason.split(":", 1)[0]] = reason_counts.get(reason.split(":", 1)[0], 0) + 1
+        gid = db.insert_group(
+            conn, gtype, keep_file_id, member_tuples, created_at,
+            decision_state=result["state"],
+            confidence=min(r["confidence"] for r in result["members"].values()),
+            policy_version=D.POLICY_VERSION,
+            decision_json=json.dumps({"profile": profile, "group_purity": purity,
+                                      "group_trusted": group_trusted}),
+        )
+        db.update_member_decisions(conn, gid, [
+            {"file_id": int(rows[gi]["id"]), **result["members"][local],
+             "evidence_json": json.dumps(result["members"][local]["evidence"])}
+            for local, gi in enumerate(member_idx)
+        ])
         group_count += 1
     conn.commit()
     db.set_meta(conn, "stage2_done_at", str(created_at))
 
-    stats = {"files": n, "groups": group_count, "to_delete": delete_count}
+    candidates = sum(decision_counts[k] for k in ("AUTO_REMOVE", "MAYBE", "UNKNOWN"))
+    stats = {
+        "files": n, "groups": group_count,
+        "to_delete": decision_counts["AUTO_REMOVE"],
+        "auto_remove": decision_counts["AUTO_REMOVE"],
+        "maybe": decision_counts["MAYBE"], "unknown": decision_counts["UNKNOWN"],
+        "auto_coverage": decision_counts["AUTO_REMOVE"] / candidates if candidates else 0.0,
+        "reasons": reason_counts, "profile": profile,
+    }
+    db.set_meta(conn, "stage2_stats", json.dumps(stats))
+    conn.commit()
     print(f"[stage2] {stats}")
     return stats
 

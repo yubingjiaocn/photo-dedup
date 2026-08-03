@@ -37,6 +37,8 @@ from PIL import Image
 from .config import Config, load_config
 from . import db
 from . import quality as Q
+from . import exposure
+from . import decision
 
 try:  # progress bar is optional
     from tqdm import tqdm
@@ -252,13 +254,17 @@ def _process_batch(
         return out_rows
 
     embeddings = backend.embed_batch(images)
-    weights = cfg.quality
     for row, image, emb in zip(valid_rows, images, embeddings):
         score, meta = backend.quality(image)
         faces = backend.faces(image)
         img_rgb = np.asarray(image)
         fq = Q.compute_face_quality(img_rgb, faces)
         meta["face_quality"] = fq
+        meta["schema_version"] = 2
+        meta["exposure"] = exposure.extract(
+            image, faces, int(cfg.features.get("exposure_long_edge", 512))
+        )
+        meta["detectors"] = decision.detector_extensions()
         out_rows.append(
             {
                 "file_id": int(row["id"]),
