@@ -203,8 +203,7 @@ def _load_yunet(cfg: Config):
             print(f"[stage1] downloading YuNet model -> {onnx}")
             urllib.request.urlretrieve(url, onnx)  # noqa: S310
         except Exception as exc:  # pragma: no cover
-            print(f"[stage1][WARN] YuNet download failed ({exc}); faces disabled.")
-            return None
+            raise RuntimeError(f"YuNet download failed: {exc}") from exc
     score_thr = float(cfg.features.get("yunet_score_threshold", 0.6))
     return cv2.FaceDetectorYN.create(str(onnx), "", (320, 320), score_thr, 0.3, 5000)
 
@@ -221,7 +220,7 @@ def resolve_backend(cfg: Config, override: Optional[str] = None):
         import torch  # noqa: F401,WPS433
 
         return TorchBackend(cfg)
-    except Exception as exc:
+    except ImportError as exc:
         print(f"[stage1] torch unavailable ({exc}); using stub backend.")
         return StubBackend()
 
