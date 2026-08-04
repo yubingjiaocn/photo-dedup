@@ -33,10 +33,13 @@ Scope + telemetry
 -----------------
 Work is restricted to the photo root this output directory is bound to
 (:mod:`src.root_scope`), so a mismatched ``--root`` fails closed instead of
-silently processing another library's rows. Every phase of the loop is timed
-cumulatively by :mod:`src.stage1_telemetry` (one ``perf_counter`` pair per phase
-per batch, no per-op CUDA sync), which is how a GPU-starvation question gets an
-answer instead of a guess.
+silently processing another library's rows, and an unbound output directory either
+adopts the supplied root or the stage refuses to run.
+
+:mod:`src.stage1_telemetry` accumulates one ``perf_counter`` pair per
+instrumented call (per image, per batch, or per one-off setup step -- the report
+states which). Setup and model load are timed separately from the batch loop, and
+both are reconciled against Stage 1's outer wall time, so nothing hides.
 """
 
 from __future__ import annotations
@@ -97,10 +100,12 @@ def _open_image_and_sha(path: Path, telemetry: Any = None) -> Tuple[Image.Image,
                 hash_seconds += time.perf_counter() - started
                 data.write(chunk)
         data.seek(0)
-    if telemetry is not None and hash_seconds:
-        # Hashing rides along the same sequential read, so its cost is inside the
-        # read span. Bill it to its own phase and remove it from the read span,
-        # keeping the columns additive instead of double counting.
+    if telemetry is not None:
+        # Hashing rides along the same sequential read, so its cost is already
+        # inside the read span. Bill it to its own phase and subtract it from the
+        # read span: the columns stay additive instead of double counting. The
+        # call is counted even when it rounds to zero, so every per-image phase of
+        # a successful read reports the same number of calls.
         telemetry.add("hash_sha256", hash_seconds)
         telemetry.add("source_open_read", -hash_seconds, count=0)
     with phase("decode"):
@@ -143,15 +148,19 @@ def _process_batch(
             hashes.append(sha256)
             valid_rows.append(row)
         except Exception as exc:  # unreadable / corrupt file
-            print(f"[stage1][WARN] cannot read {row['path']}: {exc}")
-            routing = router.route(RoutingInput(
-                metadata=_routing_metadata(row), decode_state=DecodeState.FAILED
-            ))
-            if thumbnailer is not None:
-                thumbnailer.record_source_failure(
-                    row, f"{thumbnails.SOURCE_DECODE_FAILED}: {type(exc).__name__}: {exc}"
-                )
-            out_rows.append(_error_feature_row(int(row["id"]), routing=routing))
+            # The failed attempt still cost real time (a partial read, a decode
+            # that raised, the failure bookkeeping). Instrument it instead of
+            # letting it disappear into unaccounted time.
+            with phase("error_handling"):
+                print(f"[stage1][WARN] cannot read {row['path']}: {exc}")
+                routing = router.route(RoutingInput(
+                    metadata=_routing_metadata(row), decode_state=DecodeState.FAILED
+                ))
+                if thumbnailer is not None:
+                    thumbnailer.record_source_failure(
+                        row, f"{thumbnails.SOURCE_DECODE_FAILED}: {type(exc).__name__}: {exc}"
+                    )
+                out_rows.append(_error_feature_row(int(row["id"]), routing=routing))
 
     if not valid_rows:
         return out_rows
@@ -275,13 +284,20 @@ def _build_thumbnailer(cfg: Config, telemetry: Any = None) -> Optional[thumbnail
 def run(config_path: Optional[str] = None, backend_override: Optional[str] = None,
         limit: Optional[int] = None, root_override: Optional[str] = None) -> Dict[str, Any]:
     """Run stage 1. Returns a small stats dict."""
+    outer_start = time.perf_counter()
     cfg = load_config(config_path)
-    if root_override is not None:
-        # Fail closed before opening/creating anything in the output directory.
-        root_scope.preflight(cfg.db_path, root_override)
+    # Fail closed before opening/creating anything in the output directory: a
+    # wrong --root, and equally an unbound directory with no root to adopt, must
+    # not even create inventory.sqlite or upgrade its schema.
+    root_scope.preflight_stage(cfg.db_path, root_override, cfg.declared_root)
     conn = db.open_db(cfg.db_path)
-    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
     telemetry = telemetry_mod.build(cfg.features)
+    # Never run unscoped, and never bind to a root nobody named: an unbound output
+    # directory adopts --root or a *declared* paths.root, else the stage refuses
+    # (see root_scope.adopt_or_resolve).
+    scope = root_scope.adopt_or_resolve(
+        conn, root_override, db_path=str(cfg.db_path), declared_root=cfg.declared_root
+    )
     max_process_mp = float(cfg.features.get("max_process_megapixels", 64))
     if max_process_mp <= 0:
         raise ValueError("features.max_process_megapixels must be greater than zero")
@@ -289,10 +305,11 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     max_aspect_ratio = float(cfg.features.get("max_process_aspect_ratio", 3.0))
     if max_aspect_ratio < 1:
         raise ValueError("features.max_process_aspect_ratio must be at least 1")
-    skipped = feature_admission.mark_unprocessable_skipped(
-        conn, max_process_pixels, max_aspect_ratio, scope=scope
-    )
-    conn.commit()
+    with telemetry.phase("setup_admission"):
+        skipped = feature_admission.mark_unprocessable_skipped(
+            conn, max_process_pixels, max_aspect_ratio, scope=scope
+        )
+        conn.commit()
     skip_counts = {
         reason: sum(row["skip_reason"] == reason for row in skipped)
         for reason in ("PIXEL_LIMIT", "ASPECT_RATIO")
@@ -307,28 +324,35 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     commit_every = int(cfg.scan.get("commit_every", 100))
 
     if thumbnailer is None:
-        pending = list(db.iter_files_for_features(conn, scope=scope))
+        with telemetry.phase("setup_pending_query"):
+            pending = list(db.iter_files_for_features(conn, scope=scope))
     else:
         # One cheap SSD listing decides which cached JPEGs actually exist, so a
         # deleted thumbnail is regenerated and a stale one is never reused.
-        db.register_thumb_presence(conn, thumbnails.ids_on_disk(thumbnailer.directory))
-        pending = list(db.iter_files_for_features(
-            conn, thumb_max_px=thumbnailer.max_px, scope=scope))
+        with telemetry.phase("setup_thumb_listing"):
+            db.register_thumb_presence(conn, thumbnails.ids_on_disk(thumbnailer.directory))
+        with telemetry.phase("setup_pending_query"):
+            pending = list(db.iter_files_for_features(
+                conn, thumb_max_px=thumbnailer.max_px, scope=scope))
     if limit:
         pending = pending[:limit]
     total = len(pending)
-    backend = resolve_backend(cfg, backend_override) if pending else None
+    # Model load is a large, one-off cost on Windows (weights + CUDA context).
+    # It is timed and surfaced, not folded into the first batch or hidden.
+    with telemetry.phase("setup_model_load"):
+        backend = resolve_backend(cfg, backend_override) if pending else None
     if backend is not None:
         backend.telemetry = telemetry
-    eye_cfg = cfg.features.get("eye_detection", {})
-    eye_detector = (
-        eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
-        if pending and eye_cfg.get("enabled", False)
-        else None
-    )
-    # No detector/provider/model is constructed when all inventory rows were
-    # skipped or already terminal.
-    scene_router = _build_scene_router(cfg) if pending else None
+    with telemetry.phase("setup_detectors"):
+        eye_cfg = cfg.features.get("eye_detection", {})
+        eye_detector = (
+            eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
+            if pending and eye_cfg.get("enabled", False)
+            else None
+        )
+        # No detector/provider/model is constructed when all inventory rows were
+        # skipped or already terminal.
+        scene_router = _build_scene_router(cfg) if pending else None
     thumb_note = (
         "off" if thumbnailer is None
         else f"{thumbnailer.max_px}px -> {thumbnailer.directory}"
@@ -339,26 +363,33 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     print(f"[stage1] {root_scope.scope_note(root_scope.summary(conn, scope))}")
 
     done = 0
+    failed = 0
     since_commit = 0
     t0 = time.time()
     batches = _guarded_batches(pending, batch_size, max_pixels)
     for batch in tqdm(batches, desc="features", unit="batch"):
-        with telemetry.batch(len(batch)):
+        with telemetry.batch(len(batch)) as batch_span:
             feature_rows = _process_batch(
                 backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router,
                 thumbnailer=thumbnailer, telemetry=telemetry,
             )
-            with telemetry.phase("db_write", len(feature_rows)):
+            batch_failed = sum(1 for row in feature_rows if row["status"] == "done_error")
+            batch_span.counted(len(feature_rows) - batch_failed, batch_failed)
+            # db_write is a batch-unit phase: one executemany per batch.
+            with telemetry.phase("db_write"):
                 db.batch_insert_features(conn, feature_rows)
                 if thumbnailer is not None:
                     db.batch_upsert_thumbnails(conn, thumbnailer.drain())
             done += len(feature_rows)
+            failed += batch_failed
             since_commit += len(feature_rows)
             if since_commit >= commit_every:
                 with telemetry.phase("db_commit"):
                     conn.commit()
                 since_commit = 0
-    conn.commit()
+    # Every commit is timed, including this final one.
+    with telemetry.phase("db_commit_final"):
+        conn.commit()
 
     db.set_meta(conn, "stage1_backend", backend_name)
     db.set_meta(conn, "stage1_skipped_oversize", str(len(skipped)))
@@ -367,26 +398,28 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     db.set_meta(conn, "stage1_done_at", str(int(time.time())))
     dt = time.time() - t0
     rate = done / dt if dt > 0 else 0.0
-    print(f"[stage1] processed {done} images, skipped={len(skipped)} "
+    print(f"[stage1] processed {done} images ({failed} unreadable), skipped={len(skipped)} "
           f"(PIXEL_LIMIT={skip_counts['PIXEL_LIMIT']}, "
           f"ASPECT_RATIO={skip_counts['ASPECT_RATIO']}) "
           f"in {dt:.1f}s ({rate:.1f}/s)")
-    phase_snapshot = telemetry.snapshot()
-    telemetry_mod.print_summary(phase_snapshot)
+    with telemetry.phase("finalize_stats"):
+        scope_summary = root_scope.summary(conn, scope)
+        thumb_recorded = (None if thumbnailer is None
+                          else db.thumbnail_stats(conn, scope=scope))
     stats: Dict[str, Any] = {
-        "processed": done, "total": total, "skipped_oversize": len(skipped),
+        "processed": done, "failed": failed, "succeeded": done - failed,
+        "total": total, "skipped_oversize": len(skipped),
         "skipped_pixel_limit": skip_counts["PIXEL_LIMIT"],
         "skipped_aspect_ratio": skip_counts["ASPECT_RATIO"],
         "max_process_megapixels": max_process_mp,
         "max_process_aspect_ratio": max_aspect_ratio,
-        "phase_telemetry": phase_snapshot,
-        "scope": root_scope.summary(conn, scope),
+        "scope": scope_summary,
     }
     if thumbnailer is None:
         stats["thumbnails"] = thumbnails.disabled_stats()
     else:
         thumb_stats = thumbnailer.stats()
-        thumb_stats.update(db.thumbnail_stats(conn, scope=scope))
+        thumb_stats.update(thumb_recorded or {})
         db.set_meta(conn, "stage1_thumb_max_px", str(thumbnailer.max_px))
         stats["thumbnails"] = thumb_stats
         print(
@@ -402,6 +435,11 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
             )
     conn.commit()
     conn.close()
+    # Outer wall time closes the books: batch total + timed setup/finalize +
+    # whatever is left (imports, config load, prints) must add up to it.
+    telemetry.set_outer_seconds(time.perf_counter() - outer_start)
+    stats["phase_telemetry"] = telemetry.snapshot()
+    telemetry_mod.print_summary(stats["phase_telemetry"])
     return stats
 
 

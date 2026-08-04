@@ -1,84 +1,105 @@
-"""Stage 1 phase telemetry: correct accounting, honest labels, stable format.
+"""Stage 1 telemetry: correct accounting, honest labels, no observer effect.
 
 The Windows symptom this answers: 1000 images, 461s feature loop, GPU pulsing
-0->81%, 4.8 GB VRAM. "Something starves the GPU" needs per-phase numbers, and
-those numbers must not lie about what was measured (host wall time vs CUDA
-events) or hide time in a rounding gap.
+0->81%, 4.8 GB VRAM. Per-phase numbers are needed, and they must not lie about
+what was measured (host wall time vs CUDA events), must not hide time in a
+rounding gap or in un-timed setup, and must not perturb the thing they measure.
+
+This file tests the collector in isolation. What a real Stage 1 run produces is
+in ``test_stage1_telemetry_run.py``; the fakes are in
+``stage1_telemetry_fixtures.py``.
 """
 
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 
-import yaml
-from PIL import Image
-
-from src import db, pipeline_report, stage1_features, stage1_telemetry
-
-
-def _library(root: Path, count: int = 3) -> list[Path]:
-    root.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for index in range(count):
-        path = root / f"IMG_2026010{index}_120000.jpg"
-        Image.new("RGB", (256, 192), (10 + index * 30, 60, 120)).save(path, "JPEG")
-        paths.append(path)
-    return paths
-
-
-def _config(tmp_path: Path, root: Path, **telemetry) -> str:
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({
-        "paths": {"root": str(root), "db": str(tmp_path / "inventory.sqlite"),
-                  "output_dir": str(tmp_path / "out"),
-                  "models_dir": str(tmp_path / "models"), "trash": str(tmp_path / "trash")},
-        "features": {"backend": "stub", "batch_size": 2,
-                     "thumbnails": {"enabled": True, "max_px": 64},
-                     "telemetry": {"enabled": True, "gpu_event_every": 0, **telemetry}},
-    }), encoding="utf-8")
-    return str(path)
-
+from src import stage1_telemetry, telemetry_report
+from tests import stage1_telemetry_fixtures as fixtures
 
 # --- accounting ------------------------------------------------------------
 
-def test_phase_seconds_and_counts_accumulate_per_batch():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
+def test_phase_seconds_and_calls_accumulate_per_instrumented_call():
+    telemetry = stage1_telemetry.Telemetry()
     with telemetry.batch(2):
         with telemetry.phase("decode", 2):
             time.sleep(0.01)
-        with telemetry.phase("db_write", 2):
+        with telemetry.phase("db_write"):
             time.sleep(0.005)
 
     snapshot = telemetry.snapshot()
     keys = {phase["key"]: phase for phase in snapshot["phases"]}
-    assert snapshot["images"] == 2 and snapshot["batches"] == 1
-    assert keys["decode"]["count"] == 2
+    assert snapshot["images_attempted"] == 2 and snapshot["batches"] == 1
+    assert keys["decode"]["calls"] == 2 and keys["decode"]["unit"] == "img"
+    assert keys["db_write"]["calls"] == 1 and keys["db_write"]["unit"] == "batch"
     assert keys["decode"]["seconds"] >= 0.009
-    assert keys["decode"]["ms_per_image"] > 0
     assert 0 < keys["decode"]["percent"] <= 100
-    # Phases never exceed the measured batch total, and the remainder is shown.
-    assert snapshot["accounted_seconds"] <= snapshot["total_seconds"] + 1e-6
-    assert snapshot["unaccounted_seconds"] >= 0.0
+    assert snapshot["loop_accounted_seconds"] <= snapshot["loop_seconds"] + 1e-6
 
 
-def test_unaccounted_time_is_reported_not_absorbed():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
+def test_attempted_succeeded_and_failed_are_reported_separately():
+    telemetry = stage1_telemetry.Telemetry()
+    with telemetry.batch(4) as batch:
+        with telemetry.phase("error_handling"):
+            time.sleep(0.002)
+        batch.counted(succeeded=3, failed=1)
+
+    snapshot = telemetry.snapshot()
+    assert snapshot["images_attempted"] == 4
+    assert snapshot["images_succeeded"] == 3
+    assert snapshot["images_failed"] == 1
+    keys = {phase["key"] for phase in snapshot["phases"]}
+    assert "error_handling" in keys              # the failed read is instrumented
+    line = fixtures.rendered_line(snapshot, "images attempted=")
+    assert "attempted=4" in line and "succeeded=3" in line and "failed=1" in line
+
+
+def test_unaccounted_in_loop_time_is_reported_not_absorbed():
+    telemetry = stage1_telemetry.Telemetry()
     with telemetry.batch(1):
         with telemetry.phase("decode"):
             time.sleep(0.005)
         time.sleep(0.02)                      # deliberately uninstrumented work
 
     snapshot = telemetry.snapshot()
-    assert snapshot["unaccounted_seconds"] >= 0.015
-    assert snapshot["unaccounted_percent"] > 50
-    lines = stage1_telemetry.render_lines(snapshot)
-    assert any("unaccounted (loop overhead)" in line for line in lines)
+    assert snapshot["loop_unaccounted_seconds"] >= 0.015
+    assert snapshot["loop_unaccounted_percent"] > 50
+    assert "unaccounted in-loop" in fixtures.rendered_line(snapshot, "unaccounted in-loop")
+
+
+def test_setup_and_outer_wall_time_reconcile():
+    telemetry = stage1_telemetry.Telemetry()
+    with telemetry.phase("setup_model_load"):
+        time.sleep(0.02)
+    with telemetry.batch(1):
+        with telemetry.phase("decode"):
+            time.sleep(0.005)
+    telemetry.set_outer_seconds(0.30)
+
+    snapshot = telemetry.snapshot()
+    assert snapshot["setup_accounted_seconds"] >= 0.019
+    assert snapshot["outer_seconds"] == 0.3
+    gap = snapshot["outer_unaccounted_seconds"]
+    assert gap is not None and gap > 0
+    total = (snapshot["loop_seconds"] + snapshot["setup_accounted_seconds"] + gap)
+    assert abs(total - snapshot["outer_seconds"]) < 1e-3
+    line = fixtures.rendered_line(snapshot, "reconciliation:")
+    assert "Stage 1 outer" in line and "timed setup/finalize" in line
+    assert "setup: model load" in "\n".join(telemetry_report.render_lines(snapshot))
+
+
+def test_missing_outer_wall_time_is_stated_not_faked():
+    telemetry = stage1_telemetry.Telemetry()
+    with telemetry.batch(1):
+        pass
+    snapshot = telemetry.snapshot()
+    assert snapshot["outer_seconds"] is None
+    assert snapshot["outer_unaccounted_seconds"] is None
+    assert "outer wall time not supplied" in fixtures.rendered_line(snapshot, "reconciliation:")
 
 
 def test_unknown_phase_keys_fold_into_other_cpu_instead_of_raising():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
+    telemetry = stage1_telemetry.Telemetry()
     with telemetry.batch(1):
         with telemetry.phase("something_new"):
             pass
@@ -87,7 +108,7 @@ def test_unknown_phase_keys_fold_into_other_cpu_instead_of_raising():
 
 
 def test_batch_percentiles_are_reported_when_practical():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
+    telemetry = stage1_telemetry.Telemetry()
     for seconds in (0.01, 0.02, 0.03, 0.04):
         telemetry.record_batch(seconds, 1)
     percentiles = telemetry.snapshot()["batch_percentiles"]
@@ -96,12 +117,11 @@ def test_batch_percentiles_are_reported_when_practical():
 
 
 def test_empty_telemetry_reports_no_division_by_zero():
-    snapshot = stage1_telemetry.Telemetry(gpu_event_every=0).snapshot()
-    assert snapshot["images"] == 0
-    assert snapshot["unaccounted_percent"] is None
+    snapshot = stage1_telemetry.Telemetry().snapshot()
+    assert snapshot["images_attempted"] == 0
+    assert snapshot["loop_unaccounted_percent"] is None
     assert snapshot["batch_percentiles"] == {"p50": None, "p95": None}
-    lines = stage1_telemetry.render_lines(snapshot)
-    assert any("images=0" in line for line in lines)
+    assert "attempted=0" in fixtures.rendered_line(snapshot, "images attempted=")
 
 
 def test_disabled_telemetry_costs_nothing_and_says_so():
@@ -110,73 +130,152 @@ def test_disabled_telemetry_costs_nothing_and_says_so():
         with telemetry.phase("decode", 5):
             pass
     snapshot = telemetry.snapshot()
-    assert snapshot["phases"] == [] and snapshot["images"] == 0
-    assert stage1_telemetry.render_lines(snapshot) == ["Stage 1 phase breakdown: disabled"]
+    assert snapshot["phases"] == [] and snapshot["images_attempted"] == 0
+    assert telemetry_report.render_lines(snapshot) == [
+        "Stage 1 phase breakdown: disabled (features.telemetry.enabled=false)"
+    ]
 
+# --- CUDA-event sampling ---------------------------------------------------
 
-# --- formatting ------------------------------------------------------------
-
-def test_summary_lines_carry_counts_seconds_ms_per_image_and_percent():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
+def test_cuda_event_sampling_is_off_by_default():
+    assert stage1_telemetry.DEFAULT_GPU_EVENT_EVERY == 0
+    fake = fixtures.FakeCuda()
+    telemetry = stage1_telemetry.Telemetry(torch_module=fake)
     with telemetry.batch(4):
-        with telemetry.phase("source_open_read", 4):
-            time.sleep(0.01)
-        with telemetry.phase("embed_inference", 4):
-            time.sleep(0.02)
-
-    lines = stage1_telemetry.render_lines(telemetry.snapshot())
-    header = next(line for line in lines if line.startswith("phase"))
-    assert "count" in header and "seconds" in header and "ms/img" in header and "%" in header
-    embed = next(line for line in lines if line.startswith("embedding inference"))
-    # count, seconds, ms/image, percent, timing-kind label all present.
-    assert "4" in embed and "host-wall" in embed
-    assert any("batch wall time p50=" in line and "p95=" in line for line in lines)
-    assert any("images=4 batches=1 batch_total=" in line for line in lines)
+        for _ in range(4):
+            with telemetry.gpu_event_phase("quality_musiq"):
+                pass
+    assert fake.records == 0 and fake.syncs == 0
+    snapshot = telemetry.snapshot()
+    assert snapshot["gpu_event_synchronisations"] == 0
+    assert "disabled (features.telemetry.gpu_event_every=0)" in fixtures.rendered_line(
+        snapshot, "CUDA event timing:")
 
 
-def test_host_wall_versus_gpu_event_labelling_is_explicit():
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
-    with telemetry.batch(1):
+def test_sampled_batch_synchronises_exactly_once_regardless_of_batch_size():
+    """The old design synced 1+2N times per sampled batch; this must be 1."""
+    fake = fixtures.FakeCuda()
+    telemetry = stage1_telemetry.Telemetry(gpu_event_every=1, torch_module=fake)
+    with telemetry.batch(8):
         with telemetry.phase("embed_inference"):
+            with telemetry.gpu_event_phase("embed_inference"):
+                pass
+        for _ in range(8):                      # per-image lane, 8 calls
+            with telemetry.phase("quality_musiq"):
+                with telemetry.gpu_event_phase("quality_musiq"):
+                    pass
+        assert fake.syncs == 0                  # nothing synced inside the batch
+
+    assert fake.syncs == 1                      # one sync, after the batch clock
+    snapshot = telemetry.snapshot()
+    assert snapshot["gpu_event_synchronisations"] == 1
+    assert snapshot["gpu_event_sampled_batches"] == 1
+    samples = {phase["key"]: phase["gpu_event_samples"]
+               for phase in snapshot["phases"] if phase["gpu_event_samples"]}
+    # At most one sample per lane per sampled batch -> not 8 for MUSIQ.
+    assert samples == {"embed_inference": 1, "quality_musiq": 1}
+
+
+def test_the_synchronisation_happens_after_the_batch_clock_is_taken():
+    """The measurement must not pay for its own instrument.
+
+    A ``cuda.synchronize`` can take milliseconds. If it ran before the batch's
+    wall clock was read, the sampled batches would look slower than the others
+    and the reported host-wall totals would include the observer -- exactly the
+    distortion the design claims to avoid. The fake sync is made deliberately
+    expensive here, so the batch total proves the ordering.
+    """
+    sync_cost = 0.05
+    fake = fixtures.FakeCuda(sync_seconds=sync_cost)
+    telemetry = stage1_telemetry.Telemetry(gpu_event_every=1, torch_module=fake)
+
+    for _ in range(2):
+        with telemetry.batch(1):
+            with telemetry.phase("embed_inference"):
+                with telemetry.gpu_event_phase("embed_inference"):
+                    time.sleep(0.005)
+
+    assert fake.syncs == 2                       # both batches were sampled
+    snapshot = telemetry.snapshot()
+    # Each batch did ~5 ms of work and paid a 50 ms sync; if the sync were inside
+    # the batch clock, loop_seconds would be >= 0.1s instead of ~0.01s.
+    assert snapshot["loop_seconds"] < 2 * sync_cost
+    for value in snapshot["batch_percentiles"].values():
+        assert value is not None and value < sync_cost
+    embed = next(p for p in snapshot["phases"] if p["key"] == "embed_inference")
+    assert embed["seconds"] < sync_cost          # the host-wall phase is clean too
+
+
+def test_sampling_decision_is_latched_at_batch_entry():
+    """batches increments at batch exit, so sampling must not flip mid-batch."""
+    fake = fixtures.FakeCuda()
+    telemetry = stage1_telemetry.Telemetry(gpu_event_every=2, torch_module=fake)
+    observed = []
+    for _ in range(4):
+        with telemetry.batch(2):
+            observed.append(telemetry.sampling_active())
+            mid = telemetry.sampling_active()
+            with telemetry.phase("quality_musiq"):
+                with telemetry.gpu_event_phase("quality_musiq"):
+                    pass
+            assert telemetry.sampling_active() is mid      # stable within a batch
+    assert observed == [True, False, True, False]          # every 2nd batch
+    assert fake.syncs == 2
+
+
+def test_unsampled_batches_never_touch_cuda():
+    fake = fixtures.FakeCuda()
+    telemetry = stage1_telemetry.Telemetry(gpu_event_every=100, torch_module=fake)
+    with telemetry.batch(2):                     # batch 0 -> sampled
+        with telemetry.gpu_event_phase("embed_inference"):
             pass
-    lines = "\n".join(stage1_telemetry.render_lines(telemetry.snapshot()))
-    assert "host-wall unless marked" in lines
-    assert "includes submit + wait" in lines
-    assert "upper bound on kernel time" in lines
-    assert "GPU event timing: not sampled" in lines
+    baseline_records = fake.records
+    for _ in range(5):                           # batches 1..5 -> not sampled
+        with telemetry.batch(2):
+            with telemetry.gpu_event_phase("embed_inference"):
+                pass
+    assert fake.records == baseline_records
+    assert fake.syncs == 1
 
 
-def test_gpu_event_numbers_are_reported_separately_from_host_wall():
+def test_gpu_numbers_are_labelled_as_samples_with_ms_per_sample():
     telemetry = stage1_telemetry.Telemetry(gpu_event_every=1)
     with telemetry.batch(2):
-        with telemetry.phase("embed_inference", 2):
+        with telemetry.phase("embed_inference"):
             time.sleep(0.01)
     telemetry.add_gpu_event("embed_inference", 0.004)
 
     snapshot = telemetry.snapshot()
     embed = next(p for p in snapshot["phases"] if p["key"] == "embed_inference")
-    assert embed["gpu_event_seconds"] == 0.004
-    assert embed["gpu_event_batches"] == 1
-    assert embed["seconds"] >= 0.009          # host wall is the larger figure
-    lines = "\n".join(stage1_telemetry.render_lines(snapshot))
-    assert "GPU event timing (CUDA events, sampled every 1 batch(es))" in lines
-    assert "gpu=0.004s" in lines and "ms/batch" in lines
+    assert embed["gpu_event_seconds"] == 0.004 and embed["gpu_event_samples"] == 1
+    assert embed["seconds"] >= 0.009            # host wall is the larger figure
+    text = "\n".join(telemetry_report.render_lines(snapshot))
+    assert "samples=1" in text and "gpu=0.0040s" in text
+    assert "ms per sampled batch" in text       # embed lane is batch-unit
+    assert "at most one sample per lane per sampled batch" in text
+    assert "host-wall (+CUDA below)" in text
+
+
+def test_host_wall_versus_cuda_labelling_is_explicit():
+    telemetry = stage1_telemetry.Telemetry()
+    with telemetry.batch(1):
+        with telemetry.phase("embed_inference"):
+            pass
+    text = "\n".join(telemetry_report.render_lines(telemetry.snapshot()))
+    assert "host-wall unless stated otherwise" in text
+    assert "includes submit + wait" in text
+    assert "upper bound on kernel time, not kernel time" in text
 
 
 def test_missing_cuda_is_noted_without_failing():
-    class _NoCuda:
-        class cuda:
-            @staticmethod
-            def is_available() -> bool:
-                return False
-
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=4, torch_module=_NoCuda)
-    assert telemetry.gpu_sampling_now() is False
+    fake = fixtures.FakeCuda(available=False)
+    telemetry = stage1_telemetry.Telemetry(gpu_event_every=4, torch_module=fake)
     with telemetry.batch(1):
         with telemetry.gpu_event_phase("embed_inference"):
             pass
-    lines = "\n".join(stage1_telemetry.render_lines(telemetry.snapshot()))
-    assert "GPU event timing unavailable (no CUDA)" in lines
+    assert fake.records == 0 and fake.syncs == 0
+    text = "\n".join(telemetry_report.render_lines(telemetry.snapshot()))
+    assert "CUDA event timing unavailable (no CUDA)" in text
 
 
 def test_config_section_controls_enablement_and_sampling():
@@ -188,117 +287,15 @@ def test_config_section_controls_enablement_and_sampling():
     tuned = stage1_telemetry.build(_Features(telemetry={"gpu_event_every": 3}))
     assert tuned.enabled is True and tuned.gpu_event_every == 3
     default = stage1_telemetry.build(_Features())
-    assert default.gpu_event_every == stage1_telemetry.DEFAULT_GPU_EVENT_EVERY
+    assert default.gpu_event_every == 0        # opt-in, no observer effect
 
+# --- units -----------------------------------------------------------------
 
-# --- integration -----------------------------------------------------------
-
-def test_stage1_run_reports_the_phases_that_actually_ran(tmp_path):
-    root = tmp_path / "photos"
-    _library(root, 3)
-    config = _config(tmp_path, root)
-    from src import stage0_inventory
-
-    stage0_inventory.run(config_path=config)
-    stats = stage1_features.run(config_path=config, backend_override="stub")
-
-    snapshot = stats["phase_telemetry"]
-    keys = {phase["key"] for phase in snapshot["phases"]}
-    # The costs a starvation question is about: HDD read, decode, model, thumb, DB.
-    for expected in ("source_open_read", "decode", "hash_sha256", "embed_preprocess",
-                     "embed_inference", "quality_preprocess", "quality_sharpness",
-                     "faces_yunet", "phash", "thumbnail_resize",
-                     "thumbnail_encode_write", "db_write"):
-        assert expected in keys, expected
-    assert snapshot["images"] == 3
-    assert snapshot["batches"] == 2                     # batch_size=2 over 3 images
-    assert snapshot["total_seconds"] > 0
-
-
-def test_stage1_summary_is_written_to_the_log_and_performance_file(tmp_path, capsys):
-    root = tmp_path / "photos"
-    _library(root, 2)
-    config = _config(tmp_path, root)
-    from src import stage0_inventory
-
-    stage0_inventory.run(config_path=config)
-    stats = stage1_features.run(config_path=config, backend_override="stub")
-    console = capsys.readouterr().out
-    assert "[stage1] Stage 1 phase breakdown" in console
-    assert "[stage1] JPEG decode" in console
-
-    performance = pipeline_report.build_performance(
-        {"stage0": 1.0, "stage1": 2.0, "stage2": 0.1, "stage3": 0.1},
-        {"files": 2}, stats, library_still_images=2,
-    )
-    path = pipeline_report.write_performance_file(tmp_path / "out", performance)
-    text = path.read_text(encoding="utf-8")
-    assert "Stage 1 phase breakdown" in text
-    assert "JPEG decode" in text
-    assert "host-wall" in text
-    assert "batch wall time p50=" in text
-
-
-def test_telemetry_can_be_switched_off_without_affecting_results(tmp_path):
-    root = tmp_path / "photos"
-    _library(root, 2)
-    from src import stage0_inventory
-
-    on_config = _config(tmp_path, root)
-    stage0_inventory.run(config_path=on_config)
-    with_telemetry = stage1_features.run(config_path=on_config, backend_override="stub")
-
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    off_config = _config(plain, root, enabled=False)
-    stage0_inventory.run(config_path=off_config)
-    without = stage1_features.run(config_path=off_config, backend_override="stub")
-
-    assert with_telemetry["processed"] == without["processed"] == 2
-    assert without["phase_telemetry"]["enabled"] is False
-    assert without["phase_telemetry"]["phases"] == []
-    # Feature payloads are identical apart from telemetry bookkeeping.
-    for path in (tmp_path, plain):
-        conn = db.open_db(path / "inventory.sqlite")
-        rows = conn.execute(
-            "SELECT content_sha256, quality_score FROM features ORDER BY file_id"
-        ).fetchall()
-        conn.close()
-        assert len(rows) == 2 and all(row["content_sha256"] for row in rows)
-
-
-def test_optional_components_absent_report_zero_instead_of_breaking(tmp_path):
-    """No eye detector, no CLIP-IQA, no CUDA: the format still renders."""
-    root = tmp_path / "photos"
-    _library(root, 1)
-    config = _config(tmp_path, root)
-    from src import stage0_inventory
-
-    stage0_inventory.run(config_path=config)
-    stats = stage1_features.run(config_path=config, backend_override="stub")
-    snapshot = stats["phase_telemetry"]
-    keys = {phase["key"] for phase in snapshot["phases"]}
-    assert "eye_detection" not in keys and "quality_clipiqa" not in keys
-    lines = stage1_telemetry.render_lines(snapshot)
-    assert any("GPU event timing" in line for line in lines)
-    # Snapshot is JSON-serialisable so it can live in performance payloads.
-    assert json.loads(json.dumps(snapshot))["images"] == 1
-
-
-def test_hash_is_billed_separately_from_the_read_it_rides_along(tmp_path):
-    root = tmp_path / "photos"
-    paths = _library(root, 1)
-    telemetry = stage1_telemetry.Telemetry(gpu_event_every=0)
-    with telemetry.batch(1):
-        stage1_features._open_image_and_sha(paths[0], telemetry)
-
-    snapshot = telemetry.snapshot()
-    keys = {phase["key"]: phase for phase in snapshot["phases"]}
-    # Small fixtures hash in microseconds, below the 0.1 ms report resolution, so
-    # the raw accumulator is what proves the split happened.
-    assert telemetry.seconds["hash_sha256"] > 0
-    assert keys["hash_sha256"]["count"] == 1
-    assert keys["source_open_read"]["seconds"] >= 0        # never negative after netting
-    assert telemetry.seconds["source_open_read"] >= 0
-    assert keys["decode"]["seconds"] > 0
-    assert snapshot["accounted_seconds"] <= snapshot["total_seconds"] + 1e-6
+def test_every_phase_declares_its_unit_and_scope():
+    for phase in stage1_telemetry.PHASES:
+        assert phase.unit in ("img", "batch", "step"), phase.key
+        assert phase.scope in (stage1_telemetry.LOOP, stage1_telemetry.SETUP), phase.key
+        assert phase.kind in ("host", "gpu_event"), phase.key
+    # Setup phases are one-off steps, never per image.
+    setup = [p for p in stage1_telemetry.PHASES if p.scope == stage1_telemetry.SETUP]
+    assert setup and all(p.unit == "step" for p in setup)

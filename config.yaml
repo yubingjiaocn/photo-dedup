@@ -53,12 +53,15 @@ features:
     enabled: true
     max_px: 320                 # long edge; ~25-45 KiB per photo in practice
     jpeg_quality: 80
-  # Stage 1 phase telemetry: cumulative seconds per phase (HDD read, decode,
-  # embedding, IQA, faces, thumbnail, DB) written to the log and performance.txt.
-  # Cost is one perf_counter pair per phase per batch -- no per-op CUDA syncs.
+  # Stage 1 phase telemetry: cumulative seconds per phase (setup/model load, HDD
+  # read, decode, embedding, IQA, faces, thumbnail, DB) written to the log and
+  # performance.txt. Cost is one perf_counter pair per instrumented call.
   telemetry:
     enabled: true
-    gpu_event_every: 16        # also time GPU phases with CUDA events every Nth batch (0 = off)
+    # CUDA-event timing is opt-in. >0 samples every Nth batch: at most one sample
+    # per model lane per sampled batch, resolved with a single synchronise taken
+    # after that batch's wall clock, so it cannot distort host-wall numbers.
+    gpu_event_every: 0
   dinov2_model: "facebook/dinov2-base"
   dinov2_input: 224
   iqa_musiq: true

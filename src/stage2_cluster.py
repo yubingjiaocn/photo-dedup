@@ -396,10 +396,14 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
 def run(config_path: Optional[str] = None,
         root_override: Optional[str] = None) -> Dict[str, int]:
     cfg = load_config(config_path)
-    if root_override is not None:
-        root_scope.preflight(cfg.db_path, root_override)
+    # Fail closed before the database is opened/created (see stage 1).
+    root_scope.preflight_stage(cfg.db_path, root_override, cfg.declared_root)
     conn = db.open_db(cfg.db_path)
-    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
+    # Never cluster unscoped: an unbound directory adopts --root or a declared
+    # paths.root, else we refuse. A defaulted root never binds anything.
+    scope = root_scope.adopt_or_resolve(
+        conn, root_override, db_path=str(cfg.db_path), declared_root=cfg.declared_root
+    )
     stats = cluster(conn, cfg, scope=scope)
     conn.close()
     return stats

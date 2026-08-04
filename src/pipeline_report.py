@@ -12,8 +12,9 @@ Everything here is measured or derived from *this* run:
   Below the advisory floor we warn and keep going -- never abort, and never
   demand tens of GB of headroom.
 * the Stage 1 phase breakdown from :mod:`src.stage1_telemetry` (where the wall
-  clock actually went: HDD read, decode, GPU inference, thumbnail, DB), so a
-  "GPU only pulses to 81%" report can be answered with numbers.
+  clock actually went: setup/model load, HDD read, decode, inference, thumbnail,
+  DB), including both reconciliations, so a "GPU only pulses to 81%" report can
+  be answered with numbers instead of a guess.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from . import stage1_telemetry
+from . import telemetry_report
 
 GIB = 1024 ** 3
 LOW_SPACE_WARN_GIB = 20.0
@@ -187,7 +188,7 @@ def render_lines(performance: Dict[str, Any], disk: Optional[Dict[str, Any]] = N
     telemetry = performance.get("stage1_phase_telemetry") or {}
     if telemetry:
         lines.append("")
-        lines.extend(stage1_telemetry.render_lines(telemetry))
+        lines.extend(telemetry_report.render_lines(telemetry))
     if disk:
         lines.extend([
             "",

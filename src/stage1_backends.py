@@ -13,6 +13,9 @@ broken GPU setup can never masquerade as usable results.
 Both backends carry an optional ``telemetry`` attribute (:mod:`src.stage1_telemetry`).
 Stage 1 sets it; when it is unset every ``_phase``/``_gpu_phase`` call returns a
 no-op span, so the timing hooks cost nothing and never change behaviour.
+``_gpu_phase`` only *records* CUDA events (asynchronously) and only on a sampled
+batch's first call per lane; the single synchronisation happens later, in the
+batch span, outside every host-wall measurement.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ class _Instrumented:
         return sink.phase(key, count) if sink is not None else telemetry_mod.NULL_SPAN
 
     def _gpu_phase(self, key: str) -> Any:
-        """CUDA-event span; sampled per batch, never per micro-op."""
+        """CUDA-event span: at most one sample per lane per sampled batch."""
         sink = self.telemetry
         return sink.gpu_event_phase(key) if sink is not None else telemetry_mod.NULL_SPAN
 
@@ -79,14 +82,16 @@ class StubBackend(_Instrumented):
 
     def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
         out = np.zeros((len(images), EMBED_DIM), dtype=np.float32)
-        for i, im in enumerate(images):
-            with self._phase("embed_preprocess"):
-                g = im.convert("L").resize((32, 24), Image.BILINEAR)
-                v = np.asarray(g, dtype=np.float32).flatten()
-            with self._phase("embed_inference"):
-                v -= v.mean()
-                n = np.linalg.norm(v)
-                out[i] = v / n if n > 0 else v
+        # The embedding phases are batch-unit, so one span covers the whole call
+        # (per-image spans would report N calls under a "batch" unit).
+        with self._phase("embed_preprocess"):
+            grays = [np.asarray(im.convert("L").resize((32, 24), Image.BILINEAR),
+                                dtype=np.float32).flatten() for im in images]
+        with self._phase("embed_inference"):
+            for index, vector in enumerate(grays):
+                vector = vector - vector.mean()
+                norm = np.linalg.norm(vector)
+                out[index] = vector / norm if norm > 0 else vector
         return out
 
     def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
@@ -151,11 +156,12 @@ class TorchBackend(_Instrumented):
     # -- embeddings ---------------------------------------------------------
     def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
         torch = self.torch
-        with self._phase("embed_preprocess", len(images)):
+        # Batch-unit phases: one call per batch, whatever the batch size.
+        with self._phase("embed_preprocess"):
             inputs = self.processor(images=list(images), return_tensors="pt").to(self.device)
         # Host-wall span covers submit + the implicit sync of the .cpu() copy;
-        # the optional CUDA-event span (sampled) isolates kernel time.
-        with self._phase("embed_inference", len(images)):
+        # the optional CUDA-event span only records events here (no sync).
+        with self._phase("embed_inference"):
             with self._gpu_phase("embed_inference"):
                 with torch.no_grad():
                     out = self.model(**inputs)

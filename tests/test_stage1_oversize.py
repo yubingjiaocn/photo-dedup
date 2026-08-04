@@ -16,7 +16,10 @@ from src.stage1_backends import StubBackend, _bounded_iqa_image
 def _config(tmp_path, db_path):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({
-        "paths": {"db": str(db_path), "output_dir": str(tmp_path / "out")},
+        # paths.root must describe the library these rows belong to: stage 1 binds
+        # the output directory to it when stage 0 has not already done so.
+        "paths": {"root": str(tmp_path), "db": str(db_path),
+                  "output_dir": str(tmp_path / "out")},
         "features": {
             "backend": "stub", "max_process_megapixels": 64,
             "max_process_aspect_ratio": 3.0,

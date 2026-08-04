@@ -98,12 +98,18 @@ class ReviewData:
         self.db_path = Path(db_path) if db_path else self.output / "inventory.sqlite"
         self.thumbs = thumbnails.thumbs_dir(self.output).resolve()
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
+        # Correctly escaped read-only URI: a '#' or '%' in the output path must
+        # not truncate or mis-decode the filename (see root_scope.readonly_uri).
+        self._conn = sqlite3.connect(root_scope.readonly_uri(self.db_path), uri=True,
                                      check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # Read-only: the binding is whatever stage 0 recorded. An unbound legacy
-        # database yields an unbound scope, i.e. exactly today's behaviour.
+        # Read-only viewer: it cannot create a binding, so a pre-identity output
+        # directory is served unscoped *and says so*, rather than printing one
+        # root while querying everything.
         self.scope = root_scope.recorded(self._conn)
+        if not self.scope.bound:
+            print("[review][WARN] this output directory has no recorded photo root "
+                  "(created before root identity); serving every row it contains")
         self.summary = self._read_summary()
 
     def close(self) -> None:
@@ -165,7 +171,14 @@ class ReviewData:
         return _group_items(rows)[0]
 
     def thumb_bytes(self, file_id: int) -> Optional[bytes]:
-        """Read a cached JPEG from the SSD only. No source fallback, ever."""
+        """Read a cached JPEG from the SSD only. No source fallback, ever.
+
+        The id is checked against the current scope first: a thumbnail left in the
+        cache by another root (same output directory reused before this fix, or a
+        stale file) must not be reachable through the API.
+        """
+        if not self.in_scope(file_id):
+            return None
         candidate = thumbnails.thumb_path(self.thumbs, file_id).resolve()
         if candidate.parent != self.thumbs:
             return None
@@ -173,6 +186,18 @@ class ReviewData:
             return candidate.read_bytes()
         except OSError:
             return None
+
+    def in_scope(self, file_id: int) -> bool:
+        """True when ``file_id`` belongs to the root this directory is bound to."""
+        if not self.scope.bound:
+            return True
+        predicate, params = db.scope_sql(self.scope, "f")
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT 1 FROM files f WHERE f.id = :file_id AND {predicate}",
+                {**params, "file_id": int(file_id)},
+            ).fetchone()
+        return row is not None
 
     def original_record(self, file_id: int) -> Optional[OriginalRecord]:
         """Resolve immutable inventory identity for one explicit preview click."""

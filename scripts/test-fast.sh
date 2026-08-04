@@ -12,7 +12,10 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_p0_policy.py \
   tests/test_safety_e2e.py \
   tests/test_root_scope.py \
+  tests/test_root_scope_gates.py \
+  tests/test_root_scope_leaks.py \
   tests/test_stage1_telemetry.py \
+  tests/test_stage1_telemetry_run.py \
   tests/test_stage1_model_failures.py \
   tests/test_stage1_oversize.py \
   tests/test_thumbnails.py \

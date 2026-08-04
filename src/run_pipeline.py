@@ -293,6 +293,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
     output_path = Path(args.output).expanduser().resolve()
+
+    # Root check happens *first*, before the output directory, the diagnostic log,
+    # or any SQLite side file (-wal/-shm) can be created. A rejected run must
+    # leave the filesystem exactly as it found it.
+    try:
+        root_scope.preflight(output_path / "inventory.sqlite", args.root)
+    except root_scope.ParameterError as exc:
+        print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
+        return 2
     try:
         output_path.mkdir(parents=True, exist_ok=True)
         log_path = output_path / "photo-dedup.log"
@@ -309,6 +318,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         serve_review(
                             Path(result["report"]["output_dir"]), args.port, not args.no_open
                         )
+                except root_scope.ParameterError as exc:
+                    # Re-checked inside run(); reachable if the directory changed
+                    # between the two checks.
+                    print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
+                    return 2
                 except (OSError, RuntimeError, ValueError) as exc:
                     print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
                     traceback.print_exc(file=sys.stderr)

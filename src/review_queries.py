@@ -219,16 +219,30 @@ def group_page(conn: sqlite3.Connection, offset: int, limit: int,
                scope: "RootScope | None" = None) -> List[sqlite3.Row]:
     """One page of groups (ordered by id) with their member rows.
 
-    Scoped so the GROUPS view of a review pages exactly the groups counted by
-    :func:`count_groups`; a legacy database holding another root's groups does
-    not shift the page boundaries.
+    Scoped twice, on purpose:
+
+    * which groups appear on the page, so the GROUPS view pages exactly the
+      groups counted by :func:`count_groups`, and
+    * which *members* of those groups appear. A group can straddle two roots in
+      a legacy database adopted at a parent level, and an out-of-scope member
+      must not surface in this root's review at all.
+
+    ``member_count`` is therefore the number of members visible in this scope, so
+    the tile count and the header agree. The clustered total is reported beside it
+    as ``clustered_member_count`` instead of being silently dropped.
     """
     if offset < 0 or limit < 1:
         raise ValueError("offset must be >= 0 and limit >= 1")
     predicate, params = _scope_sql(scope, "sf")
+    member_predicate, member_params = _scope_sql(scope, "f")
+    counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type, g.member_count,
+        SELECT g.id AS group_id, g.group_type,
+               (SELECT COUNT(*) FROM group_members cgm
+                  JOIN files cf ON cf.id = cgm.file_id
+                 WHERE cgm.group_id = g.id AND {counted}) AS member_count,
+               g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
                fe.quality_score, fe.face_count,
@@ -243,12 +257,13 @@ def group_page(conn: sqlite3.Connection, offset: int, limit: int,
         ) page
         JOIN groups g ON g.id = page.id
         JOIN group_members gm ON gm.group_id = g.id
-        JOIN files f ON f.id = gm.file_id
+        JOIN files f ON f.id = gm.file_id AND {member_predicate}
         LEFT JOIN features fe ON fe.file_id = gm.file_id
         LEFT JOIN thumbnails t ON t.file_id = gm.file_id
         ORDER BY g.id, gm.is_keep DESC, gm.file_id
         """,
-        {**params, "limit": int(limit), "offset": int(offset)},
+        {**params, **member_params, **count_params,
+         "limit": int(limit), "offset": int(offset)},
     ).fetchall()
 
 
@@ -256,20 +271,28 @@ def group_page_by_id(conn: sqlite3.Connection, group_id: int,
                      scope: "RootScope | None" = None) -> List[sqlite3.Row]:
     """One group's path-free display join for on-demand lightbox navigation.
 
-    Returns nothing for a group outside ``scope``, so a stale review URL cannot
-    surface another root's group.
+    Returns nothing for a group outside ``scope``, and never a member outside it,
+    so neither a stale review URL nor a straddling group can surface another
+    root's photo. ``member_count`` is the in-scope count, for the reason given in
+    :func:`group_page`.
     """
     predicate, params = _scope_sql(scope, "sf")
+    member_predicate, member_params = _scope_sql(scope, "f")
+    counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type, g.member_count,
+        SELECT g.id AS group_id, g.group_type,
+               (SELECT COUNT(*) FROM group_members cgm
+                  JOIN files cf ON cf.id = cgm.file_id
+                 WHERE cgm.group_id = g.id AND {counted}) AS member_count,
+               g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
                f.file_kind, fe.quality_score, fe.face_count,
                t.status AS thumb_status, t.error AS thumb_error
         FROM groups g
         JOIN group_members gm ON gm.group_id = g.id
-        JOIN files f ON f.id = gm.file_id
+        JOIN files f ON f.id = gm.file_id AND {member_predicate}
         LEFT JOIN features fe ON fe.file_id = gm.file_id
         LEFT JOIN thumbnails t ON t.file_id = gm.file_id
         WHERE g.id = :group_id
@@ -279,7 +302,7 @@ def group_page_by_id(conn: sqlite3.Connection, group_id: int,
           )
         ORDER BY gm.is_keep DESC, gm.file_id
         """,
-        {**params, "group_id": int(group_id)},
+        {**params, **member_params, **count_params, "group_id": int(group_id)},
     ).fetchall()
 
 

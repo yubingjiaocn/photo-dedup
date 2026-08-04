@@ -401,24 +401,44 @@ def iter_groups(conn: sqlite3.Connection,
     ).fetchall()
 
 
-def group_members(conn: sqlite3.Connection, group_id: int) -> List[sqlite3.Row]:
+def group_members(conn: sqlite3.Connection, group_id: int,
+                  scope: RootScope | None = None) -> List[sqlite3.Row]:
+    """Members of one group, restricted to ``scope``.
+
+    A group can *straddle* two roots in a legacy database that was adopted at a
+    parent level and later split. Returning the foreign members would put another
+    library's photos into this root's review — and, worse, into its delete
+    manifest — so they are filtered out here, at the single join every consumer
+    (stage 3, execute preview, review UI) goes through.
+    """
+    predicate, params = scope_sql(scope, "f")
     return conn.execute(
-        """
+        f"""
         SELECT gm.*, f.path, f.basename, f.size_bytes, f.width, f.height,
                f.exif_datetime, f.motion_partner_id,
                fe.quality_score, fe.quality_meta, fe.face_count
         FROM group_members gm
         JOIN files f ON f.id = gm.file_id
         LEFT JOIN features fe ON fe.file_id = gm.file_id
-        WHERE gm.group_id = ?
+        WHERE gm.group_id = :group_id AND {predicate}
         ORDER BY gm.is_keep DESC, f.id
         """,
-        (group_id,),
+        {**params, "group_id": int(group_id)},
     ).fetchall()
 
 
-def get_file(conn: sqlite3.Connection, file_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+def get_file(conn: sqlite3.Connection, file_id: int,
+             scope: RootScope | None = None) -> sqlite3.Row | None:
+    """One inventory row, or None when it is outside ``scope``.
+
+    Used for motion-partner expansion in the delete manifest, so an out-of-scope
+    partner must be invisible rather than merely unlikely.
+    """
+    predicate, params = scope_sql(scope, "f")
+    return conn.execute(
+        f"SELECT f.* FROM files f WHERE f.id = :file_id AND {predicate}",
+        {**params, "file_id": int(file_id)},
+    ).fetchone()
 
 
 # --- meta ------------------------------------------------------------------

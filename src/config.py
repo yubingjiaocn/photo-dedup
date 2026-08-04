@@ -3,13 +3,23 @@
 Loads ``config.yaml`` into a lightweight, attribute-accessible object with
 sane defaults. Every stage takes an optional ``--config`` path so alternate
 configs (e.g. test fixtures) can be swapped in without touching code.
+
+Defaults vs. declarations
+-------------------------
+``_DEFAULTS`` exists so a config missing a key still runs. That is harmless for
+thresholds and dangerous for exactly one key: ``paths.root``. The default
+``E:/Photos`` is a placeholder, not a statement about this machine's library, so a
+stage must never adopt it as the photo root an output directory is *bound* to
+(see :mod:`src.root_scope`). :attr:`Config.declared_root` therefore reports a
+root only when the config actually contained one, and ``None`` when the value
+came from the default merge.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -47,11 +57,12 @@ _DEFAULTS: Dict[str, Any] = {
             "max_px": 320,
             "jpeg_quality": 80,
         },
-        # Stage 1 phase telemetry (cheap: one perf_counter pair per phase per
-        # batch). ``gpu_event_every: 0`` disables the sampled CUDA-event timing.
+        # Stage 1 phase telemetry (cheap: one perf_counter pair per instrumented
+        # call). CUDA-event sampling is opt-in (0 = off) so the default run has
+        # no observer effect at all.
         "telemetry": {
             "enabled": True,
-            "gpu_event_every": 16,
+            "gpu_event_every": 0,
         },
         "dinov2_model": "facebook/dinov2-base",
         "dinov2_input": 224,
@@ -139,10 +150,19 @@ class Section:
 
 
 class Config:
-    """Top-level config object. Access sections as attributes: ``cfg.cluster``."""
+    """Top-level config object. Access sections as attributes: ``cfg.cluster``.
 
-    def __init__(self, data: Dict[str, Any], source: Path | None = None) -> None:
+    ``declared`` is the *unmerged* user data, which is how :attr:`declared_root`
+    tells "the user wrote E:/Photos" apart from "nobody wrote anything, so the
+    default filled in E:/Photos". Building a ``Config`` directly (tests, tooling)
+    passes no ``declared``; then the data *is* the declaration, because no
+    default merge happened that could be mistaken for one.
+    """
+
+    def __init__(self, data: Dict[str, Any], source: Path | None = None,
+                 declared: Dict[str, Any] | None = None) -> None:
         self._data = data
+        self._declared = data if declared is None else declared
         self.source = source
         for section in ("paths", "scan", "features", "cluster", "quality", "decision", "execute"):
             setattr(self, section, Section(data.get(section, {})))
@@ -159,7 +179,24 @@ class Config:
 
     @property
     def root_path(self) -> Path:
+        """Effective scan root, default included (Stage 0's ``--root`` fallback)."""
         return Path(self.paths.get("root", "E:/Photos"))
+
+    @property
+    def declared_root(self) -> Optional[Path]:
+        """``paths.root`` as actually written in the config, else ``None``.
+
+        Stages 1-3 use this: they may bind an unbound output directory to a root
+        the user declared, but never to the ``E:/Photos`` placeholder that the
+        default merge would otherwise hand them.
+        """
+        section = self._declared.get("paths")
+        if not isinstance(section, dict):
+            return None
+        value = section.get("root")
+        if value is None or not str(value).strip():
+            return None
+        return Path(str(value))
 
     @property
     def trash_path(self) -> Path:
@@ -185,4 +222,4 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         with open(cfg_path, "r", encoding="utf-8") as fh:
             user_data = yaml.safe_load(fh) or {}
     merged = _deep_merge(_DEFAULTS, user_data)
-    return Config(merged, source=cfg_path)
+    return Config(merged, source=cfg_path, declared=user_data)

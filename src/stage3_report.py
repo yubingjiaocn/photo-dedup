@@ -46,10 +46,10 @@ from .review_page import (  # noqa: F401 (cached_thumb_uri re-exported for calle
 
 # --- delete-list expansion -------------------------------------------------
 
-def _partner_path(conn, file_id: Optional[int]) -> Optional[str]:
+def _partner_path(conn, file_id: Optional[int], scope: Any = None) -> Optional[str]:
     if not file_id:
         return None
-    row = db.get_file(conn, int(file_id))
+    row = db.get_file(conn, int(file_id), scope=scope)
     return row["path"] if row else None
 
 
@@ -63,7 +63,11 @@ def collect_deletions(conn, scope: Any = None) -> Dict[str, Any]:
     queues: Dict[str, List[Dict[str, Any]]] = {"MAYBE": [], "UNKNOWN": []}
 
     for grp in db.iter_groups(conn, scope=scope):
-        members = db.group_members(conn, grp["id"])
+        # Scoped members: a group that straddles two roots contributes only this
+        # root's photos to the review queues and to the delete manifest.
+        members = db.group_members(conn, grp["id"], scope=scope)
+        if not members:
+            continue
         keep_rec = None
         del_recs: List[Dict[str, Any]] = []
         for m in members:
@@ -87,7 +91,7 @@ def collect_deletions(conn, scope: Any = None) -> Dict[str, Any]:
                 queues[rec["decision"]].append(rec)
 
         for rec in del_recs:
-            for p, size in _expand_with_partner(conn, rec):
+            for p, size in _expand_with_partner(conn, rec, scope=scope):
                 if p in seen_delete:
                     continue
                 seen_delete.add(p)
@@ -133,10 +137,15 @@ def _risk(rec: Dict[str, Any]) -> float:
                float(exposure.get("clip_lo", 0.0)))
 
 
-def _expand_with_partner(conn, rec: Dict[str, Any]) -> List[tuple]:
-    """Expand only a uniquely/bidirectionally owned, unprotected sidecar."""
+def _expand_with_partner(conn, rec: Dict[str, Any], scope: Any = None) -> List[tuple]:
+    """Expand only a uniquely/bidirectionally owned, unprotected sidecar.
+
+    The partner lookup is scoped: a sidecar outside the current root must never
+    enter this root's delete manifest, even if the inventory row links to it.
+    """
     out = [(rec["path"], rec["size_bytes"])]
-    partner = db.get_file(conn, int(rec["motion_partner_id"])) if rec["motion_partner_id"] else None
+    partner = (db.get_file(conn, int(rec["motion_partner_id"]), scope=scope)
+               if rec["motion_partner_id"] else None)
     if partner is not None and partner["motion_partner_id"] == rec["file_id"]:
         owner_count = conn.execute(
             "SELECT COUNT(*) FROM files WHERE motion_partner_id = ?", (partner["id"],)
@@ -189,10 +198,16 @@ def run(
     if review_limit < 1:
         raise ValueError("review_limit must be at least 1")
     cfg = load_config(config_path)
-    if root_override is not None:
-        root_scope.preflight(cfg.db_path, root_override)
+    # Fail closed before the database is opened/created (see stage 1). Also before
+    # out_dir is created, so a refused report leaves no directory behind either.
+    root_scope.preflight_stage(cfg.db_path, root_override, cfg.declared_root)
     conn = db.open_db(cfg.db_path)
-    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
+    # Never report unscoped: an unbound directory adopts --root or a declared
+    # paths.root, else we refuse, so a printed root always matches the rows that
+    # were counted. A defaulted root never binds anything.
+    scope = root_scope.adopt_or_resolve(
+        conn, root_override, db_path=str(cfg.db_path), declared_root=cfg.declared_root
+    )
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -7,71 +7,101 @@ between 0% and 81% and only 4.8 GB VRAM in use: the GPU was starved, but the
 log could not say by what. This module makes the loop self-explaining without
 turning it into a profiler.
 
-Cost and honesty rules (both matter)
-------------------------------------
-* **One ``perf_counter`` pair per phase per batch.** Accumulation is a float add
-  into a dict; there is no per-micro-op CUDA synchronisation, because
-  ``torch.cuda.synchronize()`` inside a hot loop would serialise the very
-  pipelining we are trying to measure and would itself change the timings.
-* **Host wall time is labelled as host wall time.** With an async CUDA backend,
-  a "GPU" phase measured on the host is really *submit + whatever the driver
-  made us wait for*. Every phase carries a ``kind`` (``host`` or ``gpu_event``)
-  and the report prints that label, so nobody reads a queueing artefact as
-  kernel time.
-* **Optional GPU-event timing, off the hot path.** When CUDA is available the
-  embedding/quality phases can additionally be measured with CUDA events on a
-  sampled subset of batches (default every 16th). That is the only place where a
-  synchronise happens, it is per batch (not per op), and it is skipped entirely
-  on CPU or when the sample rate is 0.
-* **Unaccounted time is reported, never hidden.** ``batch_total`` minus the sum
-  of the phases is printed as ``unaccounted``, so an under-instrumented step
-  shows up instead of silently inflating a neighbour.
-
-The vocabulary is fixed in :data:`PHASES` so the summary is stable enough to
-diff between runs, and so a missing optional component (no CLIP-IQA, no YuNet,
-no MediaPipe) simply reports 0 counts instead of breaking the format.
+Cost and honesty rules
+----------------------
+* **One ``perf_counter`` pair per instrumented call.** Accumulation is a float
+  add into a dict. Each phase records how many calls it measured and whether a
+  call is one image, one batch, or one setup step, so a per-image measurement is
+  never reported as if it were per batch.
+* **Host wall time is labelled host-wall.** With an async CUDA backend a "GPU"
+  phase measured on the host is really *submit + whatever the driver made us
+  wait for*, i.e. an upper bound on kernel time.
+* **CUDA-event timing is opt-in (default off) and never synchronises inside a
+  measured phase.** When enabled, the sampling decision is latched once at batch
+  entry, at most one sample is taken per model lane per sampled batch, and the
+  events are only *recorded* (asynchronous, sub-microsecond) during the phase.
+  All of them are resolved with a single ``synchronize`` after the batch's wall
+  clock has already been taken -- so a sampled batch costs one synchronisation
+  in total, outside every host-wall phase and outside the batch total.
+* **Nothing is hidden.** In-loop phases reconcile against the measured batch
+  total (``loop_unaccounted``), and the whole stage reconciles against its outer
+  wall time (``outer_unaccounted``), which is where setup and model load live.
+* **Counts are attempted/succeeded/failed.** A batch with an unreadable file
+  still spent time, so the error path is instrumented and counted rather than
+  quietly inflating the per-image averages.
+* **A phase's ``calls`` counts attempts**, including one that raised: the time
+  was really spent. Outcomes are reported separately as
+  ``images_succeeded``/``images_failed``, so a failing library is visible in both
+  dimensions instead of being averaged away.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-# (key, human label, timing kind). ``gpu_event`` phases are the ones that can
-# additionally be sampled with CUDA events.
-PHASES: Tuple[Tuple[str, str, str], ...] = (
-    ("source_open_read", "source open + read (HDD)", "host"),
-    ("decode", "JPEG decode", "host"),
-    ("exif_meta", "EXIF/metadata from decode", "host"),
-    ("hash_sha256", "SHA-256 of source bytes", "host"),
-    ("phash", "perceptual hash", "host"),
-    ("embed_preprocess", "embedding preprocess (resize/normalise)", "host"),
-    ("embed_inference", "embedding inference", "gpu_event"),
-    ("quality_preprocess", "IQA preprocess (bounded resize)", "host"),
-    ("quality_musiq", "IQA MUSIQ", "gpu_event"),
-    ("quality_clipiqa", "IQA CLIP-IQA", "gpu_event"),
-    ("quality_sharpness", "sharpness (CPU)", "host"),
-    ("faces_yunet", "face detect YuNet", "host"),
-    ("face_quality", "face quality (CPU)", "host"),
-    ("exposure", "exposure metrics (CPU)", "host"),
-    ("eye_detection", "eye detection", "host"),
-    ("scene_routing", "scene routing (shadow)", "host"),
-    ("thumbnail_resize", "thumbnail resize", "host"),
-    ("thumbnail_encode_write", "thumbnail encode + write (SSD)", "host"),
-    ("db_write", "DB write (executemany)", "host"),
-    ("db_commit", "DB commit", "host"),
-    ("other_cpu", "other CPU work", "host"),
-)
-PHASE_KEYS: Tuple[str, ...] = tuple(key for key, _label, _kind in PHASES)
-_LABELS: Dict[str, str] = {key: label for key, label, _kind in PHASES}
-_KINDS: Dict[str, str] = {key: kind for key, _label, kind in PHASES}
+LOOP = "loop"
+SETUP = "setup"
 
-DEFAULT_GPU_EVENT_EVERY = 16
-_KIND_NOTE = {"host": "host-wall", "gpu_event": "host-wall"}
+# A "call" is what one instrumented span covers: one image, one batch, or one
+# one-off setup step. The report prints this so counts cannot be misread.
+UNIT_IMAGE = "img"
+UNIT_BATCH = "batch"
+UNIT_STEP = "step"
+
+
+@dataclass(frozen=True)
+class Phase:
+    key: str
+    label: str
+    kind: str                 # 'host' | 'gpu_event' (gpu_event = samplable lane)
+    scope: str                # LOOP | SETUP
+    unit: str                 # UNIT_IMAGE | UNIT_BATCH | UNIT_STEP
+
+
+PHASES: Tuple[Phase, ...] = (
+    # --- one-off, outside the per-batch loop ------------------------------
+    Phase("setup_admission", "setup: oversize admission", "host", SETUP, UNIT_STEP),
+    Phase("setup_pending_query", "setup: pending-work query", "host", SETUP, UNIT_STEP),
+    Phase("setup_thumb_listing", "setup: thumbnail cache listing", "host", SETUP, UNIT_STEP),
+    Phase("setup_model_load", "setup: model load (backend)", "host", SETUP, UNIT_STEP),
+    Phase("setup_detectors", "setup: optional detectors", "host", SETUP, UNIT_STEP),
+    # --- per batch / per image -------------------------------------------
+    Phase("source_open_read", "source open + read (HDD)", "host", LOOP, UNIT_IMAGE),
+    Phase("decode", "JPEG decode", "host", LOOP, UNIT_IMAGE),
+    Phase("hash_sha256", "SHA-256 of source bytes", "host", LOOP, UNIT_IMAGE),
+    Phase("phash", "perceptual hash", "host", LOOP, UNIT_IMAGE),
+    Phase("embed_preprocess", "embedding preprocess", "host", LOOP, UNIT_BATCH),
+    Phase("embed_inference", "embedding inference", "gpu_event", LOOP, UNIT_BATCH),
+    Phase("quality_preprocess", "IQA preprocess (bounded resize)", "host", LOOP, UNIT_IMAGE),
+    Phase("quality_musiq", "IQA MUSIQ", "gpu_event", LOOP, UNIT_IMAGE),
+    Phase("quality_clipiqa", "IQA CLIP-IQA", "gpu_event", LOOP, UNIT_IMAGE),
+    Phase("quality_sharpness", "sharpness (CPU)", "host", LOOP, UNIT_IMAGE),
+    Phase("faces_yunet", "face detect YuNet", "host", LOOP, UNIT_IMAGE),
+    Phase("face_quality", "face quality (CPU)", "host", LOOP, UNIT_IMAGE),
+    Phase("exposure", "exposure metrics (CPU)", "host", LOOP, UNIT_IMAGE),
+    Phase("eye_detection", "eye detection", "host", LOOP, UNIT_IMAGE),
+    Phase("scene_routing", "scene routing (shadow)", "host", LOOP, UNIT_IMAGE),
+    Phase("thumbnail_resize", "thumbnail resize", "host", LOOP, UNIT_IMAGE),
+    Phase("thumbnail_encode_write", "thumbnail encode + write (SSD)", "host", LOOP, UNIT_IMAGE),
+    Phase("error_handling", "unreadable-source handling", "host", LOOP, UNIT_IMAGE),
+    Phase("db_write", "DB write (executemany)", "host", LOOP, UNIT_BATCH),
+    Phase("db_commit", "DB commit (in loop)", "host", LOOP, UNIT_STEP),
+    Phase("other_cpu", "other CPU work", "host", LOOP, UNIT_IMAGE),
+    # --- after the loop ---------------------------------------------------
+    Phase("db_commit_final", "DB commit (final)", "host", SETUP, UNIT_STEP),
+    Phase("finalize_stats", "finalize: meta + stats queries", "host", SETUP, UNIT_STEP),
+)
+BY_KEY: Dict[str, Phase] = {phase.key: phase for phase in PHASES}
+PHASE_KEYS: Tuple[str, ...] = tuple(phase.key for phase in PHASES)
+
+# CUDA-event sampling is opt-in: the default run must have zero observer effect.
+DEFAULT_GPU_EVENT_EVERY = 0
 
 
 class _Span:
-    """Context manager returned by :meth:`Telemetry.phase`."""
+    """Times one instrumented call."""
 
     __slots__ = ("_sink", "_key", "_count", "_start")
 
@@ -91,7 +121,7 @@ class _Span:
 
 
 class _NullSpan:
-    """Zero-cost stand-in used when telemetry is disabled."""
+    """Zero-cost stand-in used when telemetry (or a sample) is disabled."""
 
     __slots__ = ()
 
@@ -102,9 +132,7 @@ class _NullSpan:
         return False
 
 
-_NULL_SPAN = _NullSpan()
-# Public no-op span so callers can instrument unconditionally without a branch.
-NULL_SPAN = _NULL_SPAN
+NULL_SPAN = _NullSpan()
 
 
 class Telemetry:
@@ -117,20 +145,28 @@ class Telemetry:
         self.seconds: Dict[str, float] = {key: 0.0 for key in PHASE_KEYS}
         self.counts: Dict[str, int] = {key: 0 for key in PHASE_KEYS}
         self.gpu_event_seconds: Dict[str, float] = {}
-        self.gpu_event_counts: Dict[str, int] = {}
+        self.gpu_event_samples: Dict[str, int] = {}
         self.batches = 0
-        self.images = 0
+        self.images_attempted = 0
+        self.images_succeeded = 0
+        self.images_failed = 0
         self.batch_seconds: List[float] = []
-        self.total_seconds = 0.0
+        self.loop_seconds = 0.0
+        self.outer_seconds: Optional[float] = None
+        self.sampled_batches = 0
+        self.gpu_syncs = 0
         self.notes: List[str] = []
         self._torch = torch_module
         self._cuda_ready: Optional[bool] = None
+        self._sampling = False          # latched once per batch, never mid-batch
+        self._sampled_keys: set[str] = set()
+        self._pending: List[Tuple[str, Any, Any]] = []
 
     # -- recording ----------------------------------------------------------
     def phase(self, key: str, count: int = 1) -> Any:
-        """Time one phase. Unknown keys fold into ``other_cpu`` (never crash)."""
+        """Time one call of ``key``. Unknown keys fold into ``other_cpu``."""
         if not self.enabled:
-            return _NULL_SPAN
+            return NULL_SPAN
         return _Span(self, key if key in self.seconds else "other_cpu", count)
 
     def add(self, key: str, seconds: float, count: int = 1) -> None:
@@ -145,23 +181,44 @@ class Telemetry:
         if self.enabled and text and text not in self.notes:
             self.notes.append(text)
 
-    def batch(self, images: int) -> "_BatchSpan":
-        return _BatchSpan(self, images)
+    def set_outer_seconds(self, seconds: float) -> None:
+        """Total Stage 1 wall time, so setup/loop can be reconciled against it."""
+        self.outer_seconds = float(seconds)
 
-    def record_batch(self, seconds: float, images: int) -> None:
+    def batch(self, attempted: int) -> "_BatchSpan":
+        """Time one batch and latch the CUDA-event sampling decision."""
+        return _BatchSpan(self, attempted)
+
+    def record_batch(self, seconds: float, attempted: int,
+                     succeeded: Optional[int] = None, failed: int = 0) -> None:
         if not self.enabled:
             return
+        attempted = int(attempted)
+        failed = int(failed)
+        succeeded = attempted - failed if succeeded is None else int(succeeded)
         self.batches += 1
-        self.images += int(images)
-        self.total_seconds += float(seconds)
+        self.images_attempted += attempted
+        self.images_succeeded += succeeded
+        self.images_failed += failed
+        self.loop_seconds += float(seconds)
         self.batch_seconds.append(float(seconds))
 
     # -- optional CUDA-event sampling --------------------------------------
-    def gpu_sampling_now(self) -> bool:
-        """True when this batch should also be measured with CUDA events."""
-        if not self.enabled or self.gpu_event_every <= 0 or not self._cuda_available():
-            return False
-        return self.batches % self.gpu_event_every == 0
+    def _begin_batch(self) -> None:
+        """Latch sampling for this batch. Called before any phase of the batch."""
+        self._sampled_keys.clear()
+        self._pending.clear()
+        self._sampling = (
+            self.enabled and self.gpu_event_every > 0
+            and self.batches % self.gpu_event_every == 0
+            and self._cuda_available()
+        )
+        if self._sampling:
+            self.sampled_batches += 1
+
+    def sampling_active(self) -> bool:
+        """Whether this batch is being sampled (latched at batch entry)."""
+        return self._sampling
 
     def _cuda_available(self) -> bool:
         if self._cuda_ready is None:
@@ -176,88 +233,146 @@ class Telemetry:
             except Exception:
                 self._cuda_ready = False
             if not self._cuda_ready:
-                self.note("GPU event timing unavailable (no CUDA); all phases are host-wall")
+                self.note("CUDA event timing unavailable (no CUDA); every number is host-wall")
         return bool(self._cuda_ready)
 
     def gpu_event_phase(self, key: str) -> Any:
-        """Measure one phase with CUDA events (synchronises once, per batch)."""
-        if not self.gpu_sampling_now():
-            return _NULL_SPAN
+        """Record CUDA events around one call; resolved once at batch end.
+
+        Returns a no-op span unless this batch is sampled *and* this lane has not
+        been sampled yet in this batch, so a batch of N images still yields at
+        most one sample per lane -- never N synchronisations.
+        """
+        if not self._sampling or key in self._sampled_keys:
+            return NULL_SPAN
+        self._sampled_keys.add(key)
         return _GpuEventSpan(self, key)
 
-    def add_gpu_event(self, key: str, seconds: float) -> None:
+    def _queue_events(self, key: str, start: Any, end: Any) -> None:
+        self._pending.append((key, start, end))
+
+    def _resolve_gpu_events(self) -> None:
+        """One synchronise per sampled batch, after the batch clock was taken."""
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, []
+        try:
+            pending[-1][2].synchronize()
+            self.gpu_syncs += 1
+            for key, start, end in pending:
+                seconds = start.elapsed_time(end) / 1000.0
+                self.gpu_event_seconds[key] = (
+                    self.gpu_event_seconds.get(key, 0.0) + seconds
+                )
+                self.gpu_event_samples[key] = self.gpu_event_samples.get(key, 0) + 1
+        except Exception:
+            self.note("CUDA event timing failed; host-wall numbers only")
+
+    def add_gpu_event(self, key: str, seconds: float, samples: int = 1) -> None:
+        """Record an already-resolved GPU-event measurement (used by tests)."""
         self.gpu_event_seconds[key] = self.gpu_event_seconds.get(key, 0.0) + float(seconds)
-        self.gpu_event_counts[key] = self.gpu_event_counts.get(key, 0) + 1
+        self.gpu_event_samples[key] = self.gpu_event_samples.get(key, 0) + int(samples)
 
     # -- derived ------------------------------------------------------------
-    def accounted_seconds(self) -> float:
-        return sum(self.seconds.values())
+    def scoped_seconds(self, scope: str) -> float:
+        return sum(value for key, value in self.seconds.items()
+                   if BY_KEY[key].scope == scope)
 
-    def unaccounted_seconds(self) -> float:
-        return max(0.0, self.total_seconds - self.accounted_seconds())
+    def loop_unaccounted(self) -> float:
+        return max(0.0, self.loop_seconds - self.scoped_seconds(LOOP))
+
+    def outer_unaccounted(self) -> Optional[float]:
+        """Stage-1 wall time neither inside a batch nor in a timed setup step."""
+        if self.outer_seconds is None:
+            return None
+        return max(0.0, self.outer_seconds - self.loop_seconds - self.scoped_seconds(SETUP))
 
     def percentiles(self) -> Dict[str, Optional[float]]:
         return {"p50": _percentile(self.batch_seconds, 0.50),
                 "p95": _percentile(self.batch_seconds, 0.95)}
 
     def snapshot(self) -> Dict[str, Any]:
-        """Plain dict for reports/JSON. Only phases with time or counts appear."""
-        phases = []
-        for key in PHASE_KEYS:
-            seconds = self.seconds[key]
-            count = self.counts[key]
-            if seconds <= 0.0 and count == 0:
-                continue
-            phases.append({
-                "key": key,
-                "label": _LABELS[key],
-                "kind": _KINDS[key],
-                "seconds": round(seconds, 4),
-                "count": count,
-                "ms_per_image": (1000.0 * seconds / self.images) if self.images else None,
-                "percent": (100.0 * seconds / self.total_seconds) if self.total_seconds else None,
-                "gpu_event_seconds": (round(self.gpu_event_seconds[key], 4)
-                                      if key in self.gpu_event_seconds else None),
-                "gpu_event_batches": self.gpu_event_counts.get(key),
-            })
-        unaccounted = self.unaccounted_seconds()
+        """Plain dict for reports/JSON. Only phases with time or calls appear."""
+        images = self.images_attempted
+        phases = [self._phase_payload(BY_KEY[key], images) for key in PHASE_KEYS
+                  if self.seconds[key] > 0.0 or self.counts[key] > 0]
+        outer_unaccounted = self.outer_unaccounted()
         return {
             "enabled": self.enabled,
-            "images": self.images,
+            "images_attempted": images,
+            "images_succeeded": self.images_succeeded,
+            "images_failed": self.images_failed,
             "batches": self.batches,
-            "total_seconds": round(self.total_seconds, 4),
-            "accounted_seconds": round(self.accounted_seconds(), 4),
-            "unaccounted_seconds": round(unaccounted, 4),
-            "unaccounted_percent": ((100.0 * unaccounted / self.total_seconds)
-                                    if self.total_seconds else None),
+            "loop_seconds": round(self.loop_seconds, 4),
+            "outer_seconds": (round(self.outer_seconds, 4)
+                              if self.outer_seconds is not None else None),
+            "loop_accounted_seconds": round(self.scoped_seconds(LOOP), 4),
+            "setup_accounted_seconds": round(self.scoped_seconds(SETUP), 4),
+            "loop_unaccounted_seconds": round(self.loop_unaccounted(), 4),
+            "loop_unaccounted_percent": ((100.0 * self.loop_unaccounted() / self.loop_seconds)
+                                         if self.loop_seconds else None),
+            "outer_unaccounted_seconds": (round(outer_unaccounted, 4)
+                                          if outer_unaccounted is not None else None),
             "batch_percentiles": self.percentiles(),
             "gpu_event_sampling_every": self.gpu_event_every,
+            "gpu_event_sampled_batches": self.sampled_batches,
+            "gpu_event_synchronisations": self.gpu_syncs,
             "phases": phases,
             "notes": list(self.notes),
         }
 
+    def _phase_payload(self, phase: Phase, images: int) -> Dict[str, Any]:
+        seconds = self.seconds[phase.key]
+        denominator = self.loop_seconds if phase.scope == LOOP else self.outer_seconds
+        return {
+            "key": phase.key,
+            "label": phase.label,
+            "kind": phase.kind,
+            "scope": phase.scope,
+            "unit": phase.unit,
+            "seconds": round(seconds, 4),
+            "calls": self.counts[phase.key],
+            "ms_per_image": (1000.0 * seconds / images) if images else None,
+            "percent": (100.0 * seconds / denominator) if denominator else None,
+            "gpu_event_seconds": (round(self.gpu_event_seconds[phase.key], 4)
+                                  if phase.key in self.gpu_event_seconds else None),
+            "gpu_event_samples": self.gpu_event_samples.get(phase.key),
+        }
+
 
 class _BatchSpan:
-    """Times a whole batch so ``unaccounted`` can be computed honestly."""
+    """Times one batch; latches sampling on entry, resolves events on exit."""
 
-    __slots__ = ("_sink", "_images", "_start")
+    __slots__ = ("_sink", "_attempted", "_succeeded", "_failed", "_start")
 
-    def __init__(self, sink: Telemetry, images: int) -> None:
+    def __init__(self, sink: Telemetry, attempted: int) -> None:
         self._sink = sink
-        self._images = int(images)
+        self._attempted = int(attempted)
+        self._succeeded: Optional[int] = None
+        self._failed = 0
         self._start = 0.0
 
+    def counted(self, succeeded: int, failed: int) -> None:
+        """Report what the batch actually achieved (attempted stays as given)."""
+        self._succeeded = int(succeeded)
+        self._failed = int(failed)
+
     def __enter__(self) -> "_BatchSpan":
+        self._sink._begin_batch()
         self._start = time.perf_counter()
         return self
 
     def __exit__(self, *_exc: Any) -> bool:
-        self._sink.record_batch(time.perf_counter() - self._start, self._images)
+        elapsed = time.perf_counter() - self._start
+        # Batch wall time is taken *before* resolving CUDA events, so the single
+        # synchronisation of a sampled batch cannot inflate any reported number.
+        self._sink.record_batch(elapsed, self._attempted, self._succeeded, self._failed)
+        self._sink._resolve_gpu_events()
         return False
 
 
 class _GpuEventSpan:
-    """CUDA-event timing for one phase of one sampled batch."""
+    """Records (does not synchronise) CUDA events around one sampled call."""
 
     __slots__ = ("_sink", "_key", "_start", "_end", "_ok")
 
@@ -265,29 +380,29 @@ class _GpuEventSpan:
         self._sink = sink
         self._key = key
         self._ok = False
-        self._start = None
-        self._end = None
+        self._start: Any = None
+        self._end: Any = None
 
     def __enter__(self) -> "_GpuEventSpan":
         torch = self._sink._torch
         try:
             self._start = torch.cuda.Event(enable_timing=True)
             self._end = torch.cuda.Event(enable_timing=True)
-            self._start.record()
+            self._start.record()        # asynchronous; no host/device sync here
             self._ok = True
         except Exception:
             self._ok = False
+            self._sink.note("CUDA event creation failed; host-wall numbers only")
         return self
 
     def __exit__(self, *_exc: Any) -> bool:
         if not self._ok:
             return False
         try:
-            self._end.record()
-            self._end.synchronize()
-            self._sink.add_gpu_event(self._key, self._start.elapsed_time(self._end) / 1000.0)
+            self._end.record()          # still asynchronous
+            self._sink._queue_events(self._key, self._start, self._end)
         except Exception:
-            self._sink.note("GPU event timing failed; host-wall numbers only")
+            self._sink.note("CUDA event timing failed; host-wall numbers only")
         return False
 
 
@@ -302,97 +417,6 @@ def _percentile(values: Sequence[float], fraction: float) -> Optional[float]:
     high = min(low + 1, len(ordered) - 1)
     weight = position - low
     return round(ordered[low] * (1.0 - weight) + ordered[high] * weight, 4)
-
-
-# --- formatting ------------------------------------------------------------
-
-def render_lines(snapshot: Dict[str, Any], max_phases: int = 0) -> List[str]:
-    """Fixed-width, greppable summary shared by the log and performance.txt."""
-    if not snapshot or not snapshot.get("enabled"):
-        return ["Stage 1 phase breakdown: disabled"]
-    images = int(snapshot.get("images") or 0)
-    total = float(snapshot.get("total_seconds") or 0.0)
-    lines = [
-        "Stage 1 phase breakdown (cumulative, host-wall unless marked)",
-        f"images={images} batches={snapshot.get('batches', 0)} "
-        f"batch_total={total:.2f}s"
-        + (f" ({1000.0 * total / images:.1f} ms/image)" if images else ""),
-        f"{'phase':<34}{'count':>8}{'seconds':>10}{'ms/img':>9}{'%':>7}  timing",
-    ]
-    phases = list(snapshot.get("phases") or [])
-    phases.sort(key=lambda item: float(item.get("seconds") or 0.0), reverse=True)
-    if max_phases > 0:
-        phases = phases[:max_phases]
-    for phase in phases:
-        lines.append(_phase_line(phase))
-    lines.append(_unaccounted_line(snapshot))
-    percentiles = snapshot.get("batch_percentiles") or {}
-    lines.append(
-        f"batch wall time p50={_fmt_seconds(percentiles.get('p50'))} "
-        f"p95={_fmt_seconds(percentiles.get('p95'))}"
-    )
-    gpu_lines = _gpu_event_lines(snapshot)
-    lines.extend(gpu_lines)
-    for note in snapshot.get("notes") or []:
-        lines.append(f"note: {note}")
-    lines.append(
-        "host-wall means time measured on the CPU thread; with an async CUDA backend it "
-        "includes submit + wait, so it is an upper bound on kernel time."
-    )
-    return lines
-
-
-def _phase_line(phase: Dict[str, Any]) -> str:
-    ms = phase.get("ms_per_image")
-    percent = phase.get("percent")
-    return (
-        f"{str(phase.get('label'))[:33]:<34}"
-        f"{int(phase.get('count') or 0):>8}"
-        f"{float(phase.get('seconds') or 0.0):>10.2f}"
-        f"{(f'{ms:.2f}' if ms is not None else '-'):>9}"
-        f"{(f'{percent:.1f}' if percent is not None else '-'):>7}"
-        f"  {_KIND_NOTE.get(str(phase.get('kind')), 'host-wall')}"
-    )
-
-
-def _unaccounted_line(snapshot: Dict[str, Any]) -> str:
-    seconds = float(snapshot.get("unaccounted_seconds") or 0.0)
-    percent = snapshot.get("unaccounted_percent")
-    images = int(snapshot.get("images") or 0)
-    ms = (1000.0 * seconds / images) if images else None
-    return (
-        f"{'unaccounted (loop overhead)':<34}{'-':>8}{seconds:>10.2f}"
-        f"{(f'{ms:.2f}' if ms is not None else '-'):>9}"
-        f"{(f'{percent:.1f}' if percent is not None else '-'):>7}  host-wall"
-    )
-
-
-def _gpu_event_lines(snapshot: Dict[str, Any]) -> List[str]:
-    sampled = [phase for phase in (snapshot.get("phases") or [])
-               if phase.get("gpu_event_seconds") is not None]
-    if not sampled:
-        return ["GPU event timing: not sampled (CPU run, disabled, or no sampled batch yet)"]
-    every = snapshot.get("gpu_event_sampling_every")
-    lines = [f"GPU event timing (CUDA events, sampled every {every} batch(es))"]
-    for phase in sampled:
-        batches = int(phase.get("gpu_event_batches") or 0)
-        seconds = float(phase.get("gpu_event_seconds") or 0.0)
-        per_batch = (seconds / batches) if batches else None
-        lines.append(
-            f"  {str(phase.get('label'))[:33]:<33} batches={batches:<5} "
-            f"gpu={seconds:.3f}s"
-            + (f" ({per_batch * 1000.0:.1f} ms/batch)" if per_batch is not None else "")
-        )
-    return lines
-
-
-def _fmt_seconds(value: Optional[float]) -> str:
-    return f"{value:.3f}s" if value is not None else "unknown"
-
-
-def print_summary(snapshot: Dict[str, Any], prefix: str = "[stage1]") -> None:
-    for line in render_lines(snapshot):
-        print(f"{prefix} {line}")
 
 
 def build(cfg_features: Any, torch_module: Any = None) -> Telemetry:
@@ -411,3 +435,18 @@ def build(cfg_features: Any, torch_module: Any = None) -> Telemetry:
         gpu_event_every=int(section.get("gpu_event_every", DEFAULT_GPU_EVENT_EVERY)),
         torch_module=torch_module,
     )
+
+
+# Rendering lives in :mod:`src.telemetry_report`, which imports this module for
+# the phase vocabulary. These thin wrappers keep ``telemetry.render_lines(...)``
+# working for existing callers without an import cycle at module load.
+def render_lines(snapshot: Dict[str, Any]) -> List[str]:
+    from . import telemetry_report
+
+    return telemetry_report.render_lines(snapshot)
+
+
+def print_summary(snapshot: Dict[str, Any], prefix: str = "[stage1]") -> None:
+    from . import telemetry_report
+
+    telemetry_report.print_summary(snapshot, prefix)
