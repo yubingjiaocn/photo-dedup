@@ -45,10 +45,23 @@ class ReviewState:
                 # P0-8: Validate each group's value shape
                 validated_groups = {}
                 for gid_str, value in groups.items():
+                    # Group key must be positive int string
+                    if not isinstance(gid_str, str):
+                        continue
+                    try:
+                        gid = int(gid_str)
+                        if gid <= 0:
+                            continue
+                    except (ValueError, OverflowError):
+                        continue
                     if not isinstance(value, dict):
                         continue
                     action = value.get("action")
                     if action not in ("accept", "pick", "mark"):
+                        continue
+                    # Timestamp must be int, not bool
+                    timestamp = value.get("timestamp")
+                    if timestamp is not None and (not isinstance(timestamp, int) or isinstance(timestamp, bool)):
                         continue
                     file_id = value.get("file_id")
                     if action == "pick":
@@ -90,6 +103,22 @@ class ReviewState:
 
     def set_group(self, group_id: int, decision: Dict[str, Any]) -> None:
         """Record one group's human decision and persist atomically."""
+        if not isinstance(group_id, int) or isinstance(group_id, bool) or group_id <= 0:
+            raise ValueError("group_id must be positive int")
+        if not isinstance(decision, dict):
+            raise ValueError("decision must be dict")
+        action = decision.get("action")
+        if action not in ("accept", "pick", "mark"):
+            raise ValueError(f"action must be accept/pick/mark, got {action}")
+        timestamp = decision.get("timestamp")
+        if timestamp is not None and (not isinstance(timestamp, int) or isinstance(timestamp, bool)):
+            raise ValueError("timestamp must be int if present")
+        file_id = decision.get("file_id")
+        if action == "pick":
+            if not isinstance(file_id, int) or isinstance(file_id, bool):
+                raise ValueError("pick requires int file_id")
+        elif file_id is not None:
+            raise ValueError(f"{action} must not have file_id")
         with self._lock:
             self._data["groups"][str(group_id)] = dict(decision)
             self._save()

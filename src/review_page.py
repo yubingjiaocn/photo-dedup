@@ -146,6 +146,7 @@ const content=document.getElementById('content'),stats=document.getElementById('
 let view='ALL',page=1,pages=1,size=100,loadGeneration=0;
 let visibleItems=[],groupMembers=new Map(),viewerItems=[],viewerIndex=0;
 let focusedGroupIndex=-1,focusedCardIndex=-1,reviewState={},compareMode=false;
+let lastPageData=null,lastStatus=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function tile(r){
  const cls=esc(String(r.decision||'ungrouped').toLowerCase());
@@ -196,6 +197,17 @@ function setButtons(){
  document.getElementById('next').disabled=page>=pages;
  document.getElementById('last').disabled=page>=pages;
 }
+function updateStats(d,s){
+ const rs=s.review_state||{reviewed:0,marked:0,total:0};
+ const groups=document.querySelectorAll('.group');
+ const globalOffset=(d.page-1)*d.page_size+(focusedGroupIndex>=0?focusedGroupIndex+1:1);
+ const itemLabel=view==='GROUPS'?'组':'项';
+ stats.textContent=`${view}：共 ${d.total} ${itemLabel} · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} ${itemLabel}`
+  +` · 本页之后还剩 ${d.remaining_after_page} ${itemLabel}`;
+ if(view==='GROUPS'&&groups.length>0)stats.textContent+=` · 已审 ${rs.reviewed}/${d.total} · 稍后 ${rs.marked} · 当前 ${globalOffset}/${d.total}`;
+ stats.textContent+=` · 缩略图缓存 ${s.thumb_cache_files} 个文件 / `
+  +`${(s.thumb_cache_bytes/1073741824).toFixed(2)} GiB`;
+}
 async function load(preserveFocus){
  const generation=++loadGeneration;
  const savedGroupIndex=focusedGroupIndex,savedPage=page;
@@ -217,14 +229,9 @@ async function load(preserveFocus){
   content.innerHTML=d.items.map(view==='GROUPS'?groupBlock:tile).join('')||'<div>本视图没有条目。</div>';
   const s=await (await fetch('/api/status')).json();
   if(generation!==loadGeneration)return;
-  const rs=s.review_state||{reviewed:0,marked:0,total:0};
-  const globalOffset=(d.page-1)*d.page_size+focusedGroupIndex+1;
-  stats.textContent=`${view}：共 ${d.total} 组 · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} 组`
-   +` · 本页之后还剩 ${d.remaining_after_page} 组`;
-  if(view==='GROUPS')stats.textContent+=` · 已审 ${rs.reviewed}/${d.total} · 稍后 ${rs.marked} · 当前 ${globalOffset}/${d.total}`;
-  stats.textContent+=` · 缩略图缓存 ${s.thumb_cache_files} 个文件 / `
-   +`${(s.thumb_cache_bytes/1073741824).toFixed(2)} GiB`;
+  lastPageData=d;lastStatus=s;
   focusedGroupIndex=-1;focusedCardIndex=-1;
+  updateStats(d,s);
   if(view==='GROUPS'&&d.items.length>0){
    if(preserveFocus&&savedPage===page&&savedGroupIndex>=0&&savedGroupIndex<d.items.length){
     setGroupFocus(savedGroupIndex)
@@ -243,8 +250,8 @@ function showOne(r){
  viewer.classList.remove('compare');document.getElementById('rightPane').style.display='none';
  leftImage.src=`/api/original/${r.file_id}`;document.getElementById('leftLabel').textContent=`${r.decision} · ${r.basename}`;
  document.getElementById('viewerTitle').textContent=`高清原图（按需读取 HDD） ${r.width||'?'}×${r.height||'?'}`;
- const keeper=viewerItems.find(item=>item.is_keep);
- document.getElementById('compare').style.display=viewerItems.length>1&&keeper&&Number(keeper.file_id)!==Number(r.file_id)?'inline-block':'none';
+ const aiKeeper=viewerItems.find(item=>item.is_keep===true);
+ document.getElementById('compare').style.display=viewerItems.length>1&&aiKeeper&&Number(aiKeeper.file_id)!==Number(r.file_id)?'inline-block':'none';
 }
 async function openViewer(id){
  const chosen=visibleItems.find(r=>Number(r.file_id)===Number(id));if(!chosen)return;
@@ -258,10 +265,10 @@ function stepViewer(delta){if(!viewerItems.length)return;viewerIndex=(viewerInde
 document.getElementById('compare').onclick=()=>{
  if(compareMode){compareMode=false;showOne(viewerItems[viewerIndex]);return}
  compareMode=true;
- const selected=viewerItems[viewerIndex],keeper=viewerItems.find(r=>r.is_keep)||viewerItems[0];
+ const selected=viewerItems[viewerIndex],aiKeeper=viewerItems.find(r=>r.is_keep===true)||viewerItems[0];
  viewer.classList.add('compare');document.getElementById('rightPane').style.display='flex';
- leftImage.src=`/api/original/${keeper.file_id}`;rightImage.src=`/api/original/${selected.file_id}`;
- document.getElementById('leftLabel').textContent=`KEEP · ${keeper.basename}`;
+ leftImage.src=`/api/original/${aiKeeper.file_id}`;rightImage.src=`/api/original/${selected.file_id}`;
+ document.getElementById('leftLabel').textContent=`AI KEEP · ${aiKeeper.basename}`;
  document.getElementById('rightLabel').textContent=`${selected.decision} · ${selected.basename}`;
 };
 document.getElementById('vprev').onclick=()=>stepViewer(-1);document.getElementById('vnext').onclick=()=>stepViewer(1);
@@ -274,6 +281,7 @@ function setGroupFocus(idx){
  document.querySelectorAll('.group').forEach(g=>g.classList.remove('focused'));
  const groups=document.querySelectorAll('.group');
  if(idx>=0&&idx<groups.length){focusedGroupIndex=idx;groups[idx].classList.add('focused');groups[idx].scrollIntoView({block:'nearest',behavior:'smooth'});focusedCardIndex=0;setCardFocus(0)}
+ if(lastPageData&&lastStatus)updateStats(lastPageData,lastStatus);
 }
 function setCardFocus(idx){
  const group=document.querySelectorAll('.group')[focusedGroupIndex];
@@ -325,7 +333,7 @@ function pickKeeper(fid){
  const gid=Number(group.dataset.groupId);
  reviewAction(gid,'pick')
 }
-document.addEventListener('keydown',e=>{
+document.addEventListener('keydown',async e=>{
  const help=document.getElementById('help');
  if(help.classList.contains('open')){if(e.key==='Escape'||e.key==='?'||e.key==='F1'){e.preventDefault();closeHelp()}return}
  if(lightbox.classList.contains('open')){
@@ -371,7 +379,15 @@ document.addEventListener('keydown',e=>{
   e.preventDefault();
   const group=groups[focusedGroupIndex];
   const card=group?group.querySelectorAll('.card')[focusedCardIndex]:null;
-  if(card){const fid=Number(card.dataset.fileId);const keeper=Array.from(group.querySelectorAll('.card')).find(c=>c.classList.contains('keep'));if(!keeper){alert('本组无AI keeper，无法对比');return}await openViewer(fid);document.getElementById('compare').click()}
+  if(card){
+   const fid=Number(card.dataset.fileId);
+   const gid=Number(group.dataset.groupId);
+   const members=groupMembers.get(gid)||[];
+   const aiKeeper=members.find(m=>m.is_keep);
+   if(!aiKeeper){alert('本组无AI keeper，无法对比');return}
+   if(Number(aiKeeper.file_id)===fid){alert('已选中AI keeper，无需对比');return}
+   await openViewer(fid);document.getElementById('compare').click()
+  }
  }
 });
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;page=1;load()});

@@ -246,11 +246,12 @@ class ReviewData:
                     db.scope_sql(self.scope, 'f')[1],
                 )
             }
-        # Recount based on scoped groups
+        # Use snapshot() to get state without accessing private _data
+        snapshot = self.state.snapshot()
         scoped_total = 0
         scoped_reviewed = 0
         scoped_marked = 0
-        for gid_str, decision in self.state._data["groups"].items():
+        for gid_str, decision in snapshot["groups"].items():
             gid = int(gid_str)
             if gid in scoped_group_ids:
                 scoped_total += 1
