@@ -4,21 +4,37 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from .review_queries import FEATURE_KINDS
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .root_scope import RootScope
+
 
 def mark_unprocessable_skipped(
-    conn: sqlite3.Connection, max_pixels: int, max_aspect_ratio: float
+    conn: sqlite3.Connection, max_pixels: int, max_aspect_ratio: float,
+    scope: "RootScope | None" = None,
 ) -> List[Dict[str, Any]]:
-    """Exclude pixel-heavy/extreme-aspect stills, including old done rows."""
-    placeholders = ", ".join("?" for _ in FEATURE_KINDS)
+    """Exclude pixel-heavy/extreme-aspect stills, including old done rows.
+
+    Scoped: only the current root's rows are examined, so a run never re-labels
+    (or reports) exclusions belonging to a different library.
+    """
+    kind_params = {f"kind{index}": kind for index, kind in enumerate(FEATURE_KINDS)}
+    placeholders = ", ".join(f":{name}" for name in kind_params)
+    predicate: str = "1"
+    scope_params: Dict[str, Any] = {}
+    if scope is not None:
+        predicate, scope_params = scope.clause("f")
     rows = conn.execute(
-        f"SELECT id, path, width, height FROM files WHERE file_kind IN ({placeholders}) "
-        "AND width > 0 AND height > 0 AND (width * height > ? "
-        "OR MAX(CAST(width AS REAL) / height, CAST(height AS REAL) / width) > ?)",
-        (*FEATURE_KINDS, int(max_pixels), float(max_aspect_ratio)),
+        f"SELECT f.id, f.path, f.width, f.height FROM files f "
+        f"WHERE f.file_kind IN ({placeholders}) AND {predicate} "
+        "AND f.width > 0 AND f.height > 0 AND (f.width * f.height > :max_pixels "
+        "OR MAX(CAST(f.width AS REAL) / f.height, CAST(f.height AS REAL) / f.width) "
+        "> :max_ratio)",
+        {**kind_params, **scope_params, "max_pixels": int(max_pixels),
+         "max_ratio": float(max_aspect_ratio)},
     ).fetchall()
     if not rows:
         return []

@@ -143,7 +143,7 @@ def test_rerun_reuses_thumbnails_without_reopening_sources(pipeline, monkeypatch
 
     monkeypatch.setattr(
         stage1_features, "_open_image_and_sha",
-        lambda path: (_ for _ in ()).throw(AssertionError(f"reopened {path}")),
+        lambda path, *_args: (_ for _ in ()).throw(AssertionError(f"reopened {path}")),
     )
     again = run_pipeline.run(str(pipeline["root"]), str(pipeline["output"]),
                              backend="stub", thumb_px=96)

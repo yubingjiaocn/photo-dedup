@@ -6,6 +6,10 @@ Boundaries this module keeps (deliberately, and tested):
 * It writes a temporary runtime config, so the user's ``config.yaml`` is intact.
 * The review server starts only **after** every stage finished, because Stage 1
   owns the single sequential HDD pass and browsing mid-run would fight it.
+* One ``--output`` belongs to exactly one ``--root``. A mismatch fails closed
+  with ``ParameterError`` before any file or DB row is touched
+  (see :mod:`src.root_scope`), because reusing one output directory for several
+  roots is what previously made a 2026-only run report 2015/2017 photos.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from . import (
     db,
     pipeline_report,
     review_server,
+    root_scope,
     stage0_inventory,
     stage1_features,
     stage2_cluster,
@@ -135,12 +140,16 @@ def _runtime_config(root: Path, output: Path, backend: str, thumb_px: int) -> di
 
 
 def _still_image_count(db_path: Path) -> int:
-    """Still images in the inventory (thumbnail + ETA denominator)."""
+    """Still images in the inventory (thumbnail + ETA denominator).
+
+    Scoped to the root this output directory is bound to, so the denominator can
+    never include a previously scanned library's photos.
+    """
     if not db_path.is_file():
         return 0
     conn = db.open_db(db_path)
     try:
-        return db.count_still_images(conn)
+        return db.count_still_images(conn, scope=root_scope.recorded(conn))
     finally:
         conn.close()
 
@@ -173,9 +182,12 @@ def run(
         raise ValueError("review_limit must be at least 1")
     if thumb_px < 1:
         raise ValueError("thumb_px must be at least 1")
-    output_path.mkdir(parents=True, exist_ok=True)
 
+    # Fail closed before creating the output directory or touching the DB.
     db_path = output_path / "inventory.sqlite"
+    requested_scope = root_scope.preflight(db_path, root_path)
+    print(f"[pipeline] root scope: {requested_scope.describe()}")
+    output_path.mkdir(parents=True, exist_ok=True)
     pipeline_report.print_thumbnail_plan(output_path, _still_image_count(db_path))
 
     config = _runtime_config(root_path, output_path, backend, thumb_px)
@@ -185,7 +197,8 @@ def run(
 
         print(f"[pipeline] stage 0/4: inventory (limit={limit or 'all'})")
         inventory, stage0_seconds = _elapsed(
-            stage0_inventory.run, config_path=str(config_path), limit=limit
+            stage0_inventory.run, config_path=str(config_path), limit=limit,
+            run_id=root_scope.new_run_id(),
         )
         print(f"[pipeline] stage 1/4: features + SSD thumbnails "
               f"(backend={backend}, limit={limit or 'all'})")
@@ -201,7 +214,8 @@ def run(
             "stage2": stage2_seconds, "stage3": 0.0,
         }
         still_images = int(
-            inventory.get("library_still_images") or _still_image_count(db_path)
+            inventory.get("library_still_images")
+            or _still_image_count(db_path)
         )
         thumb_stats = dict(features.get("thumbnails") or {})
         disk = pipeline_report.thumbnail_disk_report(output_path, still_images, thumb_stats)

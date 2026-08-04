@@ -16,6 +16,9 @@ Design rules (they are the whole point of this module):
 * **Stale-safe reuse.** A cached thumbnail counts as current only when the DB
   row matches the source ``size_bytes``/``mtime_ns`` *and* the configured pixel
   size, *and* the JPEG still exists on the SSD.
+* **Measurable.** An optional ``telemetry`` sink separates the resize from the
+  JPEG encode + SSD write, because those are very different costs when Stage 1
+  looks GPU-starved.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from . import stage1_telemetry as telemetry_mod
 
 DEFAULT_MAX_PX = 320
 DEFAULT_JPEG_QUALITY = 80
@@ -137,6 +142,7 @@ class Thumbnailer:
         directory: str | os.PathLike,
         max_px: int = DEFAULT_MAX_PX,
         jpeg_quality: int = DEFAULT_JPEG_QUALITY,
+        telemetry: Any = None,
     ) -> None:
         if int(max_px) < 1:
             raise ValueError("thumbnails.max_px must be at least 1")
@@ -145,12 +151,17 @@ class Thumbnailer:
         self.directory = Path(directory)
         self.max_px = int(max_px)
         self.jpeg_quality = int(jpeg_quality)
+        self.telemetry = telemetry
         self.created = 0
         self.reused = 0
         self.failed = 0
         self.bytes_created = 0
         self.failures: List[Dict[str, Any]] = []
         self._pending: List[Dict[str, Any]] = []
+
+    def _phase(self, key: str) -> Any:
+        sink = self.telemetry
+        return sink.phase(key) if sink is not None else telemetry_mod.NULL_SPAN
 
     # -- staleness ----------------------------------------------------------
     def is_current(self, row: Any) -> bool:
@@ -183,8 +194,10 @@ class Thumbnailer:
             return None
         destination = thumb_path(self.directory, file_id)
         try:
-            small = render_thumbnail(image, self.max_px)
-            written = save_atomic(small, destination, self.jpeg_quality)
+            with self._phase("thumbnail_resize"):
+                small = render_thumbnail(image, self.max_px)
+            with self._phase("thumbnail_encode_write"):
+                written = save_atomic(small, destination, self.jpeg_quality)
         except (OSError, ValueError) as exc:
             return self._record_failure(row, f"{type(exc).__name__}: {exc}")
         self.created += 1

@@ -17,6 +17,11 @@ Turns the ``groups`` table into artifacts in ``paths.output_dir``:
 
 Nothing is deleted here; this stage only *proposes*. Deletion is stage 4
 (``execute_local.py`` + the GPTK script).
+
+Everything is scoped to the photo root this output directory is bound to
+(:mod:`src.root_scope`), so every count in ``review_summary.json``,
+``summary.txt`` and the review header describes the current root and run -- not
+whatever else a reused database happens to contain.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import load_config
 from . import db
+from . import root_scope
 from .review_page import (  # noqa: F401 (cached_thumb_uri re-exported for callers)
     DEFAULT_REVIEW_LIMIT,
     cached_thumb_uri,
@@ -47,7 +53,7 @@ def _partner_path(conn, file_id: Optional[int]) -> Optional[str]:
     return row["path"] if row else None
 
 
-def collect_deletions(conn) -> Dict[str, Any]:
+def collect_deletions(conn, scope: Any = None) -> Dict[str, Any]:
     """Collect only AUTO_REMOVE manifests; retain review queues separately."""
     groups_out: List[Dict[str, Any]] = []
     delete_paths: List[str] = []
@@ -56,7 +62,7 @@ def collect_deletions(conn) -> Dict[str, Any]:
     seen_delete: set[str] = set()
     queues: Dict[str, List[Dict[str, Any]]] = {"MAYBE": [], "UNKNOWN": []}
 
-    for grp in db.iter_groups(conn):
+    for grp in db.iter_groups(conn, scope=scope):
         members = db.group_members(conn, grp["id"])
         keep_rec = None
         del_recs: List[Dict[str, Any]] = []
@@ -158,16 +164,16 @@ def _iso_t(exif_dt: Optional[str]) -> Optional[str]:
 
 
 
-def build_review_indexes(conn, data: Dict[str, Any]) -> Dict[str, int]:
+def build_review_indexes(conn, data: Dict[str, Any], scope: Any = None) -> Dict[str, int]:
     """Write the compact pagination index for every view (no image reads)."""
-    counts = {"ALL": db.build_all_view_index(conn)}
+    counts = {"ALL": db.build_all_view_index(conn, scope=scope)}
     for view in ("MAYBE", "UNKNOWN"):
         counts[view] = db.replace_review_index(conn, view, [
             {"file_id": rec["file_id"], "group_id": rec.get("group_id"),
              "decision": view, "risk": rec.get("risk")}
             for rec in data["queues"][view]
         ])
-    counts["GROUPS"] = db.count_groups(conn)
+    counts["GROUPS"] = db.count_groups(conn, scope=scope)
     return counts
 
 
@@ -178,20 +184,26 @@ def run(
     no_thumbs: bool = False,
     review_limit: int = DEFAULT_REVIEW_LIMIT,
     performance_panel: str = "",
+    root_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     if review_limit < 1:
         raise ValueError("review_limit must be at least 1")
     cfg = load_config(config_path)
+    if root_override is not None:
+        root_scope.preflight(cfg.db_path, root_override)
     conn = db.open_db(cfg.db_path)
+    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    data = collect_deletions(conn)
+    data = collect_deletions(conn, scope=scope)
     data["decision_stats"] = _json_obj(db.get_meta(conn, "stage2_stats", "{}"))
-    view_counts = build_review_indexes(conn, data)
+    view_counts = build_review_indexes(conn, data, scope=scope)
     conn.commit()
-    thumb_stats = db.thumbnail_stats(conn)
-    thumb_failures = db.thumbnail_failures(conn)
+    thumb_stats = db.thumbnail_stats(conn, scope=scope)
+    thumb_failures = db.thumbnail_failures(conn, scope=scope)
+    scope_summary = root_scope.summary(conn, scope)
+    print(f"[stage3] {root_scope.scope_note(scope_summary)}")
 
     # delete_local.txt
     local_txt = out_dir / "delete_local.txt"
@@ -200,12 +212,13 @@ def run(
             fh.write(p + "\n")
 
     stage2_run = db.get_meta(conn, "stage2_run_id") or db.get_meta(conn, "stage2_done_at")
-    groups = list(db.iter_groups(conn))
+    groups = list(db.iter_groups(conn, scope=scope))
     policy = groups[0]["policy_version"] if groups else None
     manifest_meta = {
         "schema": 1, "stage2_run_id": stage2_run, "policy_version": policy,
         "count": len(data["delete_paths"]),
         "paths_sha256": hashlib.sha256(local_txt.read_bytes()).hexdigest(),
+        "scope": scope_summary,
     }
     with open(out_dir / "delete_local.meta.json", "w", encoding="utf-8") as fh:
         json.dump(manifest_meta, fh, indent=2)
@@ -234,6 +247,7 @@ def run(
         "thumbnails": thumb_stats,
         "thumbnail_failures": thumb_failures,
         "page_sizes": [50, 100, 200],
+        "scope": scope_summary,
         "skipped_oversize": int(db.get_meta(conn, "stage1_skipped_oversize", "0") or 0),
         "skipped_pixel_limit": int(
             db.get_meta(conn, "stage1_skipped_pixel_limit", "0") or 0
@@ -250,6 +264,7 @@ def run(
     summary = out_dir / "summary.txt"
     with open(summary, "w", encoding="utf-8") as fh:
         fh.write("Photo Dedup - Summary\n")
+        fh.write(root_scope.scope_note(scope_summary) + "\n")
         fh.write(f"groups: {len(data['groups'])}\n")
         fh.write(f"files to delete (incl. motion sidecars): {len(data['delete_paths'])}\n")
         fh.write(f"cloud items to trash: {len(data['cloud_items'])}\n")
@@ -292,12 +307,15 @@ def run(
         "thumbnails": thumb_stats,
         "reclaim_gb": gb,
         "output_dir": str(out_dir),
+        "scope": scope_summary,
     }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 3: review report + delete lists")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--root", default=None,
+                    help="verify the output directory belongs to this photo root")
     ap.add_argument(
         "--no-thumbs", action="store_true",
         help="omit the static fallback tiles (the paged UI is unaffected)",
@@ -307,7 +325,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=f"static fallback tile count (default: {DEFAULT_REVIEW_LIMIT})",
     )
     args = ap.parse_args(argv)
-    run(config_path=args.config, no_thumbs=args.no_thumbs, review_limit=args.review_limit)
+    run(config_path=args.config, no_thumbs=args.no_thumbs, review_limit=args.review_limit,
+        root_override=args.root)
     return 0
 
 

@@ -47,6 +47,12 @@ _DEFAULTS: Dict[str, Any] = {
             "max_px": 320,
             "jpeg_quality": 80,
         },
+        # Stage 1 phase telemetry (cheap: one perf_counter pair per phase per
+        # batch). ``gpu_event_every: 0`` disables the sampled CUDA-event timing.
+        "telemetry": {
+            "enabled": True,
+            "gpu_event_every": 16,
+        },
         "dinov2_model": "facebook/dinov2-base",
         "dinov2_input": 224,
         "iqa_musiq": True,

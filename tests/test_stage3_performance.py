@@ -132,5 +132,6 @@ def test_stage3_cli_passes_review_limit(monkeypatch):
 
     assert stage3_report.main(["--config", "runtime.yaml", "--review-limit", "17"]) == 0
     assert received == {
-        "config_path": "runtime.yaml", "no_thumbs": False, "review_limit": 17
+        "config_path": "runtime.yaml", "no_thumbs": False, "review_limit": 17,
+        "root_override": None,
     }

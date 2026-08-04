@@ -93,7 +93,7 @@ def test_extreme_aspect_skips_but_three_to_one_boundary_is_kept(tmp_path, monkey
 
     decoded: list[str] = []
 
-    def fake_decode(path):
+    def fake_decode(path, telemetry=None):
         decoded.append(path.name)
         return Image.new("RGB", (12, 4), "gray"), "sha"
 
@@ -131,7 +131,7 @@ def test_64mp_50mp_and_normal_widescreen_photos_remain_eligible(tmp_path, monkey
 
     decoded: list[str] = []
 
-    def fake_decode(path):
+    def fake_decode(path, telemetry=None):
         decoded.append(path.name)
         return Image.new("RGB", (8, 8), "gray"), "sha"
 

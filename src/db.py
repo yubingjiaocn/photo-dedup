@@ -11,6 +11,11 @@ Design notes
 * Features are stored as compact BLOBs (float16 embedding, 8-byte pHash).
 * ``iter_files_for_features`` yields only work that is still ``pending`` so
   stage1 is naturally resumable after a Ctrl+C.
+* Every query that feeds a stage or a report takes an optional
+  ``scope``(:class:`src.root_scope.RootScope`). When it is bound, rows outside
+  the current photo root are invisible, which is what stops one output
+  directory from mixing two libraries. ``scope=None`` means "whole database"
+  and is used only by tests and single-root tooling.
 """
 
 from __future__ import annotations
@@ -18,6 +23,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Sequence, Tuple
+
+from . import root_scope
+from .root_scope import RootScope
+from .schema import FILE_COLUMNS, SCHEMA  # noqa: F401 (re-export for callers/tests)
+from . import schema as _schema
 
 # Thumbnail bookkeeping and the review pagination index live in their own module
 # to keep this file focused on the core schema. They are re-exported here so
@@ -39,106 +49,12 @@ from .review_queries import (  # noqa: F401 (intentional re-export)
     thumbnail_stats,
 )
 
-# --- schema ----------------------------------------------------------------
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS files (
-  id INTEGER PRIMARY KEY,
-  path TEXT UNIQUE,
-  basename TEXT,
-  size_bytes INTEGER,
-  mtime_ns INTEGER,
-  exif_datetime TEXT,
-  exif_timestamp INTEGER,
-  width INTEGER,
-  height INTEGER,
-  file_kind TEXT,               -- 'jpg' | 'jpg_motion' | 'mp4_paired' | 'mp4_only'
-  motion_partner_id INTEGER,    -- the other half of a motion photo (NULL if none)
-  scan_status TEXT DEFAULT 'pending',
-  scan_error TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_files_kind ON files(file_kind);
-CREATE INDEX IF NOT EXISTS idx_files_ts   ON files(exif_timestamp);
-CREATE INDEX IF NOT EXISTS idx_files_base ON files(basename);
-
-CREATE TABLE IF NOT EXISTS features (
-  file_id INTEGER PRIMARY KEY REFERENCES files(id),
-  phash BLOB,                   -- 8-byte 64-bit perceptual hash
-  content_sha256 TEXT,          -- byte identity; pHash alone is never exact proof
-  dinov2_embedding BLOB,        -- 768-dim float16 = 1536 bytes
-  quality_score REAL,           -- MUSIQ 0-100 (or stub proxy)
-  quality_meta TEXT,            -- JSON: {sharpness, clipiqa, ...}
-  face_count INTEGER,
-  faces_json TEXT,              -- YuNet: [{bbox, landmarks, score}, ...]
-  status TEXT DEFAULT 'pending'
-);
-
--- SSD thumbnail cache bookkeeping. One row per still image Stage 1 handled.
--- Identity columns capture the source file as it was when the JPEG was made,
--- so a changed original can never reuse a stale thumbnail.
-CREATE TABLE IF NOT EXISTS thumbnails (
-  file_id INTEGER PRIMARY KEY REFERENCES files(id),
-  status TEXT,                  -- 'ok' | 'error'
-  max_px INTEGER,
-  bytes INTEGER,
-  source_size_bytes INTEGER,
-  source_mtime_ns INTEGER,
-  error TEXT,
-  created_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_thumbs_status ON thumbnails(status);
-
--- Compact, ordered pagination index built by stage 3 (one row per visible
--- item per view) so the review server can page 100k photos with LIMIT/OFFSET
--- instead of shipping a huge JSON document to the browser.
-CREATE TABLE IF NOT EXISTS review_index (
-  view TEXT,                    -- 'ALL' | 'MAYBE' | 'UNKNOWN' | 'GROUPS'
-  position INTEGER,
-  file_id INTEGER,
-  group_id INTEGER,
-  decision TEXT,
-  risk REAL,
-  PRIMARY KEY (view, position)
-);
-CREATE INDEX IF NOT EXISTS idx_review_index_file ON review_index(file_id);
-
-CREATE TABLE IF NOT EXISTS groups (
-  id INTEGER PRIMARY KEY,
-  group_type TEXT,              -- 'exact_dup' | 'burst' | 'similar_scene'
-  keep_file_id INTEGER,
-  member_count INTEGER,
-  created_at INTEGER,
-  decision_state TEXT,
-  confidence REAL,
-  policy_version TEXT,
-  decision_json TEXT
-);
-
-CREATE TABLE IF NOT EXISTS group_members (
-  group_id INTEGER,
-  file_id INTEGER,
-  is_keep INTEGER,              -- SQLite has no bool; 0/1
-  reason TEXT,
-  decision TEXT,
-  confidence REAL,
-  evidence_json TEXT,
-  user_override TEXT,
-  PRIMARY KEY (group_id, file_id)
-);
-CREATE INDEX IF NOT EXISTS idx_gm_file ON group_members(file_id);
-
--- Simple key/value for pipeline bookkeeping (stage completion, timings...).
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-"""
-
-FILE_COLUMNS = (
-    "path", "basename", "size_bytes", "mtime_ns", "exif_datetime",
-    "exif_timestamp", "width", "height", "file_kind",
-    "motion_partner_id", "scan_status", "scan_error",
-)
+def scope_sql(scope: RootScope | None, alias: str = "f",
+              name: str = "scope") -> Tuple[str, Dict[str, Any]]:
+    """SQL predicate + params for ``scope`` (``1`` when unbound/None)."""
+    if scope is None:
+        return "1", {}
+    return scope.clause(alias, name)
 
 
 # --- connection ------------------------------------------------------------
@@ -156,36 +72,28 @@ def open_db(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
+    _schema.apply(conn)
     conn.commit()
     return conn
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Add P0 decision columns to databases created by pre-P0 releases."""
-    additions = {
-        "features": {"content_sha256": "TEXT"},
-        "groups": {"decision_state": "TEXT", "confidence": "REAL",
-                   "policy_version": "TEXT", "decision_json": "TEXT"},
-        "group_members": {"decision": "TEXT", "confidence": "REAL",
-                          "evidence_json": "TEXT", "user_override": "TEXT"},
-    }
-    for table, columns in additions.items():
-        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for name, sql_type in columns.items():
-            if name not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
-
-
 # --- files -----------------------------------------------------------------
 
-def insert_file(conn: sqlite3.Connection, meta: Dict[str, Any]) -> int:
+def insert_file(conn: sqlite3.Connection, meta: Dict[str, Any],
+                scope: RootScope | None = None) -> int:
     """Insert (or ignore-if-duplicate) one file row. Returns the row id.
 
     ``meta`` may contain any subset of :data:`FILE_COLUMNS`; missing keys are
     stored as NULL. Uniqueness is on ``path`` so re-scans are idempotent.
+    ``path_key`` is always derived here (never trusted from the caller) so no
+    row can exist without the identity the scope filters depend on.
     """
+    meta = dict(meta)
+    meta["path_key"] = root_scope.normalize(meta["path"])
+    if scope is not None and scope.bound:
+        meta.setdefault("root_key", scope.key)
+        if scope.run_id:
+            meta.setdefault("last_run_id", scope.run_id)
     cols = [c for c in FILE_COLUMNS if c in meta]
     placeholders = ", ".join("?" for _ in cols)
     col_sql = ", ".join(cols)
@@ -243,11 +151,14 @@ def get_file_by_path(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
 
 
-def count_files(conn: sqlite3.Connection, where: str = "") -> int:
-    sql = "SELECT COUNT(*) AS n FROM files"
+def count_files(conn: sqlite3.Connection, where: str = "",
+                scope: RootScope | None = None) -> int:
+    """Count inventory rows, restricted to ``scope`` when it is bound."""
+    predicate, params = scope_sql(scope, "files")
+    sql = f"SELECT COUNT(*) AS n FROM files WHERE {predicate}"
     if where:
-        sql += f" WHERE {where}"
-    return int(conn.execute(sql).fetchone()["n"])
+        sql += f" AND ({where})"
+    return int(conn.execute(sql, params).fetchone()["n"])
 
 
 # --- features --------------------------------------------------------------
@@ -293,7 +204,8 @@ def register_thumb_presence(conn: sqlite3.Connection, file_ids: Iterable[int]) -
 
 
 def iter_files_for_features(
-    conn: sqlite3.Connection, batch_size: int = 256, thumb_max_px: int | None = None
+    conn: sqlite3.Connection, batch_size: int = 256, thumb_max_px: int | None = None,
+    scope: RootScope | None = None,
 ) -> Iterator[sqlite3.Row]:
     """Yield still-image rows that still need Stage 1 work.
 
@@ -302,6 +214,9 @@ def iter_files_for_features(
     done but whose SSD thumbnail is missing/stale/failed is pending as well, so
     the single decode of that repair pass serves features *and* the thumbnail.
     Streams in batches to keep memory flat on a 100k+ library.
+
+    A bound ``scope`` restricts the work to the current photo root, so Stage 1
+    can never spend the HDD pass on another library's leftovers.
     """
     if thumb_max_px is None:
         thumb_clause = ""
@@ -312,18 +227,20 @@ def iter_files_for_features(
         params = {"thumb_max_px": int(thumb_max_px)}
     kind_params = {f"kind{i}": kind for i, kind in enumerate(FEATURE_KINDS)}
     kind_placeholders = ", ".join(f":{name}" for name in kind_params)
+    scope_clause, scope_params = scope_sql(scope, "f")
     sql = f"""
         SELECT f.*, {_THUMB_SELECT} FROM files f
         LEFT JOIN features fe ON fe.file_id = f.id
         LEFT JOIN thumbnails t ON t.file_id = f.id
         WHERE f.file_kind IN ({kind_placeholders})
+          AND {scope_clause}
           AND (
             fe.file_id IS NULL OR fe.status NOT IN ('done', 'done_error', 'skipped_oversize')
             {thumb_clause}
           )
         ORDER BY f.id
     """
-    cur = conn.execute(sql, {**kind_params, **params})
+    cur = conn.execute(sql, {**kind_params, **params, **scope_params})
     while True:
         rows = cur.fetchmany(batch_size)
         if not rows:
@@ -359,20 +276,30 @@ def batch_insert_features(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any
     )
 
 
-def count_still_images(conn: sqlite3.Connection) -> int:
+def count_still_images(conn: sqlite3.Connection, scope: RootScope | None = None) -> int:
     """Number of still images Stage 1 is responsible for (thumbnail denominator)."""
-    placeholders = ", ".join("?" for _ in FEATURE_KINDS)
+    kind_params = {f"kind{i}": kind for i, kind in enumerate(FEATURE_KINDS)}
+    placeholders = ", ".join(f":{name}" for name in kind_params)
+    predicate, params = scope_sql(scope, "f")
     return int(conn.execute(
-        f"SELECT COUNT(*) AS n FROM files WHERE file_kind IN ({placeholders})", FEATURE_KINDS
+        f"SELECT COUNT(*) AS n FROM files f WHERE f.file_kind IN ({placeholders}) "
+        f"AND {predicate}",
+        {**kind_params, **params},
     ).fetchone()["n"])
 
 
-def load_features_joined(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+def load_features_joined(conn: sqlite3.Connection,
+                         scope: RootScope | None = None) -> List[sqlite3.Row]:
     """Load every still image joined with its features, for clustering.
 
     ~66k rows * ~1.6KB embedding ~= 100MB in memory, which is fine.
+
+    Scoped: Stage 2 must not cluster this root's photos against another root's
+    rows, which would invent cross-library groups in the review.
     """
-    placeholders = ", ".join("?" for _ in FEATURE_KINDS)
+    kind_params = {f"kind{i}": kind for i, kind in enumerate(FEATURE_KINDS)}
+    placeholders = ", ".join(f":{name}" for name in kind_params)
+    predicate, params = scope_sql(scope, "f")
     sql = f"""
         SELECT f.id, f.path, f.basename, f.size_bytes, f.mtime_ns,
                f.exif_datetime, f.exif_timestamp, f.width, f.height,
@@ -382,18 +309,39 @@ def load_features_joined(conn: sqlite3.Connection) -> List[sqlite3.Row]:
         FROM files f
         JOIN features fe ON fe.file_id = f.id
         WHERE f.file_kind IN ({placeholders})
+          AND {predicate}
           AND fe.status = 'done'
         ORDER BY COALESCE(f.exif_timestamp, f.mtime_ns/1000000000), f.id
     """
-    return conn.execute(sql, FEATURE_KINDS).fetchall()
+    return conn.execute(sql, {**kind_params, **params}).fetchall()
 
 
 # --- groups ----------------------------------------------------------------
 
-def clear_groups(conn: sqlite3.Connection) -> None:
-    """Wipe clustering output so stage2 can be re-run idempotently."""
-    conn.execute("DELETE FROM group_members")
-    conn.execute("DELETE FROM groups")
+def clear_groups(conn: sqlite3.Connection, scope: RootScope | None = None) -> None:
+    """Wipe clustering output so stage2 can be re-run idempotently.
+
+    With a bound scope only this root's groups are removed: another root's
+    output in the same (legacy) database is left untouched rather than deleted.
+    """
+    predicate, params = scope_sql(scope, "f")
+    if scope is None or not scope.bound:
+        conn.execute("DELETE FROM group_members")
+        conn.execute("DELETE FROM groups")
+        conn.commit()
+        return
+    conn.execute(
+        f"""
+        DELETE FROM group_members WHERE group_id IN (
+            SELECT DISTINCT gm.group_id FROM group_members gm
+            JOIN files f ON f.id = gm.file_id WHERE {predicate}
+        )
+        """,
+        params,
+    )
+    conn.execute(
+        "DELETE FROM groups WHERE id NOT IN (SELECT DISTINCT group_id FROM group_members)"
+    )
     conn.commit()
 
 
@@ -434,8 +382,23 @@ def update_member_decisions(conn: sqlite3.Connection, group_id: int,
     )
 
 
-def iter_groups(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
-    return conn.execute("SELECT * FROM groups ORDER BY id").fetchall()
+def iter_groups(conn: sqlite3.Connection,
+                scope: RootScope | None = None) -> Iterable[sqlite3.Row]:
+    """Groups whose members belong to ``scope`` (all groups when unbound)."""
+    if scope is None or not scope.bound:
+        return conn.execute("SELECT * FROM groups ORDER BY id").fetchall()
+    predicate, params = scope_sql(scope, "f")
+    return conn.execute(
+        f"""
+        SELECT g.* FROM groups g
+        WHERE EXISTS (
+            SELECT 1 FROM group_members gm JOIN files f ON f.id = gm.file_id
+            WHERE gm.group_id = g.id AND {predicate}
+        )
+        ORDER BY g.id
+        """,
+        params,
+    ).fetchall()
 
 
 def group_members(conn: sqlite3.Connection, group_id: int) -> List[sqlite3.Row]:

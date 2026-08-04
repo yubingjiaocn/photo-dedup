@@ -11,6 +11,12 @@ limited run resumes with the next new/changed files instead of redoing a prefix.
 Only header bytes are read per processed file (dimensions + EXIF + motion XMP
 marker). With ``--limit``, the remaining directory entries are still counted
 without opening them so later size/ETA projections use the real library scope.
+
+Root identity: the first stage0 run binds this output directory/database to the
+normalised photo root (see :mod:`src.root_scope`). Re-running with the same root
+resumes; a different root fails closed with ``ParameterError`` *before* any row
+is written, because mixing two roots in one output directory silently corrupts
+every later count and report.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .config import Config, load_config
 from . import db
+from . import root_scope
 from . import motion_photo as mp
 
 try:
@@ -144,6 +151,7 @@ def run(
     config_path: Optional[str] = None,
     root_override: Optional[str] = None,
     limit: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Run stage 0. Returns stats dict."""
     cfg = load_config(config_path)
@@ -151,17 +159,25 @@ def run(
     if not root.exists():
         raise FileNotFoundError(f"scan root does not exist: {root}")
 
+    # Fail closed on an incompatible output directory before creating/upgrading
+    # anything in it.
+    root_scope.preflight(cfg.db_path, root)
     conn = db.open_db(cfg.db_path)
+    scope = root_scope.bind(conn, root, run_id=run_id, db_path=str(cfg.db_path))
+    print(f"[stage0] {root_scope.scope_note(root_scope.summary(conn, scope))}")
     # Older builds inferred same-name JPEG/video sidecars. This library only
     # supports embedded Motion JPEG, so remove those stale links without
     # reopening either source file. Embedded rows never had a partner id.
+    scope_clause, scope_params = db.scope_sql(scope, "files")
     conn.execute(
         "UPDATE files SET file_kind='jpg', motion_partner_id=NULL "
-        "WHERE file_kind='jpg_motion' AND motion_partner_id IS NOT NULL"
+        f"WHERE file_kind='jpg_motion' AND motion_partner_id IS NOT NULL AND {scope_clause}",
+        scope_params,
     )
     conn.execute(
         "UPDATE files SET file_kind='mp4_only', motion_partner_id=NULL "
-        "WHERE file_kind='mp4_paired' OR motion_partner_id IS NOT NULL"
+        f"WHERE (file_kind='mp4_paired' OR motion_partner_id IS NOT NULL) AND {scope_clause}",
+        scope_params,
     )
     conn.commit()
     extensions = {e.lower() for e in cfg.scan.get("extensions", [])}
@@ -175,6 +191,7 @@ def run(
     discovered_files = 0
     discovered_still_images = 0
     since_commit = 0
+    seen_ids: List[int] = []
     t0 = time.time()
 
     # File-level progress stays visibly alive even inside one huge directory.
@@ -205,13 +222,15 @@ def run(
                     and existing["size_bytes"] == st.st_size
                     and existing["mtime_ns"] == st.st_mtime_ns):
                 unchanged += 1
+                seen_ids.append(int(existing["id"]))
                 continue
             try:
                 meta, _partner = build_file_meta(p, all_entries, cfg, st=st)
             except OSError as exc:
                 print(f"[stage0][WARN] metadata failed {p}: {exc}")
                 continue
-            fid = db.insert_file(conn, meta)
+            fid = db.insert_file(conn, meta, scope=scope)
+            seen_ids.append(int(fid))
             # A re-scan must notice a replaced/edited photo, otherwise stale
             # hashes and stale thumbnails would survive (see refresh_file_identity).
             if db.refresh_file_identity(conn, fid, meta):
@@ -222,26 +241,32 @@ def run(
                 metadata=metadata_processed, unchanged=unchanged, refresh=False
             )
             if since_commit >= commit_every:
+                root_scope.mark_seen(conn, scope.run_id, seen_ids)
+                seen_ids.clear()
                 conn.commit()
                 since_commit = 0
     progress.close()
+    root_scope.mark_seen(conn, scope.run_id, seen_ids)
     conn.commit()
 
     db.set_meta(conn, "stage0_root", str(root))
     db.set_meta(conn, "stage0_done_at", str(int(time.time())))
     dt = time.time() - t0
+    scope_summary = root_scope.summary(conn, scope)
     stats = {
-        "files": db.count_files(conn),
-        "still_images": db.count_still_images(conn),
+        "files": db.count_files(conn, scope=scope),
+        "still_images": db.count_still_images(conn, scope=scope),
         "discovered_files": discovered_files,
         "library_still_images": discovered_still_images,
         "total_bytes": int(conn.execute(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM files").fetchone()[0]),
+            f"SELECT COALESCE(SUM(files.size_bytes), 0) FROM files WHERE {scope_clause}",
+            scope_params).fetchone()[0]),
         "changed_files": refreshed,
-        "jpg": db.count_files(conn, "file_kind='jpg'"),
-        "jpg_motion": db.count_files(conn, "file_kind='jpg_motion'"),
-        "mp4_paired": db.count_files(conn, "file_kind='mp4_paired'"),
-        "mp4_only": db.count_files(conn, "file_kind='mp4_only'"),
+        "jpg": db.count_files(conn, "file_kind='jpg'", scope=scope),
+        "jpg_motion": db.count_files(conn, "file_kind='jpg_motion'", scope=scope),
+        "mp4_paired": db.count_files(conn, "file_kind='mp4_paired'", scope=scope),
+        "mp4_only": db.count_files(conn, "file_kind='mp4_only'", scope=scope),
+        "scope": scope_summary,
     }
     if refreshed:
         print(f"[stage0] {refreshed} file(s) changed on disk; their cached features and "

@@ -61,9 +61,9 @@ def test_thumbnail_is_generated_from_the_single_stage1_decode(tmp_path, monkeypa
     opens: list[str] = []
     real_open = stage1_features._open_image_and_sha
 
-    def counted(path):
+    def counted(path, telemetry=None):
         opens.append(str(path))
-        return real_open(path)
+        return real_open(path, telemetry)
 
     monkeypatch.setattr(stage1_features, "_open_image_and_sha", counted)
 
@@ -163,7 +163,7 @@ def test_full_coverage_then_reuse_without_reopening_sources(tmp_path, monkeypatc
     opens: list[str] = []
     monkeypatch.setattr(
         stage1_features, "_open_image_and_sha",
-        lambda path: opens.append(str(path)) or (_ for _ in ()).throw(
+        lambda path, *_args: opens.append(str(path)) or (_ for _ in ()).throw(
             AssertionError("re-run must not reopen sources")),
     )
     second = stage1_features.run(config_path=config, backend_override="stub")

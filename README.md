@@ -22,6 +22,13 @@ never moves or deletes a photo**.
    python -m src.run_pipeline --root "E:\Photos" --output "C:\photo-review-smoke" --backend stub --limit 20
    ```
 
+   **One `--output` belongs to exactly one `--root`.** The output directory
+   records the root it was created for, so scanning `E:\Photos\2026` into the
+   output of an earlier `E:\Photos\2015` run stops immediately with a
+   `ParameterError` that names both roots — nothing is read, written, or
+   deleted. Re-running with the same root always resumes (case and `\` vs `/`
+   do not matter). Use one output directory per root.
+
 3. Run the real local models. Start with a limit, then step it up; omit
    `--limit` when you are ready for the whole library:
 
@@ -365,6 +372,33 @@ never judged (or displayed) from stale data.
 loaded (`window.gptkApi` exists in the console) and that `photos.google.com`
 finished loading before you pasted the script.
 
+**"incompatible output directory" / reports showed photos from another year.**
+An output directory is bound to one photo root. Earlier builds recorded no root
+identity, so reusing one `--output` for `E:\Photos\2015` and then
+`E:\Photos\2026` mixed both inventories and every count (review header, ETA,
+manifests) described the union. Now the mismatch fails closed before anything is
+touched, and the message lists the recorded root, the relation (unrelated /
+parent / child) and your options. Fixes:
+
+* use a separate `--output` per root (recommended), or
+* re-run with the recorded root to resume that inventory, or
+* for an *older* database that already holds several roots: point `--root` at
+  their common parent to adopt the whole inventory, or start a fresh output
+  directory. Nothing is deleted either way — the old database is left intact.
+
+Every report now prints the scope line it describes, e.g.
+`scope: root=E:\Photos\2026 run=<id> files_in_scope=61234 seen_this_run=61234`.
+
+**Stage 1 feels slow / the GPU only pulses.** `performance.txt` and the console
+log carry the Stage 1 phase breakdown: cumulative seconds, count, ms/image and
+percentage for source read, decode, SHA-256, embedding preprocess vs inference,
+MUSIQ, CLIP-IQA, sharpness, YuNet, exposure, thumbnail resize vs encode+write,
+DB write/commit, plus batch p50/p95 and the leftover `unaccounted` time. Numbers
+are host wall time (labelled `host-wall`) unless a line is under the CUDA-event
+section, because with an async CUDA backend host timing includes submit + wait.
+Turn it off or change the CUDA-event sampling with `features.telemetry`
+(`enabled`, `gpu_event_every`; `0` disables event sampling).
+
 ---
 
 ## Layout
@@ -377,6 +411,9 @@ src/                        # pipeline (each stage is a `python -m src.<stage>`)
 src/thumbnails.py           # SSD thumbnail cache written from Stage 1's decode
 src/review_server.py        # local-only paged review API (SSD thumbnails only)
 src/pipeline_report.py      # stage timings, throughput, rough ETA, disk report
+src/root_scope.py           # durable root identity + per-run scope (fail closed)
+src/schema.py               # SQLite DDL + additive migrations
+src/stage1_telemetry.py     # Stage 1 per-phase timing (host-wall vs CUDA events)
 scripts/gptk_delete.js      # Google Photos cloud-delete console script
 docs/ALGORITHM.md           # every threshold explained
 tests/                      # pytest suite (`python -m pytest tests/`)

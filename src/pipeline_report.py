@@ -11,6 +11,9 @@ Everything here is measured or derived from *this* run:
 * thumbnail cache: estimated total, actual current usage, and SSD free space.
   Below the advisory floor we warn and keep going -- never abort, and never
   demand tens of GB of headroom.
+* the Stage 1 phase breakdown from :mod:`src.stage1_telemetry` (where the wall
+  clock actually went: HDD read, decode, GPU inference, thumbnail, DB), so a
+  "GPU only pulses to 81%" report can be answered with numbers.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from . import stage1_telemetry
 
 GIB = 1024 ** 3
 LOW_SPACE_WARN_GIB = 20.0
@@ -34,6 +39,15 @@ def _fmt_rate(value: Optional[float], unit: str) -> str:
 
 def _fmt_gib(value: Optional[float]) -> str:
     return f"{value:.2f} GiB" if value is not None else "unknown"
+
+
+def _scope_lines(scope: Optional[Dict[str, Any]]) -> list[str]:
+    """State which root/run the numbers below describe (empty when unbound)."""
+    if not scope or not scope.get("root"):
+        return []
+    from . import root_scope
+
+    return [root_scope.scope_note(scope)]
 
 
 def free_bytes(path: Path) -> Optional[int]:
@@ -131,6 +145,8 @@ def build_performance(
         "stage1_skipped_aspect_ratio": skipped_aspect,
         "stage0_files_per_second": stage0_rate,
         "stage1_images_per_second": stage1_rate,
+        "stage1_phase_telemetry": features.get("phase_telemetry") or {},
+        "scope": features.get("scope") or inventory.get("scope") or {},
         "eta_seconds": eta_seconds,
         "eta_hours": (eta_seconds / 3600.0) if eta_seconds is not None else None,
         "eta_basis": eta_basis,
@@ -147,6 +163,7 @@ def render_lines(performance: Dict[str, Any], disk: Optional[Dict[str, Any]] = N
     stage_seconds = performance["stage_seconds"]
     lines = [
         "Photo Dedup - observed performance (this run)",
+        *_scope_lines(performance.get("scope")),
         *(f"{name} wall time: {stage_seconds[name]:.2f}s" for name in STAGES),
         f"total wall time: {performance['total_seconds']:.2f}s",
         f"stage0 processed: {performance['inventory_files']} files "
@@ -167,6 +184,10 @@ def render_lines(performance: Dict[str, Any], disk: Optional[Dict[str, Any]] = N
     else:
         lines.append(f"ROUGH full-library Stage 1 ETA: unknown - {performance['eta_basis']}")
     lines.append(performance["eta_disclaimer"])
+    telemetry = performance.get("stage1_phase_telemetry") or {}
+    if telemetry:
+        lines.append("")
+        lines.extend(stage1_telemetry.render_lines(telemetry))
     if disk:
         lines.extend([
             "",

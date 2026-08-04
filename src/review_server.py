@@ -11,6 +11,9 @@ Hard boundaries (the reason this file exists):
 * Views: ``ALL`` (full timeline), ``MAYBE``, ``UNKNOWN``, ``GROUPS``.
 * Page size is 50, 100 (default), or 200 -- an explicit allow-list.
 * Binds ``127.0.0.1`` only; read-only, with no delete/move/keep operation.
+* Every query is restricted to the photo root the output directory is bound to
+  (:mod:`src.root_scope`), so a legacy database holding several roots still
+  serves -- and counts -- only the current one.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import db, thumbnails
+from . import db, root_scope, thumbnails
 
 DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
@@ -98,6 +101,9 @@ class ReviewData:
         self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True,
                                      check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Read-only: the binding is whatever stage 0 recorded. An unbound legacy
+        # database yields an unbound scope, i.e. exactly today's behaviour.
+        self.scope = root_scope.recorded(self._conn)
         self.summary = self._read_summary()
 
     def close(self) -> None:
@@ -116,10 +122,10 @@ class ReviewData:
     def counts(self) -> Dict[str, int]:
         with self._lock:
             return {
-                "ALL": db.review_index_count(self._conn, "ALL"),
-                "MAYBE": db.review_index_count(self._conn, "MAYBE"),
-                "UNKNOWN": db.review_index_count(self._conn, "UNKNOWN"),
-                "GROUPS": db.count_groups(self._conn),
+                "ALL": db.review_index_count(self._conn, "ALL", scope=self.scope),
+                "MAYBE": db.review_index_count(self._conn, "MAYBE", scope=self.scope),
+                "UNKNOWN": db.review_index_count(self._conn, "UNKNOWN", scope=self.scope),
+                "GROUPS": db.count_groups(self._conn, scope=self.scope),
             }
 
     def page(self, view: str, page: int, page_size: int) -> Dict[str, Any]:
@@ -130,18 +136,19 @@ class ReviewData:
         if page < 1:
             raise ValueError("page must be at least 1")
         with self._lock:
-            total = (db.count_groups(self._conn) if view == "GROUPS"
-                     else db.review_index_count(self._conn, view))
+            total = (db.count_groups(self._conn, scope=self.scope) if view == "GROUPS"
+                     else db.review_index_count(self._conn, view, scope=self.scope))
             pages = max(1, (total + page_size - 1) // page_size)
             page = min(page, pages)
             offset = (page - 1) * page_size
             if view == "GROUPS":
                 items: List[Dict[str, Any]] = _group_items(
-                    db.group_page(self._conn, offset, page_size)
+                    db.group_page(self._conn, offset, page_size, scope=self.scope)
                 )
             else:
                 items = [_public_item(row) for row in
-                         db.review_page(self._conn, view, offset, page_size)]
+                         db.review_page(self._conn, view, offset, page_size,
+                                        scope=self.scope)]
         return {
             "view": view, "page": page, "pages": pages, "page_size": page_size,
             "total": total, "shown": len(items),
@@ -152,7 +159,7 @@ class ReviewData:
     def group(self, group_id: int) -> Optional[Dict[str, Any]]:
         """Path-free members for lightbox navigation from any review queue."""
         with self._lock:
-            rows = db.group_page_by_id(self._conn, int(group_id))
+            rows = db.group_page_by_id(self._conn, int(group_id), scope=self.scope)
         if not rows:
             return None
         return _group_items(rows)[0]
@@ -169,10 +176,12 @@ class ReviewData:
 
     def original_record(self, file_id: int) -> Optional[OriginalRecord]:
         """Resolve immutable inventory identity for one explicit preview click."""
+        predicate, params = db.scope_sql(self.scope, "f")
         with self._lock:
             row = self._conn.execute(
-                "SELECT path, file_kind, size_bytes, mtime_ns FROM files WHERE id = ?",
-                (int(file_id),),
+                "SELECT f.path, f.file_kind, f.size_bytes, f.mtime_ns FROM files f "
+                f"WHERE f.id = :file_id AND {predicate}",
+                {**params, "file_id": int(file_id)},
             ).fetchone()
         if (row is None or row["file_kind"] not in ("jpg", "jpg_motion")
                 or row["size_bytes"] is None or row["mtime_ns"] is None):
@@ -187,6 +196,7 @@ class ReviewData:
             "thumb_cache_files": files,
             "thumb_cache_bytes": cache_bytes,
             "summary": self.summary,
+            "scope": {"root": self.scope.path, "root_key": self.scope.key},
         }
 
 

@@ -26,10 +26,10 @@ def test_stage1_decodes_once_and_fans_out_existing_rgb_without_router_opening(tm
     original = stage1._open_image_and_sha
     calls = 0
 
-    def counted(path):
+    def counted(path, telemetry=None):
         nonlocal calls
         calls += 1
-        return original(path)
+        return original(path, telemetry)
 
     monkeypatch.setattr(stage1, "_open_image_and_sha", counted)
     result = stage1._process_batch(stage1.StubBackend(), [row], load_config())

@@ -9,6 +9,10 @@ its guarantee of exactly one read and one decode per photo.
 Model failures are raised, never swallowed: ``resolve_backend`` will not quietly
 fall back to the stub when torch is installed but its weights cannot load, so a
 broken GPU setup can never masquerade as usable results.
+
+Both backends carry an optional ``telemetry`` attribute (:mod:`src.stage1_telemetry`).
+Stage 1 sets it; when it is unset every ``_phase``/``_gpu_phase`` call returns a
+no-op span, so the timing hooks cost nothing and never change behaviour.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from PIL import Image
 
 from .config import Config
 from . import quality as Q
+from . import stage1_telemetry as telemetry_mod
 
 
 EMBED_DIM = 768
@@ -38,11 +43,26 @@ def _bounded_iqa_image(image: Image.Image, max_long_edge: int) -> tuple[Image.Im
     return image.resize(size, Image.Resampling.LANCZOS), scale
 
 
+class _Instrumented:
+    """Optional phase-timing hooks shared by both backends."""
+
+    telemetry: Any = None
+
+    def _phase(self, key: str, count: int = 1) -> Any:
+        sink = self.telemetry
+        return sink.phase(key, count) if sink is not None else telemetry_mod.NULL_SPAN
+
+    def _gpu_phase(self, key: str) -> Any:
+        """CUDA-event span; sampled per batch, never per micro-op."""
+        sink = self.telemetry
+        return sink.gpu_event_phase(key) if sink is not None else telemetry_mod.NULL_SPAN
+
+
 # ===========================================================================
 # Backends
 # ===========================================================================
 
-class StubBackend:
+class StubBackend(_Instrumented):
     """Deterministic, numpy-only feature backend (no torch/CUDA required).
 
     * embedding -- L2-normalised 24x32 grayscale downsample (768-d), which is
@@ -60,34 +80,39 @@ class StubBackend:
     def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
         out = np.zeros((len(images), EMBED_DIM), dtype=np.float32)
         for i, im in enumerate(images):
-            g = im.convert("L").resize((32, 24), Image.BILINEAR)
-            v = np.asarray(g, dtype=np.float32).flatten()
-            v -= v.mean()
-            n = np.linalg.norm(v)
-            out[i] = v / n if n > 0 else v
+            with self._phase("embed_preprocess"):
+                g = im.convert("L").resize((32, 24), Image.BILINEAR)
+                v = np.asarray(g, dtype=np.float32).flatten()
+            with self._phase("embed_inference"):
+                v -= v.mean()
+                n = np.linalg.norm(v)
+                out[i] = v / n if n > 0 else v
         return out
 
     def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
-        bounded, scale = _bounded_iqa_image(image, self.iqa_max_long_edge)
-        gray = np.asarray(bounded.convert("L"), dtype=np.float32)
-        sharp = Q.variance_of_laplacian(gray)
+        with self._phase("quality_preprocess"):
+            bounded, scale = _bounded_iqa_image(image, self.iqa_max_long_edge)
+            gray = np.asarray(bounded.convert("L"), dtype=np.float32)
+        with self._phase("quality_sharpness"):
+            sharp = Q.variance_of_laplacian(gray)
         score = 100.0 * Q.normalize_sharpness(sharp)
         return score, {"sharpness": sharp, "clipiqa": None, "backend": "stub",
                        "iqa_input_size": list(bounded.size), "iqa_scale": scale}
 
     def faces(self, image: Image.Image) -> List[Dict[str, Any]]:
-        arr = np.asarray(image.convert("RGB"), dtype=np.int16)
-        r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
-        mask = (r > 150) & (g < 100) & (b < 100)
-        if int(mask.sum()) < 20:
-            return []
-        ys, xs = np.where(mask)
-        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-        bbox = [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
+        with self._phase("faces_yunet"):
+            arr = np.asarray(image.convert("RGB"), dtype=np.int16)
+            r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+            mask = (r > 150) & (g < 100) & (b < 100)
+            if int(mask.sum()) < 20:
+                return []
+            ys, xs = np.where(mask)
+            x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+            bbox = [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
         return [{"bbox": bbox, "landmarks": [], "score": 0.95}]
 
 
-class TorchBackend:
+class TorchBackend(_Instrumented):
     """Real backend: DINOv2 embedding + pyiqa MUSIQ/CLIP-IQA + YuNet faces.
 
     Heavy imports happen in ``__init__`` so importing this module never pulls
@@ -126,32 +151,44 @@ class TorchBackend:
     # -- embeddings ---------------------------------------------------------
     def embed_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
         torch = self.torch
-        inputs = self.processor(images=list(images), return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            out = self.model(**inputs)
-        # pooler_output is the CLS-token summary (768-d for dinov2-base).
-        emb = out.pooler_output if out.pooler_output is not None else out.last_hidden_state[:, 0]
-        return emb.float().cpu().numpy()
+        with self._phase("embed_preprocess", len(images)):
+            inputs = self.processor(images=list(images), return_tensors="pt").to(self.device)
+        # Host-wall span covers submit + the implicit sync of the .cpu() copy;
+        # the optional CUDA-event span (sampled) isolates kernel time.
+        with self._phase("embed_inference", len(images)):
+            with self._gpu_phase("embed_inference"):
+                with torch.no_grad():
+                    out = self.model(**inputs)
+            # pooler_output is the CLS-token summary (768-d for dinov2-base).
+            emb = (out.pooler_output if out.pooler_output is not None
+                   else out.last_hidden_state[:, 0])
+            return emb.float().cpu().numpy()
 
     # -- quality ------------------------------------------------------------
     def quality(self, image: Image.Image) -> Tuple[float, Dict[str, Any]]:
         torch = self.torch
-        bounded, scale = _bounded_iqa_image(
-            image, int(self.cfg.features.get("iqa_max_long_edge", 1920))
-        )
-        arr = np.asarray(bounded.convert("RGB"), dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        with self._phase("quality_preprocess"):
+            bounded, scale = _bounded_iqa_image(
+                image, int(self.cfg.features.get("iqa_max_long_edge", 1920))
+            )
+            arr = np.asarray(bounded.convert("RGB"), dtype=np.float32) / 255.0
+            tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(self.device)
         score = 0.0
         meta: Dict[str, Any] = {
             "backend": "torch", "iqa_input_size": list(bounded.size), "iqa_scale": scale,
         }
         if self.musiq is not None:
-            score = float(self.musiq(tensor).item())  # MUSIQ ~0..100
+            with self._phase("quality_musiq"):
+                with self._gpu_phase("quality_musiq"):
+                    score = float(self.musiq(tensor).item())  # MUSIQ ~0..100
         meta["musiq"] = score
         if self.clipiqa is not None:
-            meta["clipiqa"] = float(self.clipiqa(tensor).item())  # 0..1
-        gray = arr.mean(axis=2) * 255.0
-        meta["sharpness"] = Q.variance_of_laplacian(gray)
+            with self._phase("quality_clipiqa"):
+                with self._gpu_phase("quality_clipiqa"):
+                    meta["clipiqa"] = float(self.clipiqa(tensor).item())  # 0..1
+        with self._phase("quality_sharpness"):
+            gray = arr.mean(axis=2) * 255.0
+            meta["sharpness"] = Q.variance_of_laplacian(gray)
         return score, meta
 
     # -- faces --------------------------------------------------------------
@@ -160,18 +197,19 @@ class TorchBackend:
             return []
         import cv2  # noqa: WPS433
 
-        rgb = np.asarray(image.convert("RGB"))
-        bgr = rgb[:, :, ::-1].copy()
-        h, w = bgr.shape[:2]
-        target = int(self.cfg.features.get("yunet_input_width", 640))
-        scale = target / max(h, w) if max(h, w) > target else 1.0
-        if scale != 1.0:
-            bgr_small = cv2.resize(bgr, (int(w * scale), int(h * scale)))
-        else:
-            bgr_small = bgr
-        sh, sw = bgr_small.shape[:2]
-        self._face.setInputSize((sw, sh))
-        _, dets = self._face.detect(bgr_small)
+        with self._phase("faces_yunet"):
+            rgb = np.asarray(image.convert("RGB"))
+            bgr = rgb[:, :, ::-1].copy()
+            h, w = bgr.shape[:2]
+            target = int(self.cfg.features.get("yunet_input_width", 640))
+            scale = target / max(h, w) if max(h, w) > target else 1.0
+            if scale != 1.0:
+                bgr_small = cv2.resize(bgr, (int(w * scale), int(h * scale)))
+            else:
+                bgr_small = bgr
+            sh, sw = bgr_small.shape[:2]
+            self._face.setInputSize((sw, sh))
+            _, dets = self._face.detect(bgr_small)
         faces: List[Dict[str, Any]] = []
         if dets is None:
             return faces

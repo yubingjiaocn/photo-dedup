@@ -39,6 +39,7 @@ import numpy as np
 
 from .config import Config, load_config
 from . import db
+from . import root_scope
 from . import quality as Q
 from . import decision as D
 
@@ -259,9 +260,9 @@ def layer_window(
 
 # --- orchestration ---------------------------------------------------------
 
-def cluster(conn, cfg: Config) -> Dict[str, int]:
+def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
     """Run all enabled clustering layers and persist groups. Returns stats."""
-    rows = db.load_features_joined(conn)
+    rows = db.load_features_joined(conn, scope=scope)
     n = len(rows)
     if n == 0:
         print("[stage2] no features found -- run stage1 first.")
@@ -308,7 +309,7 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
     for idx in range(n):
         comps.setdefault(dsu.find(idx), []).append(idx)
 
-    db.clear_groups(conn)
+    db.clear_groups(conn, scope=scope)
     created_at = int(time.time())
     group_count = 0
     decision_counts = {k: 0 for k in D.VALID_DECISIONS}
@@ -384,16 +385,22 @@ def cluster(conn, cfg: Config) -> Dict[str, int]:
         "auto_coverage": decision_counts["AUTO_REMOVE"] / candidates if candidates else 0.0,
         "reasons": reason_counts, "profile": profile,
     }
+    if scope is not None and getattr(scope, "bound", False):
+        stats["scope"] = root_scope.summary(conn, scope)
     db.set_meta(conn, "stage2_stats", json.dumps(stats))
     conn.commit()
     print(f"[stage2] {stats}")
     return stats
 
 
-def run(config_path: Optional[str] = None) -> Dict[str, int]:
+def run(config_path: Optional[str] = None,
+        root_override: Optional[str] = None) -> Dict[str, int]:
     cfg = load_config(config_path)
+    if root_override is not None:
+        root_scope.preflight(cfg.db_path, root_override)
     conn = db.open_db(cfg.db_path)
-    stats = cluster(conn, cfg)
+    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
+    stats = cluster(conn, cfg, scope=scope)
     conn.close()
     return stats
 
@@ -401,8 +408,10 @@ def run(config_path: Optional[str] = None) -> Dict[str, int]:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Stage 2: clustering")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--root", default=None,
+                    help="verify the output directory belongs to this photo root")
     args = ap.parse_args(argv)
-    run(config_path=args.config)
+    run(config_path=args.config, root_override=args.root)
     return 0
 
 

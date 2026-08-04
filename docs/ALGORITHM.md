@@ -29,6 +29,50 @@ where the person clearly moved.
 
 ## 1. Features (stage 1)
 
+### Root identity and current-run scope (stages 0-3)
+- Every `files` row stores a normalised `path_key`; the output directory records
+  `scope_root_key`/`scope_root_path` for the root it was created for. Separators
+  collapse to `/`, a trailing separator is dropped, and Windows/macOS keys are
+  casefolded, so `E:\Photos\2026`, `E:/Photos/2026/` and `e:\photos\2026` are one
+  root. Containment tests compare against `key + "/"`, so `E:/Photos/2026` is not
+  a parent of `E:/Photos/2026extra`.
+- A run whose `--root` disagrees with the recorded binding raises
+  `ParameterError` **before** any mutation (the DB is opened read-only for the
+  check), naming the relation: unrelated, or requested-is-parent, or
+  requested-is-child. Parent/child is still rejected: the reports, thumbnail
+  cache and ETA would silently describe a different library. The same root always
+  resumes.
+- Pre-identity databases are migrated additively (columns + backfilled
+  `path_key`) and never pruned. If such a database contains rows outside the
+  requested root, the run fails closed and says so, listing examples; adopting
+  their common parent, or a fresh output directory, are the two offered paths.
+- Every downstream query (`iter_files_for_features`, `load_features_joined`,
+  `count_files`/`count_still_images`, the ALL/GROUPS review index, thumbnail
+  stats/failures, `clear_groups`, the review server's counts, pages, group
+  lookups and `/api/original`) filters on that key, and Stage 0 stamps
+  `last_run_id` on the rows it saw, so report lines state
+  `files_in_scope` / `seen_this_run` (and any ignored out-of-scope rows).
+- Unchanged safety: originals are read-only, and byte-identical SHA-256 remains
+  the only automatic-removal lane.
+
+### Phase telemetry (why a batch took the time it took)
+- `features.telemetry.enabled` (default true) accumulates one `perf_counter`
+  pair per phase per batch: source open/read, decode, SHA-256, pHash, embedding
+  preprocess vs inference, IQA preprocess, MUSIQ, CLIP-IQA, sharpness, YuNet,
+  face quality, exposure, eye detection, scene routing, thumbnail resize vs
+  encode+write, DB write, DB commit, other CPU.
+- SHA-256 shares the sequential read, so its time is billed to `hash_sha256` and
+  netted out of `source_open_read` instead of being counted twice.
+- `batch_total` minus the phase sum is reported as `unaccounted`; nothing is
+  absorbed into a neighbouring phase.
+- Timings are host wall time and are labelled `host-wall`. With an async CUDA
+  backend that includes submit + wait, so it is an upper bound on kernel time.
+  `features.telemetry.gpu_event_every` (default 16, `0` = off) additionally
+  measures the embedding/MUSIQ/CLIP-IQA phases with CUDA events on every Nth
+  batch — the only place that synchronises, once per batch, never per micro-op.
+- Missing optional components (CLIP-IQA off, no YuNet, no MediaPipe, CPU-only)
+  simply omit their rows; the format and the batch p50/p95 still render.
+
 ### Resource admission and bounded IQA
 - `max_process_megapixels: 64` is checked from inventory `width × height`
   **before** full decode, hashing, thumbnail generation, or model/GPU calls.

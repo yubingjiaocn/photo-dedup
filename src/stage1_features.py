@@ -28,6 +28,15 @@ read) and decoded exactly once. The embedding, IQA, faces, exposure, scene
 routing **and** the SSD review thumbnail are all produced from that one decoded
 ``PIL.Image``, which is what makes a 100k-photo library on a single mechanical
 disk practical.
+
+Scope + telemetry
+-----------------
+Work is restricted to the photo root this output directory is bound to
+(:mod:`src.root_scope`), so a mismatched ``--root`` fails closed instead of
+silently processing another library's rows. Every phase of the loop is timed
+cumulatively by :mod:`src.stage1_telemetry` (one ``perf_counter`` pair per phase
+per batch, no per-op CUDA sync), which is how a GPU-starvation question gets an
+answer instead of a guess.
 """
 
 from __future__ import annotations
@@ -45,12 +54,13 @@ import numpy as np
 from PIL import Image
 
 from .config import Config, load_config
-from . import db, feature_admission
+from . import db, feature_admission, root_scope
 from . import quality as Q
 from . import exposure
 from . import decision
 from . import eye_detection
 from . import thumbnails
+from . import stage1_telemetry as telemetry_mod
 from .scene_router import DecodeState, RoutingInput, SceneRouter
 from .stage1_backends import (  # noqa: F401 (re-exported for existing callers/tests)
     EMBED_DIM,
@@ -71,17 +81,31 @@ except Exception:  # pragma: no cover
 # Main loop
 # ===========================================================================
 
-def _open_image_and_sha(path: Path) -> Tuple[Image.Image, str]:
+def _open_image_and_sha(path: Path, telemetry: Any = None) -> Tuple[Image.Image, str]:
     """Read compressed bytes once, hashing that same sequential read before decode."""
+    def phase(key: str) -> Any:
+        return telemetry.phase(key) if telemetry is not None else telemetry_mod.NULL_SPAN
+
     digest = hashlib.sha256()
     data = io.BytesIO()
-    with path.open("rb") as fh:
-        while chunk := fh.read(1024 * 1024):
-            digest.update(chunk)
-            data.write(chunk)
-    data.seek(0)
-    img = Image.open(data)
-    img = img.convert("RGB")
+    hash_seconds = 0.0
+    with phase("source_open_read"):
+        with path.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                started = time.perf_counter()
+                digest.update(chunk)
+                hash_seconds += time.perf_counter() - started
+                data.write(chunk)
+        data.seek(0)
+    if telemetry is not None and hash_seconds:
+        # Hashing rides along the same sequential read, so its cost is inside the
+        # read span. Bill it to its own phase and remove it from the read span,
+        # keeping the columns additive instead of double counting.
+        telemetry.add("hash_sha256", hash_seconds)
+        telemetry.add("source_open_read", -hash_seconds, count=0)
+    with phase("decode"):
+        img = Image.open(data)
+        img = img.convert("RGB")
     return img, digest.hexdigest()
 
 
@@ -92,6 +116,7 @@ def _process_batch(
     eye_detector: Any = None,
     scene_router: Any = None,
     thumbnailer: Any = None,
+    telemetry: Any = None,
 ) -> List[Dict[str, Any]]:
     """Compute features for one batch of file rows. Returns feature dicts.
 
@@ -108,9 +133,12 @@ def _process_batch(
     valid_rows: List[Any] = []
     out_rows: List[Dict[str, Any]] = []
 
+    def phase(key: str, count: int = 1) -> Any:
+        return telemetry.phase(key, count) if telemetry is not None else telemetry_mod.NULL_SPAN
+
     for row in rows:
         try:
-            image, sha256 = _open_image_and_sha(Path(row["path"]))
+            image, sha256 = _open_image_and_sha(Path(row["path"]), telemetry)
             images.append(image)
             hashes.append(sha256)
             valid_rows.append(row)
@@ -132,46 +160,52 @@ def _process_batch(
     for row, image, sha256, emb in zip(valid_rows, images, hashes, embeddings):
         score, meta = backend.quality(image)
         faces = backend.faces(image)
-        img_rgb = np.asarray(image)
-        fq = Q.compute_face_quality(img_rgb, faces)
-        meta["face_quality"] = fq
+        with phase("face_quality"):
+            img_rgb = np.asarray(image)
+            meta["face_quality"] = Q.compute_face_quality(img_rgb, faces)
         meta["schema_version"] = 2
-        meta["exposure"] = exposure.extract(
-            image, faces, int(cfg.features.get("exposure_long_edge", 512))
-        )
+        with phase("exposure"):
+            meta["exposure"] = exposure.extract(
+                image, faces, int(cfg.features.get("exposure_long_edge", 512))
+            )
         meta["detectors"] = decision.detector_extensions()
         if eye_detector is not None:
-            try:
-                meta["eye_detection"] = eye_detector.analyze(
-                    image, expected_face_count=len(faces)
-                )
-            except Exception:
-                meta["eye_detection"] = eye_detection.unavailable_result(
-                    "DETECTOR_INFERENCE_FAILED"
-                )
+            with phase("eye_detection"):
+                try:
+                    meta["eye_detection"] = eye_detector.analyze(
+                        image, expected_face_count=len(faces)
+                    )
+                except Exception:
+                    meta["eye_detection"] = eye_detection.unavailable_result(
+                        "DETECTOR_INFERENCE_FAILED"
+                    )
         # Shadow-only, additive metadata.  The provider is intentionally None
         # until SigLIP is implemented; SceneRouter then emits MODEL_UNAVAILABLE
         # without model loading, downloads, or network access.
-        meta["routing"] = router.route(RoutingInput(
-            metadata=_routing_metadata(row), image=image
-        ))
+        with phase("scene_routing"):
+            meta["routing"] = router.route(RoutingInput(
+                metadata=_routing_metadata(row), image=image
+            ))
         # Same decoded object, no reopen: the SSD thumbnail is a by-product of
         # the decode the extractors above already paid for.
         if thumbnailer is not None:
             thumbnailer.capture(row, image)
-        out_rows.append(
-            {
-                "file_id": int(row["id"]),
-                "phash": Q.phash_bytes(image),
-                "content_sha256": sha256,
-                "dinov2_embedding": Q.embedding_to_blob(emb),
-                "quality_score": float(score),
-                "quality_meta": json.dumps(meta),
-                "face_count": len(faces),
-                "faces_json": json.dumps(faces),
-                "status": "done",
-            }
-        )
+        with phase("phash"):
+            phash = Q.phash_bytes(image)
+        with phase("other_cpu"):
+            out_rows.append(
+                {
+                    "file_id": int(row["id"]),
+                    "phash": phash,
+                    "content_sha256": sha256,
+                    "dinov2_embedding": Q.embedding_to_blob(emb),
+                    "quality_score": float(score),
+                    "quality_meta": json.dumps(meta),
+                    "face_count": len(faces),
+                    "faces_json": json.dumps(faces),
+                    "status": "done",
+                }
+            )
     return out_rows
 
 
@@ -223,7 +257,7 @@ def _error_feature_row(file_id: int, routing: Optional[Dict[str, Any]] = None) -
     }
 
 
-def _build_thumbnailer(cfg: Config) -> Optional[thumbnails.Thumbnailer]:
+def _build_thumbnailer(cfg: Config, telemetry: Any = None) -> Optional[thumbnails.Thumbnailer]:
     """Construct the SSD thumbnail cache writer unless it is disabled."""
     thumb_cfg = cfg.features.get("thumbnails", {})
     if not isinstance(thumb_cfg, dict):
@@ -234,14 +268,20 @@ def _build_thumbnailer(cfg: Config) -> Optional[thumbnails.Thumbnailer]:
         thumbnails.thumbs_dir(cfg.output_dir),
         max_px=int(thumb_cfg.get("max_px", thumbnails.DEFAULT_MAX_PX)),
         jpeg_quality=int(thumb_cfg.get("jpeg_quality", thumbnails.DEFAULT_JPEG_QUALITY)),
+        telemetry=telemetry,
     )
 
 
 def run(config_path: Optional[str] = None, backend_override: Optional[str] = None,
-        limit: Optional[int] = None) -> Dict[str, Any]:
+        limit: Optional[int] = None, root_override: Optional[str] = None) -> Dict[str, Any]:
     """Run stage 1. Returns a small stats dict."""
     cfg = load_config(config_path)
+    if root_override is not None:
+        # Fail closed before opening/creating anything in the output directory.
+        root_scope.preflight(cfg.db_path, root_override)
     conn = db.open_db(cfg.db_path)
+    scope = root_scope.resolve(conn, root_override, db_path=str(cfg.db_path))
+    telemetry = telemetry_mod.build(cfg.features)
     max_process_mp = float(cfg.features.get("max_process_megapixels", 64))
     if max_process_mp <= 0:
         raise ValueError("features.max_process_megapixels must be greater than zero")
@@ -250,7 +290,7 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     if max_aspect_ratio < 1:
         raise ValueError("features.max_process_aspect_ratio must be at least 1")
     skipped = feature_admission.mark_unprocessable_skipped(
-        conn, max_process_pixels, max_aspect_ratio
+        conn, max_process_pixels, max_aspect_ratio, scope=scope
     )
     conn.commit()
     skip_counts = {
@@ -261,22 +301,25 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
         print(f"[stage1][SKIP {row['skip_reason']}] {row['path']} — "
               f"{row['width']}x{row['height']}, {row['megapixels']:.2f} MP, "
               f"ratio={row['aspect_ratio']:.3f}")
-    thumbnailer = _build_thumbnailer(cfg)
+    thumbnailer = _build_thumbnailer(cfg, telemetry)
     batch_size = max(1, int(cfg.features.get("batch_size", 4)))
     max_pixels = int(float(cfg.features.get("max_inflight_megapixels", 80)) * 1_000_000)
     commit_every = int(cfg.scan.get("commit_every", 100))
 
     if thumbnailer is None:
-        pending = list(db.iter_files_for_features(conn))
+        pending = list(db.iter_files_for_features(conn, scope=scope))
     else:
         # One cheap SSD listing decides which cached JPEGs actually exist, so a
         # deleted thumbnail is regenerated and a stale one is never reused.
         db.register_thumb_presence(conn, thumbnails.ids_on_disk(thumbnailer.directory))
-        pending = list(db.iter_files_for_features(conn, thumb_max_px=thumbnailer.max_px))
+        pending = list(db.iter_files_for_features(
+            conn, thumb_max_px=thumbnailer.max_px, scope=scope))
     if limit:
         pending = pending[:limit]
     total = len(pending)
     backend = resolve_backend(cfg, backend_override) if pending else None
+    if backend is not None:
+        backend.telemetry = telemetry
     eye_cfg = cfg.features.get("eye_detection", {})
     eye_detector = (
         eye_detection.MediaPipeEyeDetector(eye_cfg, cfg.models_dir)
@@ -293,24 +336,28 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
     backend_name = backend.name if backend is not None else "not-loaded"
     print(f"[stage1] backend={backend_name} pending={total} batch_size={batch_size} "
           f"thumbs={thumb_note}")
+    print(f"[stage1] {root_scope.scope_note(root_scope.summary(conn, scope))}")
 
     done = 0
     since_commit = 0
     t0 = time.time()
     batches = _guarded_batches(pending, batch_size, max_pixels)
     for batch in tqdm(batches, desc="features", unit="batch"):
-        feature_rows = _process_batch(
-            backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router,
-            thumbnailer=thumbnailer,
-        )
-        db.batch_insert_features(conn, feature_rows)
-        if thumbnailer is not None:
-            db.batch_upsert_thumbnails(conn, thumbnailer.drain())
-        done += len(feature_rows)
-        since_commit += len(feature_rows)
-        if since_commit >= commit_every:
-            conn.commit()
-            since_commit = 0
+        with telemetry.batch(len(batch)):
+            feature_rows = _process_batch(
+                backend, batch, cfg, eye_detector=eye_detector, scene_router=scene_router,
+                thumbnailer=thumbnailer, telemetry=telemetry,
+            )
+            with telemetry.phase("db_write", len(feature_rows)):
+                db.batch_insert_features(conn, feature_rows)
+                if thumbnailer is not None:
+                    db.batch_upsert_thumbnails(conn, thumbnailer.drain())
+            done += len(feature_rows)
+            since_commit += len(feature_rows)
+            if since_commit >= commit_every:
+                with telemetry.phase("db_commit"):
+                    conn.commit()
+                since_commit = 0
     conn.commit()
 
     db.set_meta(conn, "stage1_backend", backend_name)
@@ -324,18 +371,22 @@ def run(config_path: Optional[str] = None, backend_override: Optional[str] = Non
           f"(PIXEL_LIMIT={skip_counts['PIXEL_LIMIT']}, "
           f"ASPECT_RATIO={skip_counts['ASPECT_RATIO']}) "
           f"in {dt:.1f}s ({rate:.1f}/s)")
+    phase_snapshot = telemetry.snapshot()
+    telemetry_mod.print_summary(phase_snapshot)
     stats: Dict[str, Any] = {
         "processed": done, "total": total, "skipped_oversize": len(skipped),
         "skipped_pixel_limit": skip_counts["PIXEL_LIMIT"],
         "skipped_aspect_ratio": skip_counts["ASPECT_RATIO"],
         "max_process_megapixels": max_process_mp,
         "max_process_aspect_ratio": max_aspect_ratio,
+        "phase_telemetry": phase_snapshot,
+        "scope": root_scope.summary(conn, scope),
     }
     if thumbnailer is None:
         stats["thumbnails"] = thumbnails.disabled_stats()
     else:
         thumb_stats = thumbnailer.stats()
-        thumb_stats.update(db.thumbnail_stats(conn))
+        thumb_stats.update(db.thumbnail_stats(conn, scope=scope))
         db.set_meta(conn, "stage1_thumb_max_px", str(thumbnailer.max_px))
         stats["thumbnails"] = thumb_stats
         print(
@@ -376,8 +427,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--config", default=None, help="path to config.yaml")
     ap.add_argument("--backend", default=None, choices=["auto", "torch", "stub"])
     ap.add_argument("--limit", type=int, default=None, help="process at most N images")
+    ap.add_argument("--root", default=None,
+                    help="verify the output directory belongs to this photo root")
     args = ap.parse_args(argv)
-    run(config_path=args.config, backend_override=args.backend, limit=args.limit)
+    run(config_path=args.config, backend_override=args.backend, limit=args.limit,
+        root_override=args.root)
     return 0
 
 
