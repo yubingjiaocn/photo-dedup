@@ -118,9 +118,11 @@ def test_thumbnail_object_identity_matches_the_decoded_feature_image(tmp_path):
     seen: list[int] = []
 
     class RecordingBackend(stage1_features.StubBackend):
-        def embed_batch(self, images):
-            seen.extend(id(image) for image in images)
-            return super().embed_batch(images)
+        # prepare_cpu is where the decoded frame reaches the backend now that
+        # preprocessing is per image; the identity claim is about that object.
+        def prepare_cpu(self, image, recorder=None):
+            seen.append(id(image))
+            return super().prepare_cpu(image, recorder)
 
     class RecordingThumbnailer(thumbnails.Thumbnailer):
         def capture(self, row, image):

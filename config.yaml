@@ -38,6 +38,30 @@ features:
   # prevent 50 MP photos from turning a nominal batch into multi-GB RAM use.
   batch_size: 4
   max_inflight_megapixels: 80
+  # --- throughput ---------------------------------------------------------
+  # Stage 1 reads and prepares the next batches while the current one is on the
+  # GPU. The reader stays single-threaded on purpose (one mechanical disk, one
+  # sequential pass); only the per-image CPU work fans out. Everything stateful
+  # (face detector, thumbnail cache, SQLite) stays on the main thread.
+  #
+  # cpu_workers: threads preparing images. Default min(4, cpu_count). Measured
+  #   scaling is 3.18x at 4 threads and 4.28x at 8 (docs/STAGE1_THROUGHPUT.md),
+  #   and the main thread still needs a core, so 4 is the conservative default.
+  #   Set 0 to restore the original single-threaded pipeline exactly.
+  cpu_workers: "auto"
+  # prefetch_batches: batches allowed to queue up. With the reader assembling one
+  #   more, at most (prefetch_batches + 1) x max_inflight_megapixels of decoded
+  #   pixels exist at once -- 240 MP (~687 MiB) with these defaults, plus one
+  #   bounded IQA array per in-flight image (~506 MiB). The run prints the exact
+  #   ceiling. Set 0 to disable prefetch.
+  prefetch_batches: 2
+  # iqa_batch_size: images per MUSIQ/CLIP-IQA call. Only images whose *bounded*
+  #   IQA input has the same height and width are batched together: measured on
+  #   the real weights, stacking equal shapes changes MUSIQ by ~1e-05, while
+  #   zero-padding to a common size moves it by 1.7-3.4 points, so padding is
+  #   never done. 4 peaks at ~3.0 GiB VRAM; 8 reaches ~5.9 GiB for no gain.
+  #   Verify on your GPU with: python -m scripts.verify_iqa_batching
+  iqa_batch_size: 4
   # Stills above this inventory-header pixel count are recorded as
   # skipped_oversize before any full decode or GPU/model inference.
   max_process_megapixels: 64

@@ -294,8 +294,46 @@ def test_config_section_controls_enablement_and_sampling():
 def test_every_phase_declares_its_unit_and_scope():
     for phase in stage1_telemetry.PHASES:
         assert phase.unit in ("img", "batch", "step"), phase.key
-        assert phase.scope in (stage1_telemetry.LOOP, stage1_telemetry.SETUP), phase.key
+        assert phase.scope in (stage1_telemetry.LOOP, stage1_telemetry.SETUP,
+                               stage1_telemetry.WORKER, stage1_telemetry.WAIT), phase.key
         assert phase.kind in ("host", "gpu_event"), phase.key
     # Setup phases are one-off steps, never per image.
     setup = [p for p in stage1_telemetry.PHASES if p.scope == stage1_telemetry.SETUP]
     assert setup and all(p.unit == "step" for p in setup)
+    # Producer-scope phases are per-image preparation: they must never claim to
+    # be batch or setup units, because that is what would let concurrent worker
+    # seconds be misread as main-thread batch time.
+    worker = [p for p in stage1_telemetry.PHASES if p.scope == stage1_telemetry.WORKER]
+    assert worker and all(p.unit == "img" for p in worker)
+    assert all(p.kind == "host" for p in worker)
+    # Between-batch waiting is per batch and is host-measured by definition.
+    wait = [p for p in stage1_telemetry.PHASES if p.scope == stage1_telemetry.WAIT]
+    assert wait and all(p.unit == "batch" and p.kind == "host" for p in wait)
+
+
+def test_wait_scope_is_outside_the_batch_total_but_inside_the_outer_clock():
+    """A batch is claimed before its span opens, so waiting is not batch time.
+
+    If ``prefetch_wait`` were counted inside the loop, ``loop_accounted_seconds``
+    could exceed ``loop_seconds`` and the reconciliation would read as if time
+    had been invented. It belongs to the outer wall clock instead.
+    """
+    telemetry = stage1_telemetry.Telemetry()
+    with telemetry.phase("prefetch_wait"):
+        time.sleep(0.02)
+    with telemetry.batch(1):
+        with telemetry.phase("embed_inference"):
+            time.sleep(0.005)
+    telemetry.set_outer_seconds(0.30)
+
+    snapshot = telemetry.snapshot()
+    assert snapshot["wait_accounted_seconds"] >= 0.019
+    assert snapshot["loop_accounted_seconds"] <= snapshot["loop_seconds"] + 1e-6
+    assert snapshot["loop_seconds"] < 0.019          # the wait is not in the batch
+    total = (snapshot["loop_seconds"] + snapshot["setup_accounted_seconds"]
+             + snapshot["wait_accounted_seconds"]
+             + snapshot["outer_unaccounted_seconds"])
+    assert abs(total - snapshot["outer_seconds"]) < 1e-3
+    text = "\n".join(telemetry_report.render_lines(snapshot))
+    assert "between-batch phases" in text
+    assert "prefetch wait" in fixtures.rendered_line(snapshot, "reconciliation:")

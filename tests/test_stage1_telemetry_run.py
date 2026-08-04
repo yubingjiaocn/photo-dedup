@@ -26,23 +26,57 @@ def test_stage1_run_reports_the_phases_that_actually_ran(tmp_path):
     stats = stage1_features.run(config_path=config, backend_override="stub")
 
     snapshot = stats["phase_telemetry"]
-    keys = {phase["key"] for phase in snapshot["phases"]}
+    loop_keys = {phase["key"] for phase in snapshot["phases"]}
+    worker_keys = {phase["key"] for phase in snapshot["worker_phases"]}
+    # Setup and the main-thread lanes must be measured where they run.
     for expected in ("setup_admission", "setup_pending_query", "setup_thumb_listing",
-                     "setup_model_load", "source_open_read", "decode", "hash_sha256",
-                     "embed_preprocess", "embed_inference", "quality_preprocess",
-                     "quality_sharpness", "faces_yunet", "phash", "thumbnail_resize",
-                     "thumbnail_encode_write", "db_write", "db_commit_final",
-                     "finalize_stats"):
-        assert expected in keys, expected
+                     "setup_model_load", "embed_inference", "faces_yunet",
+                     "thumbnail_resize", "thumbnail_encode_write", "db_write",
+                     "db_commit_final", "finalize_stats"):
+        assert expected in loop_keys, expected
+    # With the default cpu_workers>0 the read/decode/prepare lanes ran on producer
+    # threads, so they are reported in the producer section -- not silently
+    # dropped, and not added to the loop's books.
+    for expected in ("source_open_read", "decode", "hash_sha256", "phash",
+                     "embed_preprocess", "quality_preprocess", "quality_sharpness"):
+        assert expected in worker_keys, expected
+        assert expected not in loop_keys, expected
     assert snapshot["images_attempted"] == 3
     assert snapshot["images_succeeded"] == 3 and snapshot["images_failed"] == 0
     assert snapshot["batches"] == 2                     # batch_size=2 over 3 images
     assert snapshot["outer_seconds"] is not None
     assert snapshot["outer_unaccounted_seconds"] is not None
     by_key = {phase["key"]: phase for phase in snapshot["phases"]}
+    by_worker = {phase["key"]: phase for phase in snapshot["worker_phases"]}
     assert by_key["db_write"]["calls"] == 2             # one per batch
-    assert by_key["decode"]["calls"] == 3               # one per image
+    assert by_worker["decode"]["calls"] == 3            # one per image
     assert by_key["setup_model_load"]["unit"] == "step"
+    # Producer seconds are reported against their own total, never the loop's.
+    assert snapshot["worker_seconds"] > 0
+    assert snapshot["overlap_seconds"] is not None
+    assert stats["loop_settings"]["prefetch_enabled"] is True
+
+
+def test_serial_mode_bills_preparation_to_the_loop_instead_of_producers(tmp_path):
+    """cpu_workers=0 must be the old pipeline: same phases, measured in-loop."""
+    root = tmp_path / "photos"
+    fixtures.library(root, 3)
+    config = fixtures.config(tmp_path, root)
+
+    stage0_inventory.run(config_path=config)
+    stats = stage1_features.run(config_path=config, backend_override="stub", cpu_workers=0)
+
+    snapshot = stats["phase_telemetry"]
+    loop_keys = {phase["key"] for phase in snapshot["phases"]}
+    for expected in ("source_open_read", "decode", "hash_sha256", "phash",
+                     "embed_preprocess", "quality_preprocess", "quality_sharpness"):
+        assert expected in loop_keys, expected
+    assert snapshot["worker_phases"] == []
+    assert snapshot["worker_seconds"] == 0
+    assert snapshot["overlap_seconds"] is None
+    assert snapshot["prefetch_wait_seconds"] == 0
+    assert stats["loop_settings"]["prefetch_enabled"] is False
+    assert stats["processed"] == 3 and stats["failed"] == 0
 
 
 def test_stage1_counts_unreadable_sources_as_failed_and_times_them(tmp_path):
@@ -60,12 +94,15 @@ def test_stage1_counts_unreadable_sources_as_failed_and_times_them(tmp_path):
     assert snapshot["images_succeeded"] == 2
     assert snapshot["images_failed"] == 1
     by_key = {phase["key"]: phase for phase in snapshot["phases"]}
+    by_worker = {phase["key"]: phase for phase in snapshot["worker_phases"]}
+    # error_handling is main-thread work: the router, the thumbnail failure record
+    # and the error row are all stateful, so they never run on a producer thread.
     assert by_key["error_handling"]["calls"] == 1
     # A phase counts *attempts*: the corrupt file's decode really did run (and
     # raised), so billing it to `decode` is honest. `error_handling` then covers
     # only the failure bookkeeping, and images_failed reports the outcome.
-    assert by_key["decode"]["calls"] == 3
-    assert by_key["phash"]["calls"] == 2               # only successful images
+    assert by_worker["decode"]["calls"] == 3
+    assert by_worker["phash"]["calls"] == 2            # only successful images
 
 
 def test_stage1_summary_is_written_to_the_log_and_performance_file(tmp_path, capsys):

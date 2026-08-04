@@ -26,6 +26,15 @@ Cost and honesty rules
 * **Nothing is hidden.** In-loop phases reconcile against the measured batch
   total (``loop_unaccounted``), and the whole stage reconciles against its outer
   wall time (``outer_unaccounted``), which is where setup and model load live.
+* **Concurrent producer work is never added to the loop's books.** With
+  ``features.cpu_workers > 0`` the source read, decode and per-image CPU
+  preparation happen on producer threads *while* the main thread runs the GPU
+  and detector lanes. That time is real but it is not main-thread time, so it
+  accumulates in a separate ``WORKER`` scope (under a lock) and is reported in
+  its own section. What the main thread actually paid for it is the
+  ``prefetch_wait`` phase, which *is* in the loop's books. ``overlap_seconds``
+  is then simply producer CPU seconds minus that wait: work that was genuinely
+  hidden behind the GPU rather than a speedup that was assumed.
 * **Counts are attempted/succeeded/failed.** A batch with an unreadable file
   still spent time, so the error path is instrumented and counted rather than
   quietly inflating the per-image averages.
@@ -33,106 +42,45 @@ Cost and honesty rules
   was really spent. Outcomes are reported separately as
   ``images_succeeded``/``images_failed``, so a failing library is visible in both
   dimensions instead of being averaged away.
+* **Counters state batching in the open.** ``iqa_musiq_calls`` next to
+  ``iqa_musiq_images`` is what makes "one model call covered four images"
+  checkable instead of a claim in a commit message.
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
+import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-LOOP = "loop"
-SETUP = "setup"
-
-# A "call" is what one instrumented span covers: one image, one batch, or one
-# one-off setup step. The report prints this so counts cannot be misread.
-UNIT_IMAGE = "img"
-UNIT_BATCH = "batch"
-UNIT_STEP = "step"
-
-
-@dataclass(frozen=True)
-class Phase:
-    key: str
-    label: str
-    kind: str                 # 'host' | 'gpu_event' (gpu_event = samplable lane)
-    scope: str                # LOOP | SETUP
-    unit: str                 # UNIT_IMAGE | UNIT_BATCH | UNIT_STEP
-
-
-PHASES: Tuple[Phase, ...] = (
-    # --- one-off, outside the per-batch loop ------------------------------
-    Phase("setup_admission", "setup: oversize admission", "host", SETUP, UNIT_STEP),
-    Phase("setup_pending_query", "setup: pending-work query", "host", SETUP, UNIT_STEP),
-    Phase("setup_thumb_listing", "setup: thumbnail cache listing", "host", SETUP, UNIT_STEP),
-    Phase("setup_model_load", "setup: model load (backend)", "host", SETUP, UNIT_STEP),
-    Phase("setup_detectors", "setup: optional detectors", "host", SETUP, UNIT_STEP),
-    # --- per batch / per image -------------------------------------------
-    Phase("source_open_read", "source open + read (HDD)", "host", LOOP, UNIT_IMAGE),
-    Phase("decode", "JPEG decode", "host", LOOP, UNIT_IMAGE),
-    Phase("hash_sha256", "SHA-256 of source bytes", "host", LOOP, UNIT_IMAGE),
-    Phase("phash", "perceptual hash", "host", LOOP, UNIT_IMAGE),
-    Phase("embed_preprocess", "embedding preprocess", "host", LOOP, UNIT_BATCH),
-    Phase("embed_inference", "embedding inference", "gpu_event", LOOP, UNIT_BATCH),
-    Phase("quality_preprocess", "IQA preprocess (bounded resize)", "host", LOOP, UNIT_IMAGE),
-    Phase("quality_musiq", "IQA MUSIQ", "gpu_event", LOOP, UNIT_IMAGE),
-    Phase("quality_clipiqa", "IQA CLIP-IQA", "gpu_event", LOOP, UNIT_IMAGE),
-    Phase("quality_sharpness", "sharpness (CPU)", "host", LOOP, UNIT_IMAGE),
-    Phase("faces_yunet", "face detect YuNet", "host", LOOP, UNIT_IMAGE),
-    Phase("face_quality", "face quality (CPU)", "host", LOOP, UNIT_IMAGE),
-    Phase("exposure", "exposure metrics (CPU)", "host", LOOP, UNIT_IMAGE),
-    Phase("eye_detection", "eye detection", "host", LOOP, UNIT_IMAGE),
-    Phase("scene_routing", "scene routing (shadow)", "host", LOOP, UNIT_IMAGE),
-    Phase("thumbnail_resize", "thumbnail resize", "host", LOOP, UNIT_IMAGE),
-    Phase("thumbnail_encode_write", "thumbnail encode + write (SSD)", "host", LOOP, UNIT_IMAGE),
-    Phase("error_handling", "unreadable-source handling", "host", LOOP, UNIT_IMAGE),
-    Phase("db_write", "DB write (executemany)", "host", LOOP, UNIT_BATCH),
-    Phase("db_commit", "DB commit (in loop)", "host", LOOP, UNIT_STEP),
-    Phase("other_cpu", "other CPU work", "host", LOOP, UNIT_IMAGE),
-    # --- after the loop ---------------------------------------------------
-    Phase("db_commit_final", "DB commit (final)", "host", SETUP, UNIT_STEP),
-    Phase("finalize_stats", "finalize: meta + stats queries", "host", SETUP, UNIT_STEP),
+# The phase vocabulary lives in its own module; re-exported so every existing
+# caller of ``stage1_telemetry.PHASES`` / ``.LOOP`` keeps working unchanged.
+from .stage1_phases import (  # noqa: F401 (intentional re-export)
+    BY_KEY,
+    COUNTER_LABELS,
+    LOOP,
+    PHASE_KEYS,
+    PHASES,
+    SETUP,
+    UNIT_BATCH,
+    UNIT_IMAGE,
+    UNIT_STEP,
+    WAIT,
+    WORKER,
+    Phase,
 )
-BY_KEY: Dict[str, Phase] = {phase.key: phase for phase in PHASES}
-PHASE_KEYS: Tuple[str, ...] = tuple(phase.key for phase in PHASES)
+# The measuring devices themselves live in :mod:`src.stage1_spans`; re-exported
+# so ``stage1_telemetry.NULL_SPAN`` keeps working for every existing caller.
+from .stage1_spans import (  # noqa: F401 (intentional re-export)
+    NULL_SPAN,
+    _BatchSpan,
+    _GpuEventSpan,
+    _NullSpan,
+    _Span,
+    _WorkerSpan,
+)
 
 # CUDA-event sampling is opt-in: the default run must have zero observer effect.
 DEFAULT_GPU_EVENT_EVERY = 0
-
-
-class _Span:
-    """Times one instrumented call."""
-
-    __slots__ = ("_sink", "_key", "_count", "_start")
-
-    def __init__(self, sink: "Telemetry", key: str, count: int) -> None:
-        self._sink = sink
-        self._key = key
-        self._count = count
-        self._start = 0.0
-
-    def __enter__(self) -> "_Span":
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        self._sink.add(self._key, time.perf_counter() - self._start, self._count)
-        return False
-
-
-class _NullSpan:
-    """Zero-cost stand-in used when telemetry (or a sample) is disabled."""
-
-    __slots__ = ()
-
-    def __enter__(self) -> "_NullSpan":
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        return False
-
-
-NULL_SPAN = _NullSpan()
 
 
 class Telemetry:
@@ -144,6 +92,12 @@ class Telemetry:
         self.gpu_event_every = max(0, int(gpu_event_every))
         self.seconds: Dict[str, float] = {key: 0.0 for key in PHASE_KEYS}
         self.counts: Dict[str, int] = {key: 0 for key in PHASE_KEYS}
+        # Producer-thread accounting is kept apart from main-thread accounting:
+        # the two run concurrently, so adding them would invent time.
+        self.worker_seconds: Dict[str, float] = {}
+        self.worker_counts: Dict[str, int] = {}
+        self.counters: Dict[str, int] = {}
+        self._lock = threading.Lock()
         self.gpu_event_seconds: Dict[str, float] = {}
         self.gpu_event_samples: Dict[str, int] = {}
         self.batches = 0
@@ -177,9 +131,35 @@ class Telemetry:
         self.seconds[key] += float(seconds)
         self.counts[key] += int(count)
 
+    def worker_phase(self, key: str, count: int = 1) -> Any:
+        """Time one call made off the main thread (producer read/decode/prep)."""
+        if not self.enabled:
+            return NULL_SPAN
+        return _WorkerSpan(self, key if key in BY_KEY else "other_cpu", count)
+
+    def add_worker(self, key: str, seconds: float, count: int = 1) -> None:
+        """Accumulate producer-thread seconds. Safe from any thread."""
+        if not self.enabled:
+            return
+        if key not in BY_KEY:
+            key = "other_cpu"
+        with self._lock:
+            self.worker_seconds[key] = self.worker_seconds.get(key, 0.0) + float(seconds)
+            self.worker_counts[key] = self.worker_counts.get(key, 0) + int(count)
+
+    def count(self, key: str, value: int = 1) -> None:
+        """Increment a plain counter (model calls, images per call, ...)."""
+        if not self.enabled:
+            return
+        with self._lock:
+            self.counters[key] = self.counters.get(key, 0) + int(value)
+
     def note(self, text: str) -> None:
-        if self.enabled and text and text not in self.notes:
-            self.notes.append(text)
+        if not self.enabled or not text:
+            return
+        with self._lock:
+            if text not in self.notes:
+                self.notes.append(text)
 
     def set_outer_seconds(self, seconds: float) -> None:
         """Total Stage 1 wall time, so setup/loop can be reconciled against it."""
@@ -275,17 +255,49 @@ class Telemetry:
 
     # -- derived ------------------------------------------------------------
     def scoped_seconds(self, scope: str) -> float:
+        if scope == WORKER:
+            return sum(self.worker_seconds.values())
         return sum(value for key, value in self.seconds.items()
                    if BY_KEY[key].scope == scope)
 
     def loop_unaccounted(self) -> float:
-        return max(0.0, self.loop_seconds - self.scoped_seconds(LOOP))
+        """Batch wall time not covered by a main-thread phase.
+
+        Only main-thread measurements count here. A phase key declared ``WORKER``
+        but measured on the main thread (``cpu_workers: 0``) is in ``self.seconds``
+        and therefore *is* accounted; the same key measured on a producer thread
+        lives in ``self.worker_seconds`` and is not, because it did not consume
+        main-thread time.
+
+        ``WAIT`` phases are excluded as well: the producer's next batch is claimed
+        *before* the batch span opens, so that time is outside every batch total
+        and is reconciled against the outer wall time instead.
+        """
+        return max(0.0, self.loop_seconds - self.loop_accounted_seconds())
+
+    def loop_accounted_seconds(self) -> float:
+        return sum(value for key, value in self.seconds.items()
+                   if BY_KEY[key].scope in (LOOP, WORKER))
+
+    def overlap_seconds(self) -> Optional[float]:
+        """Producer CPU seconds the main thread did *not* wait for.
+
+        Producer work minus the measured ``prefetch_wait``. Positive means that
+        much read/decode/prepare really did happen behind the main thread's GPU
+        and detector work. It is a measurement, not a modelled speedup, and it is
+        ``None`` when no producer thread ran.
+        """
+        produced = self.scoped_seconds(WORKER)
+        if produced <= 0.0 and not self.worker_counts:
+            return None
+        return produced - self.seconds.get("prefetch_wait", 0.0)
 
     def outer_unaccounted(self) -> Optional[float]:
-        """Stage-1 wall time neither inside a batch nor in a timed setup step."""
+        """Stage-1 wall time in no batch, no timed setup step and no wait."""
         if self.outer_seconds is None:
             return None
-        return max(0.0, self.outer_seconds - self.loop_seconds - self.scoped_seconds(SETUP))
+        return max(0.0, self.outer_seconds - self.loop_seconds
+                   - self.scoped_seconds(SETUP) - self.scoped_seconds(WAIT))
 
     def percentiles(self) -> Dict[str, Optional[float]]:
         return {"p50": _percentile(self.batch_seconds, 0.50),
@@ -296,7 +308,11 @@ class Telemetry:
         images = self.images_attempted
         phases = [self._phase_payload(BY_KEY[key], images) for key in PHASE_KEYS
                   if self.seconds[key] > 0.0 or self.counts[key] > 0]
+        worker_phases = [self._worker_payload(BY_KEY[key], images)
+                         for key in PHASE_KEYS if self.worker_seconds.get(key)
+                         or self.worker_counts.get(key)]
         outer_unaccounted = self.outer_unaccounted()
+        overlap = self.overlap_seconds()
         return {
             "enabled": self.enabled,
             "images_attempted": images,
@@ -306,13 +322,19 @@ class Telemetry:
             "loop_seconds": round(self.loop_seconds, 4),
             "outer_seconds": (round(self.outer_seconds, 4)
                               if self.outer_seconds is not None else None),
-            "loop_accounted_seconds": round(self.scoped_seconds(LOOP), 4),
+            "loop_accounted_seconds": round(self.loop_accounted_seconds(), 4),
             "setup_accounted_seconds": round(self.scoped_seconds(SETUP), 4),
+            "wait_accounted_seconds": round(self.scoped_seconds(WAIT), 4),
             "loop_unaccounted_seconds": round(self.loop_unaccounted(), 4),
             "loop_unaccounted_percent": ((100.0 * self.loop_unaccounted() / self.loop_seconds)
                                          if self.loop_seconds else None),
             "outer_unaccounted_seconds": (round(outer_unaccounted, 4)
                                           if outer_unaccounted is not None else None),
+            "worker_seconds": round(self.scoped_seconds(WORKER), 4),
+            "worker_phases": worker_phases,
+            "prefetch_wait_seconds": round(self.seconds.get("prefetch_wait", 0.0), 4),
+            "overlap_seconds": (round(overlap, 4) if overlap is not None else None),
+            "counters": dict(self.counters),
             "batch_percentiles": self.percentiles(),
             "gpu_event_sampling_every": self.gpu_event_every,
             "gpu_event_sampled_batches": self.sampled_batches,
@@ -324,11 +346,15 @@ class Telemetry:
     def _phase_payload(self, phase: Phase, images: int) -> Dict[str, Any]:
         seconds = self.seconds[phase.key]
         denominator = self.loop_seconds if phase.scope == LOOP else self.outer_seconds
+        if phase.scope == WORKER:
+            # Measured on the main thread despite being a producer-scope phase
+            # (cpu_workers=0), so the batch total is the right denominator.
+            denominator = self.loop_seconds
         return {
             "key": phase.key,
             "label": phase.label,
             "kind": phase.kind,
-            "scope": phase.scope,
+            "scope": LOOP if phase.scope == WORKER else phase.scope,
             "unit": phase.unit,
             "seconds": round(seconds, 4),
             "calls": self.counts[phase.key],
@@ -339,71 +365,28 @@ class Telemetry:
             "gpu_event_samples": self.gpu_event_samples.get(phase.key),
         }
 
+    def _worker_payload(self, phase: Phase, images: int) -> Dict[str, Any]:
+        """One producer-thread phase. Percent is of total producer CPU seconds.
 
-class _BatchSpan:
-    """Times one batch; latches sampling on entry, resolves events on exit."""
-
-    __slots__ = ("_sink", "_attempted", "_succeeded", "_failed", "_start")
-
-    def __init__(self, sink: Telemetry, attempted: int) -> None:
-        self._sink = sink
-        self._attempted = int(attempted)
-        self._succeeded: Optional[int] = None
-        self._failed = 0
-        self._start = 0.0
-
-    def counted(self, succeeded: int, failed: int) -> None:
-        """Report what the batch actually achieved (attempted stays as given)."""
-        self._succeeded = int(succeeded)
-        self._failed = int(failed)
-
-    def __enter__(self) -> "_BatchSpan":
-        self._sink._begin_batch()
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        elapsed = time.perf_counter() - self._start
-        # Batch wall time is taken *before* resolving CUDA events, so the single
-        # synchronisation of a sampled batch cannot inflate any reported number.
-        self._sink.record_batch(elapsed, self._attempted, self._succeeded, self._failed)
-        self._sink._resolve_gpu_events()
-        return False
-
-
-class _GpuEventSpan:
-    """Records (does not synchronise) CUDA events around one sampled call."""
-
-    __slots__ = ("_sink", "_key", "_start", "_end", "_ok")
-
-    def __init__(self, sink: Telemetry, key: str) -> None:
-        self._sink = sink
-        self._key = key
-        self._ok = False
-        self._start: Any = None
-        self._end: Any = None
-
-    def __enter__(self) -> "_GpuEventSpan":
-        torch = self._sink._torch
-        try:
-            self._start = torch.cuda.Event(enable_timing=True)
-            self._end = torch.cuda.Event(enable_timing=True)
-            self._start.record()        # asynchronous; no host/device sync here
-            self._ok = True
-        except Exception:
-            self._ok = False
-            self._sink.note("CUDA event creation failed; host-wall numbers only")
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        if not self._ok:
-            return False
-        try:
-            self._end.record()          # still asynchronous
-            self._sink._queue_events(self._key, self._start, self._end)
-        except Exception:
-            self._sink.note("CUDA event timing failed; host-wall numbers only")
-        return False
+        Deliberately *not* a percentage of the loop: producer seconds are
+        concurrent with the loop and can legitimately exceed it, so presenting
+        them on the loop's scale would read as >100% of a wall clock.
+        """
+        seconds = self.worker_seconds.get(phase.key, 0.0)
+        total = self.scoped_seconds(WORKER)
+        return {
+            "key": phase.key,
+            "label": phase.label,
+            "kind": phase.kind,
+            "scope": WORKER,
+            "unit": phase.unit,
+            "seconds": round(seconds, 4),
+            "calls": self.worker_counts.get(phase.key, 0),
+            "ms_per_image": (1000.0 * seconds / images) if images else None,
+            "percent": (100.0 * seconds / total) if total else None,
+            "gpu_event_seconds": None,
+            "gpu_event_samples": None,
+        }
 
 
 def _percentile(values: Sequence[float], fraction: float) -> Optional[float]:

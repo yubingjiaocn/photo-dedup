@@ -3,6 +3,13 @@
 Raw metrics are persisted in ``quality_meta`` so policy thresholds can change
 without re-reading the photo library.  The 512 px long-edge resize is part of
 this feature definition; changing it requires recalibration and a Stage 1 run.
+
+The resize is split out as :func:`prepare` so Stage 1 can perform it on a
+producer thread (it is pure numpy/Pillow and releases the GIL) while the metrics
+themselves still run on the main thread once face boxes are known.
+:func:`extract` is exactly ``prepare`` followed by :func:`extract_prepared`, so
+there is only one definition of the feature and the threaded and serial paths
+cannot drift apart.
 """
 from __future__ import annotations
 
@@ -28,6 +35,11 @@ def resize_rgb(image: Image.Image, long_edge: int = 512) -> np.ndarray:
     if scale < 1.0:
         image = image.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BILINEAR)
     return np.asarray(image, dtype=np.float32) / 255.0
+
+
+def prepare(image: Image.Image, long_edge: int = 512) -> np.ndarray:
+    """The thread-safe half of :func:`extract`: just the calibrated resize."""
+    return resize_rgb(image, long_edge)
 
 
 def _largest_blob(mask: np.ndarray) -> float:
@@ -66,10 +78,19 @@ def _metrics(rgb: np.ndarray) -> Dict[str, float]:
 
 def extract(image: Image.Image, faces: Sequence[Mapping[str, Any]], long_edge: int = 512) -> Dict[str, Any]:
     """Extract global metrics and per-face ROI exposure from one decoded image."""
-    rgb = resize_rgb(image, long_edge)
+    return extract_prepared(prepare(image, long_edge), image.size, faces, long_edge)
+
+
+def extract_prepared(rgb: np.ndarray, source_size: Tuple[int, int],
+                     faces: Sequence[Mapping[str, Any]], long_edge: int = 512) -> Dict[str, Any]:
+    """Metrics from an already-resized array (identical to :func:`extract`).
+
+    ``source_size`` is the decoded image's ``(width, height)``: face boxes are in
+    full-resolution coordinates and must be mapped onto ``rgb``.
+    """
     out: Dict[str, Any] = _metrics(rgb)
     out["decode_long_edge"] = int(long_edge)
-    ow, oh = image.size
+    ow, oh = source_size
     h, w = rgb.shape[:2]
     rois = []
     for face in faces:

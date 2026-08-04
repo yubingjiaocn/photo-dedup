@@ -3,8 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY="${PYTHON:-.venv/bin/python}"
 RUFF="${RUFF:-.venv/bin/ruff}"
-"$RUFF" check src tests
-"$PY" -m compileall -q src tests
+"$RUFF" check src tests scripts
+"$PY" -m compileall -q src tests scripts
 "$PY" -m pytest -q \
   tests/test_db.py \
   tests/test_motion_photo.py \
@@ -18,5 +18,10 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_stage1_telemetry_run.py \
   tests/test_stage1_model_failures.py \
   tests/test_stage1_oversize.py \
+  tests/test_stage1_batched_iqa.py \
+  tests/test_stage1_prefetch.py \
+  tests/test_stage1_throughput.py \
+  tests/test_stage1_resume.py \
+  tests/test_stage1_benchmark.py \
   tests/test_thumbnails.py \
   tests/test_stage3_performance.py

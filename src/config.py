@@ -49,6 +49,15 @@ _DEFAULTS: Dict[str, Any] = {
         "device": "cuda",
         "batch_size": 4,
         "max_inflight_megapixels": 80,
+        # Bounded CPU prefetch. "auto" = min(4, cpu_count); 0 for either knob
+        # restores the original single-threaded pipeline. See
+        # src/stage1_settings.py for the memory bound these imply and
+        # docs/STAGE1_THROUGHPUT.md for the measurements.
+        "cpu_workers": "auto",
+        "prefetch_batches": 2,
+        # Images per MUSIQ/CLIP-IQA call, grouped by identical bounded input
+        # shape (padding would change scores; measured, not assumed).
+        "iqa_batch_size": 4,
         "max_process_megapixels": 64,
         "max_process_aspect_ratio": 3.0,
         "iqa_max_long_edge": 1920,

@@ -6,6 +6,12 @@ this file stays about wording. The wording is the honesty contract:
 * the ``unit`` column says whether a phase's calls were per image, per batch or a
   one-off step, so a per-image measurement is never read as per batch;
 * ``host-wall`` is stated on every host measurement, with the async-CUDA caveat;
+* producer-thread work is printed in its **own** section against its own total,
+  never added to the loop, because it ran concurrently with it. What the loop
+  actually paid is the ``prefetch_wait`` phase, and ``overlap`` is stated as the
+  measured difference rather than as a claimed speedup;
+* batching is stated as counters (model calls vs images covered), so "one call
+  per batch" is checkable from the report itself;
 * CUDA-event numbers are printed separately, as ``samples`` with ms/sample, and
   the number of synchronisations is disclosed;
 * both reconciliations are printed: in-loop phases against the measured batch
@@ -39,6 +45,16 @@ def render_lines(snapshot: Dict[str, Any]) -> List[str]:
                                snapshot.get("loop_unaccounted_seconds"),
                                snapshot.get("loop_unaccounted_percent"),
                                snapshot.get("images_attempted")))
+    lines.extend(_worker_lines(snapshot))
+    wait = _phases(snapshot, tel.WAIT)
+    if wait:
+        lines.append("between-batch phases (percent of Stage 1 outer wall time)")
+        lines.append(_HEADER)
+        lines.extend(_phase_line(phase) for phase in wait)
+        lines.append(
+            "  the next batch is claimed before a batch span opens, so this is "
+            "main-thread time outside every batch total: it is what prefetch cost."
+        )
     setup = _phases(snapshot, tel.SETUP)
     if setup:
         lines.append("setup / finalize phases (percent of Stage 1 outer wall time)")
@@ -46,7 +62,7 @@ def render_lines(snapshot: Dict[str, Any]) -> List[str]:
         lines.extend(_phase_line(phase) for phase in setup)
     outer_gap = snapshot.get("outer_unaccounted_seconds")
     if outer_gap is not None:
-        lines.append(_gap_line("unaccounted outside loop/setup", outer_gap,
+        lines.append(_gap_line("unaccounted outside loop/setup/wait", outer_gap,
                                _percent(outer_gap, snapshot.get("outer_seconds")),
                                snapshot.get("images_attempted")))
     percentiles = snapshot.get("batch_percentiles") or {}
@@ -54,12 +70,63 @@ def render_lines(snapshot: Dict[str, Any]) -> List[str]:
         f"batch wall time p50={_seconds(percentiles.get('p50'))} "
         f"p95={_seconds(percentiles.get('p95'))}"
     )
+    lines.extend(_counter_lines(snapshot))
     lines.extend(_gpu_lines(snapshot))
     lines.extend(f"note: {note}" for note in (snapshot.get("notes") or []))
     lines.append(
         "host-wall = measured on the CPU thread. With an async CUDA backend that "
         "includes submit + wait, so it is an upper bound on kernel time, not kernel time."
     )
+    return lines
+
+
+def _worker_lines(snapshot: Dict[str, Any]) -> List[str]:
+    """Producer-thread section: its own total, never folded into the loop."""
+    # Copied before sorting: the snapshot is a report input, not scratch space.
+    phases = list(snapshot.get("worker_phases") or [])
+    if not phases:
+        return ["producer threads: none (cpu_workers=0; read/decode/prepare ran in-loop)"]
+    phases.sort(key=lambda item: float(item.get("seconds") or 0.0), reverse=True)
+    worker_seconds = float(snapshot.get("worker_seconds") or 0.0)
+    waited = float(snapshot.get("prefetch_wait_seconds") or 0.0)
+    overlap = snapshot.get("overlap_seconds")
+    lines = [
+        f"producer-thread phases (concurrent with the loop; percent of "
+        f"{worker_seconds:.2f}s producer CPU total)",
+        _HEADER,
+    ]
+    lines.extend(_phase_line(phase) for phase in phases)
+    lines.append(
+        f"overlap: {worker_seconds:.2f}s producer CPU work - {waited:.2f}s the loop "
+        f"spent waiting = {float(overlap or 0.0):.2f}s hidden behind main-thread work"
+    )
+    lines.append(
+        "  producer seconds are wall time summed across threads, so they can exceed "
+        "the batch total; they are not added to it."
+    )
+    return lines
+
+
+def _counter_lines(snapshot: Dict[str, Any]) -> List[str]:
+    """Model-call counters: how many calls covered how many images."""
+    counters = snapshot.get("counters") or {}
+    if not counters:
+        return []
+    lines = ["model call counts (batching is visible here, not asserted elsewhere)"]
+    for key, label in tel.COUNTER_LABELS.items():
+        if key in counters:
+            lines.append(f"  {label[:44]:<46}{int(counters[key]):>8}")
+    for key in sorted(set(counters) - set(tel.COUNTER_LABELS)):
+        lines.append(f"  {key[:44]:<46}{int(counters[key]):>8}")
+    for calls_key, images_key, lane in (
+        ("iqa_musiq_calls", "iqa_musiq_images", "MUSIQ"),
+        ("iqa_clipiqa_calls", "iqa_clipiqa_images", "CLIP-IQA"),
+        ("embed_calls", "embed_images", "embedding"),
+    ):
+        calls = int(counters.get(calls_key) or 0)
+        images = int(counters.get(images_key) or 0)
+        if calls and images:
+            lines.append(f"  -> {lane} averaged {images / calls:.2f} images per model call")
     return lines
 
 
@@ -79,13 +146,15 @@ def _reconciliation_line(snapshot: Dict[str, Any]) -> str:
     outer = snapshot.get("outer_seconds")
     setup = float(snapshot.get("setup_accounted_seconds") or 0.0)
     loop = float(snapshot.get("loop_seconds") or 0.0)
+    waited = float(snapshot.get("wait_accounted_seconds") or 0.0)
     if outer is None:
         return (f"reconciliation: batch total {loop:.2f}s + timed setup {setup:.2f}s "
                 "(Stage 1 outer wall time not supplied)")
     gap = snapshot.get("outer_unaccounted_seconds")
     return (
         f"reconciliation: Stage 1 outer {float(outer):.2f}s = batch total {loop:.2f}s "
-        f"+ timed setup/finalize {setup:.2f}s + unaccounted {float(gap or 0.0):.2f}s"
+        f"+ timed setup/finalize {setup:.2f}s + prefetch wait {waited:.2f}s "
+        f"+ unaccounted {float(gap or 0.0):.2f}s"
     )
 
 
