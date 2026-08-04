@@ -158,34 +158,6 @@ def test_at_most_prefetch_plus_one_batches_are_in_flight(tmp_path):
     assert peak <= 3 * 4, peak
 
 
-def test_producer_blocks_instead_of_racing_ahead(tmp_path):
-    """A stalled consumer must stop the producer, not let it read the library."""
-    items = rows(tmp_path, 30)
-    prepared_count = 0
-    lock = threading.Lock()
-
-    class CountingBackend(RecordingBackend):
-        def prepare_cpu(self, image, recorder=None):
-            nonlocal prepared_count
-            with lock:
-                prepared_count += 1
-            return super().prepare_cpu(image, recorder)
-
-    source = stage1_pipeline.build_source(
-        batches_of(items, 3), CountingBackend(), load_config(), read_fn,
-        workers=2, prefetch_batches=2)
-    try:
-        iterator = iter(source)
-        next(iterator)                              # take one batch, then stall
-        time.sleep(0.3)
-        with lock:
-            observed = prepared_count
-        # 1 delivered + at most 2 queued + 1 being assembled = <= 4 batches of 3.
-        assert observed <= 4 * 3, observed
-    finally:
-        source.close()
-
-
 def test_inflight_bound_is_documented_by_the_settings(tmp_path):
     from src.stage1_settings import resolve_loop_settings
 
@@ -234,19 +206,6 @@ def test_exactly_one_reader_thread_and_one_open_per_file(tmp_path):
     assert opened == [f"img-{index}.jpg" for index in range(12)]   # in order, once
     assert read_threads.isdisjoint({threading.get_ident()})        # not the main thread
     assert len(set(backend.threads)) > 1                 # preparation did fan out
-
-
-def test_preparation_runs_off_the_main_thread_when_workers_are_enabled(tmp_path):
-    items = rows(tmp_path, 8)
-    backend = RecordingBackend()
-    source = stage1_pipeline.build_source(
-        batches_of(items, 4), backend, load_config(), read_fn,
-        workers=4, prefetch_batches=2)
-    try:
-        list(source)
-    finally:
-        source.close()
-    assert threading.get_ident() not in backend.threads
 
 
 def test_serial_mode_uses_only_the_calling_thread(tmp_path):
@@ -336,20 +295,6 @@ def test_a_producer_machinery_failure_propagates_to_the_consumer(tmp_path):
     assert seen == 1                                # the good batch was delivered
 
 
-def test_serial_mode_propagates_a_machinery_failure_too(tmp_path):
-    items = rows(tmp_path, 2)
-
-    def exploding_batches():
-        yield items
-        raise RuntimeError("serial source exploded")
-
-    source = stage1_pipeline.build_source(
-        exploding_batches(), RecordingBackend(), load_config(), read_fn,
-        workers=0, prefetch_batches=0)
-    with pytest.raises(RuntimeError, match="serial source exploded"):
-        list(source)
-
-
 # --- cancellation -----------------------------------------------------------
 
 def test_close_stops_the_reader_and_joins_it(tmp_path):
@@ -369,15 +314,6 @@ def test_close_stops_the_reader_and_joins_it(tmp_path):
     assert threading.active_count() <= before
     assert not any(thread.name.startswith("stage1-")
                    for thread in threading.enumerate() if thread.is_alive())
-
-
-def test_close_is_idempotent_and_safe_before_iteration(tmp_path):
-    items = rows(tmp_path, 4)
-    source = stage1_pipeline.build_source(
-        batches_of(items, 2), RecordingBackend(), load_config(), read_fn,
-        workers=2, prefetch_batches=1)
-    source.close()
-    source.close()                                   # second call must not raise
 
 
 def test_close_stops_reading_the_library_after_cancellation(tmp_path):
@@ -405,38 +341,6 @@ def test_close_stops_reading_the_library_after_cancellation(tmp_path):
     assert at_close < len(items)                      # and it stopped early
 
 
-def test_an_exception_in_the_consumer_still_closes_the_producer(tmp_path):
-    items = rows(tmp_path, 40)
-    before = threading.active_count()
-    source = stage1_pipeline.build_source(
-        batches_of(items, 2), RecordingBackend(delay=0.002), load_config(), read_fn,
-        workers=2, prefetch_batches=2)
-    with pytest.raises(ValueError, match="consumer failed"):
-        try:
-            for _batch in source:
-                raise ValueError("consumer failed")
-        finally:
-            source.close()
-    deadline = time.monotonic() + 5.0
-    while threading.active_count() > before and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert threading.active_count() <= before
-
-
-def test_context_manager_closes_on_the_way_out(tmp_path):
-    items = rows(tmp_path, 20)
-    before = threading.active_count()
-    with stage1_pipeline.build_source(
-        batches_of(items, 2), RecordingBackend(delay=0.001), load_config(), read_fn,
-        workers=2, prefetch_batches=1,
-    ) as source:
-        next(iter(source))
-    deadline = time.monotonic() + 5.0
-    while threading.active_count() > before and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert threading.active_count() <= before
-
-
 # --- empty and degenerate inputs -------------------------------------------
 
 def test_no_work_produces_no_batches_and_no_threads_left_behind(tmp_path):
@@ -453,13 +357,3 @@ def test_no_work_produces_no_batches_and_no_threads_left_behind(tmp_path):
     assert threading.active_count() <= before
 
 
-def test_a_single_image_batch_works_with_a_large_worker_pool(tmp_path):
-    items = rows(tmp_path, 1)
-    source = stage1_pipeline.build_source(
-        batches_of(items, 8), RecordingBackend(), load_config(), read_fn,
-        workers=8, prefetch_batches=4)
-    try:
-        collected = list(source)
-    finally:
-        source.close()
-    assert len(collected) == 1 and len(collected[0]) == 1

@@ -52,12 +52,12 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-# The phase vocabulary lives in its own module; re-exported so every existing
-# caller of ``stage1_telemetry.PHASES`` / ``.LOOP`` keeps working unchanged.
-from .stage1_phases import (  # noqa: F401 (intentional re-export)
+# Phase vocabulary and span objects now live in one merged module.
+from .stage1_telemetry_core import (  # noqa: F401 (intentional re-export)
     BY_KEY,
     COUNTER_LABELS,
     LOOP,
+    NULL_SPAN,
     PHASE_KEYS,
     PHASES,
     SETUP,
@@ -67,11 +67,6 @@ from .stage1_phases import (  # noqa: F401 (intentional re-export)
     WAIT,
     WORKER,
     Phase,
-)
-# The measuring devices themselves live in :mod:`src.stage1_spans`; re-exported
-# so ``stage1_telemetry.NULL_SPAN`` keeps working for every existing caller.
-from .stage1_spans import (  # noqa: F401 (intentional re-export)
-    NULL_SPAN,
     _BatchSpan,
     _GpuEventSpan,
     _NullSpan,

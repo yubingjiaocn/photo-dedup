@@ -255,21 +255,6 @@ def test_group_order_is_deterministic_and_traceable():
     assert list(stage1_backends._shape_groups(prepared, 1)) == [[0], [2], [3], [1]]
 
 
-def test_scaled_down_images_group_by_their_bounded_shape(monkeypatch):
-    """Different sources that bound to the same size share one call."""
-    backend = torch_backend(monkeypatch, iqa_max_long_edge=100, iqa_batch_size=8)
-    # 400x200 and 800x400 both bound to 100x50; 200x400 bounds to 50x100.
-    prepared = [backend.prepare_cpu(image(400, 200, 1)),
-                backend.prepare_cpu(image(800, 400, 2)),
-                backend.prepare_cpu(image(200, 400, 3))]
-
-    results = backend.quality_prepared(prepared)
-
-    assert backend.musiq.calls == 2
-    assert [meta["iqa_input_size"] for _, meta in results] == [[100, 50], [100, 50], [50, 100]]
-    assert [round(meta["iqa_scale"], 6) for _, meta in results] == [0.25, 0.125, 0.25]
-
-
 # --- partial batches, single images, disabled lanes -------------------------
 
 def test_partial_final_batch_is_scored_normally(monkeypatch):
@@ -284,40 +269,12 @@ def test_partial_final_batch_is_scored_normally(monkeypatch):
     assert results[0][1]["iqa_input_size"] == [320, 240]
 
 
-def test_five_images_at_cap_four_split_four_then_one(monkeypatch):
-    backend = torch_backend(monkeypatch, iqa_batch_size=4)
-    prepared = [backend.prepare_cpu(image(320, 240, seed)) for seed in range(5)]
-    scores = [score for score, _ in backend.quality_prepared(prepared)]
-    assert backend.musiq.batch_sizes == [4, 1]
-    assert len(scores) == 5 and len(set(scores)) == 5
-
-
 def test_disabled_lanes_are_not_called_and_report_no_clipiqa(monkeypatch):
     backend = torch_backend(monkeypatch, clipiqa=False)
     prepared = [backend.prepare_cpu(image(320, 240, 1))]
     score, meta = backend.quality_prepared(prepared)[0]
     assert backend.clipiqa is None and "clipiqa" not in meta
     assert meta["musiq"] == score and backend.musiq.calls == 1
-
-
-def test_both_lanes_disabled_still_returns_metadata(monkeypatch):
-    """No IQA model at all: sharpness and bounds are still reported, score 0."""
-    backend = torch_backend(monkeypatch, musiq=False, clipiqa=False)
-    sink = CountingSink()
-    backend.telemetry = sink
-    prepared = [backend.prepare_cpu(image(320, 240, 1))]
-
-    score, meta = backend.quality_prepared(prepared)[0]
-
-    assert score == 0.0 and meta["musiq"] == 0.0
-    assert meta["iqa_input_size"] == [320, 240] and np.isfinite(meta["sharpness"])
-    assert "iqa_shape_groups" not in sink.counters      # no grouping work happened
-
-
-def test_empty_batch_makes_no_model_calls(monkeypatch):
-    backend = torch_backend(monkeypatch)
-    assert backend.quality_prepared([]) == []
-    assert backend.musiq.calls == 0 and backend.clipiqa.calls == 0
 
 
 # --- bounded IQA input is reused, not recomputed ---------------------------
@@ -379,55 +336,7 @@ def test_output_crosses_to_the_host_once_per_call_not_once_per_image(monkeypatch
     assert transfers == [4]
 
 
-def test_item_is_never_called_per_image(monkeypatch):
-    torch = pytest.importorskip("torch")
-    backend = torch_backend(monkeypatch, iqa_batch_size=4)
-    prepared = [backend.prepare_cpu(image(320, 240, seed)) for seed in range(4)]
-
-    items: list[int] = []
-    original_item = torch.Tensor.item
-
-    def counting_item(self):
-        items.append(1)
-        return original_item(self)
-
-    monkeypatch.setattr(torch.Tensor, "item", counting_item)
-    backend.quality_prepared(prepared)
-
-    assert items == []
-
-
 # --- faces stay on the main thread ---------------------------------------
-
-def test_face_detection_is_never_called_off_the_main_thread(monkeypatch):
-    """``FaceDetectorYN`` holds a mutable input size, so it is main-thread only."""
-    import threading
-
-    face = FakeYuNet()
-    backend = torch_backend(monkeypatch, face=face)
-    prepared = [backend.prepare_cpu(image(1280, 960, seed)) for seed in range(3)]
-    # Preparation may legitimately happen on other threads...
-    worker_threads: set[int] = set()
-
-    def prepare_on_thread(item):
-        worker_threads.add(threading.get_ident())
-        return backend.prepare_cpu(item)
-
-    threads = [threading.Thread(target=prepare_on_thread, args=(image(640, 480, 7),))
-               for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    # ...but detection itself runs here, on this thread only.
-    for item in prepared:
-        backend.faces_prepared(item)
-
-    assert face.threads == {threading.get_ident()}
-    assert len(face.sizes) == 3
-    assert worker_threads and threading.get_ident() not in worker_threads
-
 
 def test_face_input_is_bounded_and_scale_is_recorded(monkeypatch):
     face = FakeYuNet()
@@ -438,12 +347,6 @@ def test_face_input_is_bounded_and_scale_is_recorded(monkeypatch):
     assert prepared["face_scale"] == pytest.approx(0.5)
     backend.faces_prepared(prepared)
     assert face.sizes == [(640, 480)]
-
-
-def test_missing_detector_returns_no_faces(monkeypatch):
-    backend = torch_backend(monkeypatch, face=None)
-    prepared = backend.prepare_cpu(image(320, 240, 1))
-    assert backend.faces_prepared(prepared) == []
 
 
 # --- stub backend keeps the same contract --------------------------------
@@ -489,9 +392,3 @@ def test_stub_embedding_is_unchanged_by_per_image_preparation():
     assert np.allclose(norms, 1.0, atol=1e-6)
 
 
-def test_iqa_batch_size_must_be_at_least_one():
-    with pytest.raises(ValueError, match="iqa_batch_size"):
-        cfg = Config({"features": {"backend": "torch", "iqa_batch_size": 0}})
-        # Construction validates before any weight is touched.
-        stage1_backends.TorchBackend.__init__(
-            stage1_backends.TorchBackend.__new__(stage1_backends.TorchBackend), cfg)

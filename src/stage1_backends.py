@@ -25,27 +25,23 @@ The three-call shape
 
 Why IQA batching groups by shape (measured, not assumed)
 -------------------------------------------------------
-``docs/STAGE1_THROUGHPUT.md`` records the experiments on the real weights, and
-``python -m scripts.verify_iqa_batching`` re-runs them on any CUDA machine.
-Stacking equal-shaped tensors is score-preserving: across those runs MUSIQ agreed
-to 1e-05 and CLIP-IQA to 5e-05 of the per-image result, the residual being
-batch-dependent cuDNN kernel selection. Heterogeneous shapes cannot be batched
-honestly: ``torch.cat`` is impossible, pyiqa rejects lists ("Unsupported source
-type"), and zero-padding to a common size moved MUSIQ by **1.7 to 3.4 points**
-and CLIP-IQA by **0.08 to 0.12**, depending on how much padding was needed —
-three to five orders of magnitude more than the batching residual. Both models
-resize internally from whatever tensor they are given, so the tensor's own height
-and width are part of the feature definition, and padding would be a silent
-scoring change disguised as an optimisation. Grouping by shape instead keeps
-every per-image score comparable while collapsing N calls into one per distinct
-bounded size: for a real library (one camera, two orientations) that is one or
-two calls per batch rather than N.
+Measured on the real weights (``docs/STAGE1_THROUGHPUT.md``;
+``python -m scripts.verify_iqa_batching`` re-checks it): stacking equal-shaped
+tensors is score-preserving (MUSIQ to ~1e-05, CLIP-IQA to ~5e-05, the residual
+being batch-dependent cuDNN kernel selection), but heterogeneous shapes cannot be
+batched honestly -- ``torch.cat`` is impossible, pyiqa rejects lists, and
+zero-padding to a common size moves MUSIQ by 1.7-3.4 points and CLIP-IQA by
+0.08-0.12. Both models resize internally from whatever tensor they are given, so
+its height and width are part of the feature definition and padding would be a
+silent scoring change. Grouping by shape instead collapses N calls into one per
+distinct bounded size, which for a real library (one camera, two orientations) is
+one or two per batch.
 
-Batching removes the ``.item()`` synchronisation per image, not kernel time: at
-a 1920 px long edge these metrics are compute-bound (65 ms/image at batch 1, 64
-ms/image at batch 8). The throughput comes from the CPU work moving off the main
-thread; this file's job is to stop paying 2N host syncs and to keep VRAM bounded
-(``iqa_batch_size``: 4 images measured at ~3.0 GiB peak, 8 at ~5.9 GiB).
+Batching removes the per-image ``.item()`` synchronisation, not kernel time: these
+metrics are compute-bound at a 1920 px long edge (65.4 ms/image at batch 1, 64.2
+at batch 8). The throughput comes from the CPU work moving off the main thread.
+``iqa_batch_size`` defaults to 4 (~3.0 GiB peak VRAM; 8 reaches ~5.9 GiB for no
+gain).
 
 Both backends carry an optional ``telemetry`` attribute (:mod:`src.stage1_telemetry`).
 Stage 1 sets it; when it is unset every ``_phase``/``_gpu_phase`` call returns a

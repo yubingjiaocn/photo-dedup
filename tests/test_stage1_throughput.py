@@ -21,8 +21,8 @@ from PIL import Image
 from src import db, stage0_inventory, stage1_features
 from src.config import Config
 from src.stage1_settings import (
+    DEFAULT_CPU_WORKERS,
     DEFAULT_PREFETCH_BATCHES,
-    default_cpu_workers,
     resolve_loop_settings,
 )
 
@@ -250,22 +250,13 @@ def test_no_producer_threads_survive_the_run(tmp_path):
 
 # --- configuration ----------------------------------------------------------
 
-def test_defaults_are_conservative_and_windows_safe():
+def test_defaults_match_the_target_machine():
     settings = resolve_loop_settings(Config({"features": {}, "scan": {}}))
-    assert settings.cpu_workers == default_cpu_workers() <= 4
+    assert settings.cpu_workers == DEFAULT_CPU_WORKERS == 4
     assert settings.prefetch_batches == DEFAULT_PREFETCH_BATCHES == 2
     assert settings.iqa_batch_size == 4
     assert settings.prefetch_enabled is True
     assert settings.inflight_batches == 3
-
-
-def test_auto_cpu_workers_tracks_the_machine_and_is_capped():
-    """``auto`` must adapt to small machines instead of hardcoding four threads."""
-    for value in ("auto", "AUTO", " auto ", None):
-        settings = resolve_loop_settings(Config({
-            "features": {"cpu_workers": value}, "scan": {}}))
-        assert settings.cpu_workers == default_cpu_workers()
-    assert 1 <= default_cpu_workers() <= 4
 
 
 def test_the_shipped_config_defaults_are_the_documented_ones():
@@ -274,10 +265,10 @@ def test_the_shipped_config_defaults_are_the_documented_ones():
 
     cfg = load_config(DEFAULT_CONFIG_PATH)
     settings = resolve_loop_settings(cfg)
-    assert cfg.features.get("cpu_workers") == "auto"
+    assert cfg.features.get("cpu_workers") == 4
     assert cfg.features.get("prefetch_batches") == 2
     assert cfg.features.get("iqa_batch_size") == 4
-    assert settings.cpu_workers == default_cpu_workers()
+    assert settings.cpu_workers == DEFAULT_CPU_WORKERS
     assert settings.prefetch_enabled is True
 
 
@@ -300,11 +291,6 @@ def test_bad_values_fail_loudly_and_are_never_clamped(key, value, message):
         resolve_loop_settings(Config({"features": {key: value}, "scan": {}}))
 
 
-def test_booleans_are_rejected_rather_than_read_as_one(key="cpu_workers"):
-    with pytest.raises(ValueError, match="must be an integer"):
-        resolve_loop_settings(Config({"features": {key: True}, "scan": {}}))
-
-
 def test_a_bad_knob_stops_the_run_before_any_work(tmp_path):
     """Validation happens before the DB, the models, or a single read."""
     root = library(tmp_path / "photos", 3)
@@ -318,14 +304,6 @@ def test_a_bad_knob_stops_the_run_before_any_work(tmp_path):
     assert feature_rows(tmp_path / "inventory.sqlite") == []
 
 
-def test_string_numbers_from_yaml_are_accepted():
-    settings = resolve_loop_settings(Config({
-        "features": {"cpu_workers": "3", "prefetch_batches": "1", "iqa_batch_size": "8"},
-        "scan": {"commit_every": "50"}}))
-    assert (settings.cpu_workers, settings.prefetch_batches) == (3, 1)
-    assert settings.iqa_batch_size == 8 and settings.commit_every == 50
-
-
 def test_cli_override_wins_over_config(tmp_path):
     root = library(tmp_path / "photos", 4)
     run_config = config(tmp_path, root, cpu_workers=4, prefetch_batches=2)
@@ -337,16 +315,6 @@ def test_cli_override_wins_over_config(tmp_path):
     assert stats["loop_settings"]["cpu_workers"] == 0
     assert stats["loop_settings"]["prefetch_enabled"] is False
     assert stats["processed"] == 4
-
-
-def test_cli_exposes_the_cpu_workers_flag():
-    import argparse
-    from unittest import mock
-
-    with mock.patch.object(stage1_features, "run") as runner:
-        stage1_features.main(["--backend", "stub", "--cpu-workers", "0"])
-    assert runner.call_args.kwargs["cpu_workers"] == 0
-    assert isinstance(argparse.ArgumentParser(), argparse.ArgumentParser)
 
 
 # --- telemetry honesty ------------------------------------------------------

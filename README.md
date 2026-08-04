@@ -243,21 +243,19 @@ Activate the environment first: `\.venv\Scripts\activate`
    (32 GB RAM is not a reason to raise them blindly).
 
    While the GPU works on one batch, Stage 1 reads and prepares the next ones:
-   `features.cpu_workers` (default `auto` = `min(4, cores)`) threads do the
-   per-image CPU work and `features.prefetch_batches` (default 2) bounds how much
-   may queue. **There is still exactly one reader thread** — a second one would
-   turn the single sequential HDD stream into random seeks — and everything
-   stateful (face detector, thumbnail cache, the database) stays on the main
-   thread. The run prints the resulting memory ceiling, e.g.
-   `memory bound: <= 3 batch(es) in flight x 80 MP = 240 MP decoded (~687 MiB RGB), plus <= 12 bounded IQA arrays of <= 1920px (~506 MiB float32)`.
-   Set `cpu_workers: 0` to get the original single-threaded pipeline back.
+   `features.cpu_workers` (4) threads do the per-image CPU work and
+   `features.prefetch_batches` (2) bounds how much may queue. **There is still
+   exactly one reader thread** — a second one would turn the single sequential HDD
+   stream into random seeks — and everything stateful (face detector, thumbnail
+   cache, the database) stays on the main thread. The run prints the resulting
+   memory ceiling. Set `cpu_workers: 0` for the original single-threaded pipeline.
 
    MUSIQ and CLIP-IQA are called **once per distinct IQA input size per batch**
-   (`features.iqa_batch_size`, default 4) instead of once per photo. Only images
-   whose bounded IQA input has identical dimensions share a call: padding
-   different sizes into one tensor would change the scores (measured: 1.7 MUSIQ
-   points), so it is never done. `performance.txt` prints the call counts, so you
-   can see how many images each model call actually covered.
+   (`features.iqa_batch_size`, 4) instead of once per photo. Only images whose
+   bounded IQA input has identical dimensions share a call: padding different
+   sizes into one tensor would change the scores (measured: 1.7-3.4 MUSIQ points),
+   so it is never done. `performance.txt` prints the call counts.
+
    *Expect hours for ~100k files; the run reports the measured images/s and a
    rough linear ETA instead of a guess. Commits every 100 images, so re-running
    continues where it stopped.*
@@ -416,40 +414,17 @@ Turn it off or change the CUDA-event sampling with `features.telemetry`
 (`enabled`, `gpu_event_every`; `0` disables event sampling).
 
 With prefetch enabled the breakdown has three separate sections, on purpose:
-
-* **in-loop phases** — main-thread work inside a batch (the model lanes, YuNet,
-  thumbnails, DB), measured against the batch total;
-* **producer-thread phases** — the read, decode and per-image preparation that ran
-  *concurrently*, measured against their own total and **never added to the loop**,
-  because summing concurrent threads into one wall clock would invent time;
-* **between-batch phases** — `waiting for prepared batch`, which is what prefetch
-  actually cost the main thread. `overlap` is then producer seconds minus that
-  wait: work genuinely hidden behind the GPU, stated as a measurement rather than
-  as a claimed speedup.
+**in-loop** (main-thread work inside a batch), **producer-thread** (the read,
+decode and preparation that ran concurrently, measured against their own total and
+never added to the loop, because summing concurrent threads into one wall clock
+would invent time), and **between-batch** (`waiting for prepared batch` — what
+prefetch actually cost the main thread). `overlap` is producer seconds minus that
+wait: work genuinely hidden behind the GPU, stated as a measurement rather than a
+claimed speedup.
 
 If `waiting for prepared batch` dominates, the producer is the bottleneck — raise
 `cpu_workers`. If it is near zero and the model lanes dominate, the GPU is now the
 bottleneck, which is the intended outcome.
-
-To compare the two pipelines on your own machine without touching your library:
-
-```bat
-python -m src.stage1_benchmark --images 48
-```
-
-It builds a synthetic library, runs it serially and with prefetch, and verifies
-the feature rows are identical before reporting timings.
-
-To check the batched-IQA claims against the *real* weights on your GPU (also
-synthetic images only, and it never reads your library):
-
-```bat
-python -m scripts.verify_iqa_batching
-```
-
-It prints, per metric, how far a batched score is from the per-image score, what
-zero-padding to a common size would do instead (which is why sizes are grouped
-rather than padded), and how many model calls covered how many images.
 
 ---
 
@@ -469,7 +444,6 @@ src/stage1_telemetry.py     # Stage 1 per-phase timing (host-wall vs CUDA events
 src/stage1_pipeline.py      # bounded, ordered CPU prefetch (one sequential reader)
 src/stage1_backends.py      # DINOv2 + shape-grouped batched MUSIQ/CLIP-IQA + YuNet
 src/stage1_settings.py      # validated loop knobs + the stated memory bound
-src/stage1_benchmark.py     # serial vs optimised comparison on synthetic images
 scripts/gptk_delete.js      # Google Photos cloud-delete console script
 docs/ALGORITHM.md           # every threshold explained
 docs/STAGE1_THROUGHPUT.md   # the measurements behind the throughput defaults

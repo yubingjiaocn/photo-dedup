@@ -43,3 +43,4 @@ Thumbs.db
 
 # Local private calibration photos
 testdata/
+.worktrees/

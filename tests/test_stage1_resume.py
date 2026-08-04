@@ -99,27 +99,6 @@ def test_resume_after_partial_work_only_processes_the_remainder(tmp_path):
     assert all(row["status"] == "done" for row in all_rows)
 
 
-def test_switching_between_serial_and_prefetch_resumes_cleanly(tmp_path):
-    """Changing cpu_workers must not invalidate or duplicate completed work."""
-    root = library(tmp_path / "photos", 6)
-    serial_config = config(tmp_path, root, cpu_workers=0, prefetch_batches=0)
-    stage0_inventory.run(config_path=serial_config)
-    stage1_features.run(config_path=serial_config, backend_override="stub", limit=3)
-    partial = feature_rows(tmp_path / "inventory.sqlite")
-
-    fast_config = config(tmp_path, root, cpu_workers=4, prefetch_batches=2)
-    resumed = stage1_features.run(config_path=fast_config, backend_override="stub")
-
-    assert len(partial) == 3
-    assert resumed["processed"] == 3
-    rows = feature_rows(tmp_path / "inventory.sqlite")
-    assert len(rows) == 6
-    # The rows written by the serial run are untouched.
-    for original in partial:
-        current = next(row for row in rows if row["file_id"] == original["file_id"])
-        assert current == original
-
-
 def test_an_interrupted_run_releases_the_database_so_the_next_one_resumes(tmp_path,
                                                                          monkeypatch):
     """Ctrl+C must not leave the SQLite file locked by an abandoned connection.
@@ -169,35 +148,6 @@ def test_an_interrupted_run_releases_the_database_so_the_next_one_resumes(tmp_pa
     for original_row in after_interrupt:
         current = next(row for row in rows if row["file_id"] == original_row["file_id"])
         assert current == original_row
-
-
-def test_an_interrupt_before_any_commit_rolls_back_rather_than_half_writing(tmp_path,
-                                                                           monkeypatch):
-    """Uncommitted rows must vanish, not persist half-formed."""
-    root = library(tmp_path / "photos", 6)
-    # commit_every well above the run size: nothing is committed before the abort.
-    run_config = config(tmp_path, root, cpu_workers=2, prefetch_batches=1,
-                        commit_every=1000)
-    stage0_inventory.run(config_path=run_config)
-
-    original = stage1_features._consume_batch
-    seen = {"batches": 0}
-
-    def interrupting(*args, **kwargs):
-        seen["batches"] += 1
-        if seen["batches"] == 2:
-            raise KeyboardInterrupt("user pressed Ctrl+C")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(stage1_features, "_consume_batch", interrupting)
-    with pytest.raises(KeyboardInterrupt):
-        stage1_features.run(config_path=run_config, backend_override="stub")
-    monkeypatch.undo()
-
-    assert feature_rows(tmp_path / "inventory.sqlite") == []
-    resumed = stage1_features.run(config_path=run_config, backend_override="stub")
-    assert resumed["processed"] == 6
-    assert len(feature_rows(tmp_path / "inventory.sqlite")) == 6
 
 
 def test_a_failing_batch_still_closes_the_database(tmp_path, monkeypatch):

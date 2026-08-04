@@ -1,57 +1,43 @@
 """Stage 1 producer: bounded, ordered prefetch of prepared images.
 
-Why this exists
----------------
-The Windows baseline spent 504.80 s of a 510.57 s Stage 1 inside the batch loop
-for 1000 images, with the GPU at 20-25%. The breakdown said the loop was CPU
-bound, not GPU bound: IQA preprocess 82.82 s, embedding preprocess 51.50 s,
-sharpness 49.39 s, JPEG decode 40.18 s, exposure 31.14 s and the HDD read
-24.99 s all happened on the same thread that then waited for MUSIQ and CLIP-IQA.
-Measured on this box (``docs/STAGE1_THROUGHPUT.md``), that per-image CPU work
-scales 3.18x on four threads and is essentially free while a GPU lane is busy
-(3.87x when overlapped), because Pillow, numpy and the resize all release the
-GIL.
+The Windows baseline spent 504.80s of a 510.57s Stage 1 in the batch loop for 1000
+images with the GPU at 20-25%: the thread waiting for MUSIQ and CLIP-IQA was also
+doing the IQA preprocess (82.82s), embedding preprocess (51.50s), sharpness
+(49.39s), decode (40.18s), exposure (31.14s) and HDD read (24.99s). That CPU work
+scales 3.18x on four threads and is nearly free while a GPU lane is busy, because
+Pillow, numpy and the resizes all release the GIL (docs/STAGE1_THROUGHPUT.md).
 
-The three lanes
----------------
-1. **One reader thread.** It calls the *same* read+decode function the serial
-   path uses, one file at a time, in inventory order. A single reader is
-   deliberate: the library lives on one mechanical disk, so N threads opening N
-   different files would turn a sequential pass into a seek storm. Each file is
-   still read exactly once and decoded exactly once, and the read is still the
-   read that feeds the SHA-256.
-2. **A small worker pool.** Per-image, purely functional CPU preparation of an
-   already-decoded frame: perceptual hash, the bounded IQA array + sharpness,
-   the embedding preprocess, the exposure resize and the face-detector input.
-   Nothing here touches SQLite, the YuNet detector, the thumbnail writer or any
-   other stateful component.
-3. **The main thread.** Everything stateful or GPU-bound: the batched model
-   calls, YuNet (``FaceDetectorYN`` carries an input size, so it is not
+Three lanes:
+
+1. **One reader thread**, calling the same read+decode function the serial path
+   uses, one file at a time in inventory order. A single reader is deliberate: the
+   library is on one mechanical disk, so N concurrent opens would turn a
+   sequential pass into a seek storm. Each file is still read once and decoded
+   once, and that read still feeds the SHA-256.
+2. **A small worker pool** for per-image, purely functional preparation of an
+   already-decoded frame: pHash, the bounded IQA array + sharpness, the embedding
+   preprocess, the exposure resize, the face-detector input. Nothing here touches
+   SQLite, the YuNet detector or the thumbnail writer.
+3. **The main thread** for everything stateful or GPU-bound: the batched model
+   calls, YuNet (``FaceDetectorYN`` holds a mutable input size, so it is not
    thread-safe), the thumbnail cache, and every SQLite statement.
 
-Bounds and order
-----------------
-* The queue holds at most ``prefetch_batches`` batches of futures, and the
-  reader can be assembling one more while blocked on ``put``, so **at most
-  ``prefetch_batches + 1`` batches of decoded frames exist at once**. Each batch
-  is already bounded by ``features.max_inflight_megapixels``, which is what makes
-  the memory ceiling a number rather than a hope:
-  ``(prefetch_batches + 1) x max_inflight_megapixels`` of decoded pixels, plus
-  each frame's bounded IQA array. With the defaults (2 batches, 80 MP) that is
-  ~240 MP of RGB (~720 MiB) plus ~400 MiB of IQA arrays.
-* Compressed bytes are handed to the decoder and dropped immediately; they are
-  never accumulated.
-* Output order is the submission order, always. Batches leave the queue in the
-  order they were read and each batch's items keep their row order, because the
-  consumer resolves that batch's futures in order. Concurrency never reorders a
-  result, so the DB write order, the error rows and resume behaviour are
-  identical to the serial path.
+Bounds and order:
+
+* The queue holds at most ``prefetch_batches`` batches and the reader can be
+  assembling one more, so at most ``prefetch_batches + 1`` batches of decoded
+  frames exist at once. Each batch is already bounded by
+  ``features.max_inflight_megapixels``, which makes the memory ceiling a number
+  the run prints rather than a hope. Compressed bytes are handed to the decoder
+  and dropped immediately.
+* Output order is the submission order, always: batches leave the queue in read
+  order and each batch's futures are resolved in row order, so DB write order,
+  error rows and resume behaviour are identical to the serial path.
 * A per-file failure is data, not an exception: it becomes a failed
   :class:`PreparedImage` exactly where the serial path would have produced an
-  error row. A failure of the machinery itself (not of one file) propagates to
-  the consumer on the next iteration and is not silently dropped.
-* :meth:`_Prefetcher.close` is idempotent and always runs (``finally``), so
-  Ctrl+C, a mid-loop exception, or a ``break`` cancels queued work, drains the
+  error row. A failure of the machinery itself propagates to the consumer.
+* :meth:`_Prefetcher.close` is idempotent and the caller always runs it in a
+  ``finally``, so Ctrl+C or a mid-loop exception cancels queued work, drains the
   queue and joins the reader instead of leaking threads.
 """
 
@@ -135,49 +121,32 @@ def prepare_cpu(item: PreparedImage, backend: Any, cfg: Any, recorder: Any) -> P
 
 
 class _Recorder:
-    """Routes producer-thread work to the lock-protected producer books.
+    """Bills preparation time to the books of the thread that actually ran it.
 
-    Exposes the same ``phase``/``add`` surface as :class:`src.stage1_telemetry.Telemetry`
-    so it can be handed straight to the read+decode function, which is what keeps
-    a reader thread from mutating the main thread's dictionaries.
+    ``worker=True`` routes to the lock-protected producer counters; ``False`` to
+    the main-thread (in-loop) ones. Exposes the same ``phase``/``add`` surface as
+    :class:`src.stage1_telemetry.Telemetry`, so it can be handed straight to the
+    read+decode function -- which is what keeps a reader thread from mutating the
+    main thread's dictionaries.
     """
 
-    __slots__ = ("_telemetry",)
+    __slots__ = ("_telemetry", "_worker")
 
-    def __init__(self, telemetry: Any) -> None:
+    def __init__(self, telemetry: Any, worker: bool) -> None:
         self._telemetry = telemetry
+        self._worker = worker
 
     def phase(self, key: str, count: int = 1) -> Any:
         sink = self._telemetry
-        return sink.worker_phase(key, count) if sink is not None else telemetry_mod.NULL_SPAN
+        if sink is None:
+            return telemetry_mod.NULL_SPAN
+        return sink.worker_phase(key, count) if self._worker else sink.phase(key, count)
 
     def add(self, key: str, seconds: float, count: int = 1) -> None:
         sink = self._telemetry
-        if sink is not None:
-            sink.add_worker(key, seconds, count)
-
-
-class _MainRecorder:
-    """Routes preparation phases to the main-thread (in-loop) books."""
-
-    __slots__ = ("_telemetry",)
-
-    def __init__(self, telemetry: Any) -> None:
-        self._telemetry = telemetry
-
-    def phase(self, key: str, count: int = 1) -> Any:
-        sink = self._telemetry
-        return sink.phase(key, count) if sink is not None else telemetry_mod.NULL_SPAN
-
-    def add(self, key: str, seconds: float, count: int = 1) -> None:
-        sink = self._telemetry
-        if sink is not None:
-            sink.add(key, seconds, count)
-
-
-def main_recorder(telemetry: Any) -> _MainRecorder:
-    """Recorder for preparation that really did happen on the main thread."""
-    return _MainRecorder(telemetry)
+        if sink is None:
+            return
+        (sink.add_worker if self._worker else sink.add)(key, seconds, count)
 
 
 def read_and_decode(row: Any, read_fn: Callable[..., Any], recorder: Any) -> PreparedImage:
@@ -202,7 +171,7 @@ def serial_batches(
     Byte-for-byte the same work in the same order as the threaded path; only the
     thread differs. Timing is billed to the loop, because that is where it ran.
     """
-    recorder = main_recorder(telemetry)
+    recorder = _Recorder(telemetry, worker=False)
     for batch in batches:
         items = [prepare_cpu(read_and_decode(row, read_fn, recorder), backend, cfg, recorder)
                  for row in batch]
@@ -222,7 +191,7 @@ class _Prefetcher:
         self._cfg = cfg
         self._read_fn = read_fn
         self._telemetry = telemetry
-        self._recorder = _Recorder(telemetry)
+        self._recorder = _Recorder(telemetry, worker=True)
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max(1, int(prefetch_batches)))
         self._stop = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=max(1, int(workers)),
@@ -313,16 +282,9 @@ class _Prefetcher:
                     "Stage 1 reader thread did not stop within 30s of cancellation")
         self._pool.shutdown(wait=True, cancel_futures=True)
 
-    def __enter__(self) -> "_Prefetcher":
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        self.close()
-        return False
-
 
 class _SerialSource:
-    """Serial producer with the same context-manager contract as the threaded one."""
+    """Serial producer exposing the same iterate-then-close contract."""
 
     def __init__(self, batches: Iterable[Sequence[Any]], backend: Any, cfg: Any,
                  read_fn: Callable[..., Any], telemetry: Any = None) -> None:
@@ -333,12 +295,6 @@ class _SerialSource:
 
     def close(self) -> None:
         return None
-
-    def __enter__(self) -> "_SerialSource":
-        return self
-
-    def __exit__(self, *_exc: Any) -> bool:
-        return False
 
 
 def build_source(
