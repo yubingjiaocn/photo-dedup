@@ -320,3 +320,132 @@ def test_review_state_module_never_opens_original_photos(tmp_path, monkeypatch):
         conn.close()
 
     assert opened == []
+
+
+# --- P0 fixes ---------------------------------------------------------------
+
+def test_review_state_concurrent_writes_all_preserved(tmp_path):
+    """P0-4: Concurrent writes must not lose updates."""
+    output, _photos = _build_output_with_groups(tmp_path, 20)
+    state = review_state.ReviewState(output)
+
+    from concurrent.futures import ThreadPoolExecutor
+    results = []
+
+    def write_group(group_id):
+        try:
+            state.set_group(group_id, {"action": "accept", "timestamp": group_id * 1000})
+            return (group_id, "ok")
+        except Exception as e:
+            return (group_id, str(e))
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(write_group, gid) for gid in range(1, 11)]
+        results = [f.result() for f in futures]
+
+    # All writes succeeded
+    assert all(status == "ok" for _, status in results)
+
+    # Reload and verify all are present
+    state2 = review_state.ReviewState(output)
+    for gid in range(1, 11):
+        decision = state2.get_group(gid)
+        assert decision is not None, f"group {gid} lost"
+        assert decision["action"] == "accept"
+        assert decision["timestamp"] == gid * 1000
+
+
+def test_review_state_concurrent_reads_while_writing(tmp_path):
+    """P0-4: Reads during writes must not crash or see corrupt data."""
+    output, _photos = _build_output_with_groups(tmp_path, 10)
+    state = review_state.ReviewState(output)
+    state.set_group(1, {"action": "accept", "timestamp": 1234})
+
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    def reader():
+        for _ in range(50):
+            summary = state.summary()
+            assert isinstance(summary["total"], int)
+            time.sleep(0.001)
+
+    def writer():
+        for gid in range(2, 6):
+            state.set_group(gid, {"action": "accept", "timestamp": gid * 100})
+            time.sleep(0.005)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        r_futures = [executor.submit(reader) for _ in range(2)]
+        w_future = executor.submit(writer)
+        w_future.result()
+        for f in r_futures:
+            f.result()
+
+    summary = state.summary()
+    assert summary["total"] == 5
+    assert summary["reviewed"] == 5
+
+
+def test_page_endpoint_includes_review_state_on_load(tmp_path):
+    """P0-1: /api/page must include review_state so UI can render on first load."""
+    output, _photos = _build_output_with_groups(tmp_path, 6)
+    state = review_state.ReviewState(output)
+    state.set_group(1, {"action": "accept", "timestamp": 1234})
+    state.set_group(2, {"action": "pick", "file_id": 4, "timestamp": 1235})
+
+    with _Served(output) as base:
+        page_data = _get(base, "/api/page?view=GROUPS&page=1&page_size=100")
+        assert "review_state" in page_data
+        # review_state should be a dict keyed by group_id
+        rs = page_data["review_state"]
+        assert isinstance(rs, dict)
+        assert 1 in rs or "1" in str(rs)  # Can be int or str key from JSON
+        # Check it has the right shape
+        for gid in [1, 2]:
+            gid_key = gid if gid in rs else str(gid)
+            if gid_key in rs:
+                assert rs[gid_key]["action"] in ("accept", "pick")
+
+
+def test_review_state_validates_loaded_data(tmp_path):
+    """P0-8: Load must reject invalid action/file_id combinations."""
+    output, _photos = _build_output_with_groups(tmp_path, 4)
+    state_path = output / "review_state.json"
+
+    # Write state with invalid data
+    bad_data = {
+        "version": 1,
+        "groups": {
+            "1": {"action": "accept", "file_id": 999},  # accept must not have file_id
+            "2": {"action": "pick"},  # pick requires file_id
+            "3": {"action": "invalid_action", "timestamp": 123},
+            "4": {"action": "accept", "timestamp": 456},  # valid
+        }
+    }
+    state_path.write_text(json.dumps(bad_data), encoding="utf-8")
+
+    # Load should only keep valid entry
+    state = review_state.ReviewState(output)
+    summary = state.summary()
+    assert summary["total"] == 1
+    assert state.get_group(4) is not None
+    assert state.get_group(1) is None
+    assert state.get_group(2) is None
+    assert state.get_group(3) is None
+
+
+def test_review_state_get_returns_immutable_copy(tmp_path):
+    """P0-4: get_group must return copy so caller mutations don't affect internal state."""
+    output, _photos = _build_output_with_groups(tmp_path, 2)
+    state = review_state.ReviewState(output)
+    state.set_group(1, {"action": "accept", "timestamp": 1234})
+
+    decision1 = state.get_group(1)
+    decision1["action"] = "tampered"
+    decision1["extra"] = "injected"
+
+    # Internal state must be unchanged
+    decision2 = state.get_group(1)
+    assert decision2["action"] == "accept"
+    assert "extra" not in decision2

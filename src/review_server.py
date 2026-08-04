@@ -158,12 +158,24 @@ class ReviewData:
                 items = [_public_item(row) for row in
                          db.review_page(self._conn, view, offset, page_size,
                                         scope=self.scope)]
-        return {
+        # P0-1: Get state outside lock, and provide both page and summary
+        if view == "GROUPS":
+            group_ids = [g["group_id"] for g in items]
+            page_states = self.state.current_page_states(group_ids)
+            summary = self.state.summary()
+        else:
+            page_states = {}
+            summary = {}
+        result = {
             "view": view, "page": page, "pages": pages, "page_size": page_size,
             "total": total, "shown": len(items),
             "remaining_after_page": max(0, total - (offset + len(items))),
             "items": items,
         }
+        if view == "GROUPS":
+            result["review_state"] = page_states
+            result["review_summary"] = summary
+        return result
 
     def group(self, group_id: int) -> Optional[Dict[str, Any]]:
         """Path-free members for lightbox navigation from any review queue."""
@@ -218,6 +230,35 @@ class ReviewData:
 
     def status(self) -> Dict[str, Any]:
         files, cache_bytes = thumbnails.directory_usage(self.thumbs)
+        # Get scoped group IDs to filter stale state
+        with self._lock:
+            scoped_group_ids = {
+                int(row["group_id"])
+                for row in self._conn.execute(
+                    f"""
+                    SELECT DISTINCT g.id AS group_id FROM groups g
+                    WHERE EXISTS (
+                        SELECT 1 FROM group_members gm JOIN files f ON f.id = gm.file_id
+                        WHERE gm.group_id = g.id
+                          AND {db.scope_sql(self.scope, 'f')[0]}
+                    )
+                    """,
+                    db.scope_sql(self.scope, 'f')[1],
+                )
+            }
+        # Recount based on scoped groups
+        scoped_total = 0
+        scoped_reviewed = 0
+        scoped_marked = 0
+        for gid_str, decision in self.state._data["groups"].items():
+            gid = int(gid_str)
+            if gid in scoped_group_ids:
+                scoped_total += 1
+                action = decision.get("action")
+                if action in ("accept", "pick"):
+                    scoped_reviewed += 1
+                elif action == "mark":
+                    scoped_marked += 1
         return {
             "counts": self.counts(),
             "page_sizes": list(PAGE_SIZES),
@@ -225,7 +266,11 @@ class ReviewData:
             "thumb_cache_bytes": cache_bytes,
             "summary": self.summary,
             "scope": {"root": self.scope.path, "root_key": self.scope.key},
-            "review_state": self.state.summary(),
+            "review_state": {
+                "total": scoped_total,
+                "reviewed": scoped_reviewed,
+                "marked": scoped_marked,
+            },
         }
 
     def apply_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -238,7 +283,7 @@ class ReviewData:
             return {"error": "group_id (int) and action (str) are required"}
 
         error = review_state.validate_action(
-            self._conn, group_id, file_id, action, self.scope
+            self._conn, group_id, file_id, action, self.scope, self._lock
         )
         if error:
             return {"error": error}
@@ -304,14 +349,18 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
                     self._send_json({"error": "invalid content length"}, status=400)
                     return
                 body = self.rfile.read(length)
-                payload = json.loads(body.decode("utf-8"))
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    self._send_json({"error": "malformed JSON or invalid UTF-8"}, status=400)
+                    return
                 if not isinstance(payload, dict):
                     self._send_json({"error": "payload must be JSON object"}, status=400)
                     return
                 response = data.apply_action(payload)
                 status = 200 if "ok" in response else 400
                 self._send_json(response, status=status)
-            except (ValueError, OSError) as exc:
+            except (OSError,) as exc:
                 self._send_json({"error": str(exc)}, status=400)
 
         def _static_allowed(self, raw_path: str) -> bool:

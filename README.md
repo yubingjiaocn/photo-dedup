@@ -216,7 +216,7 @@ The GROUPS view now supports keyboard-driven review with persistent human decisi
 
 **Navigation** (GROUPS mode):
 - `↑/K` — previous group
-- `↓/J` — next group  
+- `↓/J` — next group
 - `←/H` — previous photo in group
 - `→/L` — next photo in group
 - `Enter/Space` — open/close high-res viewer
