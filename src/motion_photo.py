@@ -1,19 +1,12 @@
 """Motion-photo (live-photo) detection.
 
-Xiaomi / Samsung / Google "motion photos" come in two shapes:
-
-1. **Embedded** -- a single ``.jpg`` with an MP4 appended after the JPEG EOI,
-   plus an XMP marker (``GCamera:MicroVideo`` / ``MotionPhoto``) in the header.
-2. **Paired**   -- a ``.jpg`` next to a same-named ``.mp4`` / ``.MP`` /
-   ``IMG_x.jpg.MP`` sidecar video.
-
-The pipeline treats the video as an *attachment* that lives and dies with its
-JPEG: if the JPEG is kept the video is kept; if the JPEG is deleted the video
-goes too. ``file_kind`` records how each file participates:
+The supported Xiaomi / Samsung / Google layout is **embedded**: a single
+``.jpg`` with an MP4 appended after the JPEG EOI plus an XMP marker
+(``GCamera:MicroVideo`` / ``MotionPhoto``) in the header. Separate MP4/MOV
+files are standalone videos and are never paired by filename. ``file_kind``:
 
     'jpg'         -> a plain still image
-    'jpg_motion'  -> a still that owns a motion video (embedded or paired)
-    'mp4_paired'  -> a video that is the partner of some jpg_motion
+    'jpg_motion'  -> a still with an embedded motion video
     'mp4_only'    -> a standalone video (real clip, not a live photo)
 
 Embedded detection is cheap by default (header XMP markers only, a few hundred
@@ -114,38 +107,6 @@ def detect_embedded_motion(
     return False
 
 
-# --- paired detection ------------------------------------------------------
-
-def _video_base_candidates(video_name: str) -> set[str]:
-    """Base names a paired image could have, for a given video filename.
-
-    Handles both ``IMG_x.mp4`` (-> ``img_x``) and ``IMG_x.jpg.MP``
-    (-> ``img_x.jpg``) styles.
-    """
-    name_lower = video_name.lower()
-    cands: set[str] = set()
-    for ext in VIDEO_EXTS:
-        if name_lower.endswith(ext):
-            cands.add(name_lower[: -len(ext)])
-    cands.add(Path(video_name).stem.lower())
-    return cands
-
-
-def find_image_for_video(video: Path, dir_files: Sequence[Path]) -> Optional[Path]:
-    """Given a video, return the still image it pairs with (or None)."""
-    cands = _video_base_candidates(video.name)
-    matches = [other for other in dir_files if other != video and is_image(other)
-               and (other.name.lower() in cands or other.stem.lower() in cands)]
-    return matches[0] if len(matches) == 1 else None
-
-
-def find_video_for_image(image: Path, dir_files: Sequence[Path]) -> Optional[Path]:
-    """Given a still image, return a sidecar video that pairs with it (or None)."""
-    matches = [other for other in dir_files if other != image and is_video(other)
-               and find_image_for_video(other, dir_files) == image]
-    return matches[0] if len(matches) == 1 else None
-
-
 # --- unified classification ------------------------------------------------
 
 def classify_file(
@@ -157,8 +118,8 @@ def classify_file(
 ) -> Tuple[str, Optional[Path]]:
     """Classify a single file into a ``file_kind`` (+ optional partner path).
 
-    ``dir_files`` are the sibling entries in the same directory (used for
-    paired detection). Returns ``(file_kind, partner_path_or_None)``.
+    ``dir_files`` is retained for API compatibility but deliberately ignored:
+    filename-based JPG/video sidecar pairing is unsupported.
     """
     p = Path(path)
     if is_image(p):
@@ -168,14 +129,8 @@ def classify_file(
             full_scan_max_bytes=embedded_full_scan_max_bytes,
         ):
             return "jpg_motion", None  # video lives inside the same file
-        partner = find_video_for_image(p, dir_files)
-        if partner is not None:
-            return "jpg_motion", partner
         return "jpg", None
     if is_video(p):
-        partner = find_image_for_video(p, dir_files)
-        if partner is not None:
-            return "mp4_paired", partner
         return "mp4_only", None
     # Unknown extension -> treat as standalone (should be filtered by scan list).
     return "mp4_only", None

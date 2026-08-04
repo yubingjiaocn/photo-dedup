@@ -2,9 +2,11 @@
 
 Walks the photo library once (sequential, HDD-friendly), and for every image
 or video records: path, size, mtime, EXIF capture time, dimensions, and its
-motion-photo classification (embedded / paired). Everything lands in the
+embedded motion-photo classification. Everything lands in the
 ``files`` table. Re-running is idempotent (``INSERT OR IGNORE`` on path) and
-commits every ``scan.commit_every`` files so a Ctrl+C resumes cleanly.
+commits every ``scan.commit_every`` metadata updates. Re-runs stat existing
+rows first and skip header/EXIF reads when size + mtime are unchanged, so a
+limited run resumes with the next new/changed files instead of redoing a prefix.
 
 Only header bytes are read per processed file (dimensions + EXIF + motion XMP
 marker). With ``--limit``, the remaining directory entries are still counted
@@ -21,6 +23,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from os import stat_result
 from typing import Dict, List, Optional, Tuple
 
 from .config import Config, load_config
@@ -103,13 +106,12 @@ def read_image_header(path: Path) -> Dict[str, object]:
 # --- per-file record -------------------------------------------------------
 
 def build_file_meta(
-    path: Path, dir_files: List[Path], cfg: Config
+    path: Path, dir_files: List[Path], cfg: Config, st: Optional[stat_result] = None,
 ) -> Tuple[Dict[str, object], Optional[Path]]:
     """Assemble the ``files`` row dict + partner path for one path (single pass)."""
-    st = path.stat()
+    st = st or path.stat()
     kind, partner = mp.classify_file(
-        path,
-        dir_files,
+        path, dir_files,
         embedded_head_bytes=int(cfg.scan.get("embedded_head_bytes", 262144)),
         embedded_full_scan_max_bytes=int(cfg.scan.get("embedded_full_scan_max_bytes", 0)),
     )
@@ -150,61 +152,79 @@ def run(
         raise FileNotFoundError(f"scan root does not exist: {root}")
 
     conn = db.open_db(cfg.db_path)
+    # Older builds inferred same-name JPEG/video sidecars. This library only
+    # supports embedded Motion JPEG, so remove those stale links without
+    # reopening either source file. Embedded rows never had a partner id.
+    conn.execute(
+        "UPDATE files SET file_kind='jpg', motion_partner_id=NULL "
+        "WHERE file_kind='jpg_motion' AND motion_partner_id IS NOT NULL"
+    )
+    conn.execute(
+        "UPDATE files SET file_kind='mp4_only', motion_partner_id=NULL "
+        "WHERE file_kind='mp4_paired' OR motion_partner_id IS NOT NULL"
+    )
+    conn.commit()
     extensions = {e.lower() for e in cfg.scan.get("extensions", [])}
     commit_every = int(cfg.scan.get("commit_every", 100))
     follow = bool(cfg.scan.get("follow_symlinks", False))
 
-    inserted = 0
+    metadata_processed = 0
+    scanned = 0
+    unchanged = 0
     refreshed = 0
     discovered_files = 0
     discovered_still_images = 0
     since_commit = 0
     t0 = time.time()
 
-    # partner_links: (file_path, partner_path) collected per directory
-    for dirpath, _dirs, filenames in tqdm(os.walk(root, followlinks=follow), desc="inventory", unit="dir"):
+    # File-level progress stays visibly alive even inside one huge directory.
+    # ``limit`` is an expensive metadata-work budget, not a prefix sample:
+    # unchanged rows do not consume it, so repeated runs continue forward.
+    progress = tqdm(desc="inventory", unit="file")
+    for dirpath, _dirs, filenames in os.walk(root, followlinks=follow):
         dir_path = Path(dirpath)
         all_entries = [dir_path / name for name in filenames]
         all_wanted = sorted(p for p in all_entries if _wanted(p, extensions))
         discovered_files += len(all_wanted)
         discovered_still_images += sum(1 for p in all_wanted if mp.is_image(p))
-        if limit is not None and inserted >= limit:
-            continue
-        wanted = all_wanted
-        if limit is not None:
-            wanted = wanted[: limit - inserted]
-        if not wanted:
+        if not all_wanted:
             continue
 
-        path_to_id: Dict[Path, int] = {}
-        partner_of: Dict[Path, Optional[Path]] = {}
-        for p in wanted:
+        for p in all_wanted:
+            scanned += 1
+            progress.update(1)
+            if limit is not None and metadata_processed >= limit:
+                continue
             try:
-                meta, partner = build_file_meta(p, all_entries, cfg)
+                st = p.stat()
             except OSError as exc:
                 print(f"[stage0][WARN] stat failed {p}: {exc}")
+                continue
+            existing = db.get_file_by_path(conn, str(p))
+            if (existing is not None
+                    and existing["size_bytes"] == st.st_size
+                    and existing["mtime_ns"] == st.st_mtime_ns):
+                unchanged += 1
+                continue
+            try:
+                meta, _partner = build_file_meta(p, all_entries, cfg, st=st)
+            except OSError as exc:
+                print(f"[stage0][WARN] metadata failed {p}: {exc}")
                 continue
             fid = db.insert_file(conn, meta)
             # A re-scan must notice a replaced/edited photo, otherwise stale
             # hashes and stale thumbnails would survive (see refresh_file_identity).
             if db.refresh_file_identity(conn, fid, meta):
                 refreshed += 1
-            path_to_id[p] = fid
-            partner_of[p] = partner
-            inserted += 1
+            metadata_processed += 1
             since_commit += 1
+            progress.set_postfix(
+                metadata=metadata_processed, unchanged=unchanged, refresh=False
+            )
             if since_commit >= commit_every:
                 conn.commit()
                 since_commit = 0
-
-        # Link motion partners now that every file in the dir has an id.
-        for p, partner in partner_of.items():
-            if partner is None:
-                continue
-            fid = path_to_id.get(p)
-            pid = path_to_id.get(Path(partner))
-            if fid and pid:
-                db.set_motion_partner(conn, fid, pid)
+    progress.close()
     conn.commit()
 
     db.set_meta(conn, "stage0_root", str(root))
@@ -226,7 +246,10 @@ def run(
     if refreshed:
         print(f"[stage0] {refreshed} file(s) changed on disk; their cached features and "
               "thumbnails were invalidated and will be recomputed")
-    print(f"[stage0] inventoried {inserted} files in {dt:.1f}s -> {stats}")
+    print(
+        f"[stage0] scanned {scanned} files, refreshed metadata for "
+        f"{metadata_processed} ({unchanged} unchanged) in {dt:.1f}s -> {stats}"
+    )
     conn.close()
     return stats
 

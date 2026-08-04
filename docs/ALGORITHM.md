@@ -207,15 +207,10 @@ score = weight_iqa       * (MUSIQ / 100)      # default 0.6, normalised to 0..1
 
 ## 5. Motion photos (live photos)
 
-A JPEG that owns a video (embedded MP4 after EOI, or a paired `.mp4`/`.MP`
-sidecar) is `jpg_motion`; the video is its partner. **Life and death are
-bound:** if the JPEG is deleted, stage 3 automatically appends the sidecar
-video to `delete_local.txt`. Embedded videos need no extra handling — deleting
-the single JPEG removes them. See `src/motion_photo.py`.
-
-Pairing is one-to-one. Ambiguous `IMG_1.jpg` + `IMG_1.jpeg` + `IMG_1.mp4`
-sets remain unbound. Stage 3 also rechecks unique reverse ownership and refuses
-to expand a sidecar referenced by a keeper/protected asset.
+A JPEG with an embedded MP4 after EOI is `jpg_motion`. It remains one intact
+file throughout inventory, analysis and review; no extra deletion expansion is
+needed. Separate `.mp4`/`.MP`/`.mov` files are inventoried as standalone video
+and are never paired to a JPEG by filename. See `src/motion_photo.py`.
 
 Embedded detection defaults to a **cheap header-only XMP-marker scan**
 (`GCamera:MicroVideo` / `MotionPhoto`), which is what Xiaomi/Samsung/Google

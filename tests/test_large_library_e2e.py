@@ -51,7 +51,7 @@ def _write_jpeg(path: Path, array: np.ndarray, motion: bool = False) -> None:
 
 def _library(root: Path) -> dict[str, int]:
     """Plain JPEGs across two month folders, a byte-identical pair, motion photos."""
-    counts = {"jpg": 0, "jpg_motion": 0, "mp4_paired": 0}
+    counts = {"jpg": 0, "jpg_motion": 0, "mp4_only": 0}
     for index, hour in enumerate((9, 10, 11, 12, 13, 14)):
         folder = root / ("2026/01" if index < 3 else "2026/02")
         _write_jpeg(folder / f"IMG_202601{index + 1:02d}_{hour:02d}0000.jpg",
@@ -75,12 +75,13 @@ def _library(root: Path) -> dict[str, int]:
     )
     counts["jpg_motion"] += 1
 
-    # A paired-sidecar motion photo as well, so the older layout stays covered.
+    # Same-name videos deliberately remain standalone; this library only uses
+    # embedded Motion JPEG and does not infer ownership from filenames.
     paired_still = root / "2026/02/IMG_20260221_181500.jpg"
     _write_jpeg(paired_still, _scene(556))
     (root / "2026/02/IMG_20260221_181500.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"v" * 64)
-    counts["jpg_motion"] += 1
-    counts["mp4_paired"] += 1
+    counts["jpg"] += 1
+    counts["mp4_only"] += 1
 
     # A deliberately corrupt file: thumbnails must fail honestly, not silently.
     (root / "2026/02/IMG_20260222_190000.jpg").write_bytes(b"definitely not a jpeg")
@@ -278,7 +279,7 @@ def test_embedded_motion_photo_is_classified_thumbnailed_and_intact(pipeline):
     assert source.read_bytes() == raw
 
 
-def test_paired_sidecar_video_is_not_a_still_image_but_stays_linked(pipeline):
+def test_same_name_video_is_standalone_and_not_thumbnailed(pipeline):
     output = pipeline["output"]
     conn = db.open_db(output / "inventory.sqlite")
     still = db.get_file_by_path(conn, str(pipeline["root"] / "2026/02/IMG_20260221_181500.jpg"))
@@ -286,9 +287,10 @@ def test_paired_sidecar_video_is_not_a_still_image_but_stays_linked(pipeline):
     thumb_rows = conn.execute(
         "SELECT COUNT(*) AS n FROM thumbnails WHERE file_id = ?", (video["id"],)).fetchone()
     conn.close()
-    assert still["file_kind"] == "jpg_motion"
-    assert video["file_kind"] == "mp4_paired"
-    assert still["motion_partner_id"] == video["id"]
+    assert still["file_kind"] == "jpg"
+    assert video["file_kind"] == "mp4_only"
+    assert still["motion_partner_id"] is None
+    assert video["motion_partner_id"] is None
     assert thumb_rows["n"] == 0          # videos are not thumbnailed or analysed
 
 

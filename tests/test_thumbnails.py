@@ -241,6 +241,38 @@ def test_rescan_of_unchanged_files_reports_no_change(tmp_path):
     assert again["thumbnails"]["created"] == 0
 
 
+def test_unchanged_rescan_does_not_reopen_headers(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    _library(root, 3)
+    config = _config(tmp_path, root)
+    from src import motion_photo, stage0_inventory
+
+    stage0_inventory.run(config_path=config)
+    monkeypatch.setattr(
+        stage0_inventory, "read_image_header",
+        lambda *_: (_ for _ in ()).throw(AssertionError("Pillow header reopened")),
+    )
+    monkeypatch.setattr(
+        motion_photo, "detect_embedded_motion",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("motion header reopened")
+        ),
+    )
+    inventory = stage0_inventory.run(config_path=config)
+    assert inventory["changed_files"] == 0
+
+
+def test_limited_inventory_advances_to_new_files_on_rerun(tmp_path):
+    root = tmp_path / "photos"
+    _library(root, 5)
+    config = _config(tmp_path, root)
+    from src import stage0_inventory
+
+    assert stage0_inventory.run(config_path=config, limit=2)["files"] == 2
+    assert stage0_inventory.run(config_path=config, limit=2)["files"] == 4
+    assert stage0_inventory.run(config_path=config, limit=2)["files"] == 5
+
+
 def test_changed_source_also_invalidates_the_stale_content_hash(tmp_path):
     """Byte identity drives the only AUTO_REMOVE, so a stale SHA is unacceptable."""
     root = tmp_path / "photos"

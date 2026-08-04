@@ -18,8 +18,8 @@ paths:
   models_dir: "./models"         # downloaded YuNet ONNX + cached weights (SSD, small)
 
 scan:
-  # File extensions to inventory (case-insensitive). Motion-photo .MP/.MP4
-  # is a strict allow-list. Include sidecar formats you want paired.
+  # File extensions to inventory (case-insensitive). Motion video embedded in
+  # a JPEG stays in that JPEG; separate videos are inventoried but not paired.
   extensions: [".jpg", ".jpeg", ".png", ".mp4", ".mp", ".mov"]
   follow_symlinks: false
   commit_every: 100              # stage0/stage1 commit cadence (crash-safe)

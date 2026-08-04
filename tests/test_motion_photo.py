@@ -1,8 +1,10 @@
-"""Tests for motion-photo detection (embedded + paired)."""
+"""Tests for embedded motion-photo detection and standalone videos."""
 
 from pathlib import Path
 
-from src import motion_photo as mp
+import yaml
+
+from src import db, motion_photo as mp, stage0_inventory
 
 
 # --- trailing MP4 signature -------------------------------------------------
@@ -47,9 +49,7 @@ def test_detect_embedded_plain_false(tmp_path: Path):
     assert mp.detect_embedded_motion(p, full_scan_max_bytes=10_000_000) is False
 
 
-# --- paired detection -------------------------------------------------------
-
-def test_classify_paired_mp4(tmp_path: Path):
+def test_same_named_mp4_stays_standalone(tmp_path: Path):
     jpg = tmp_path / "IMG_20260101_120000.jpg"
     mp4 = tmp_path / "IMG_20260101_120000.mp4"
     jpg.write_bytes(b"\xff\xd8\xff\xd9")
@@ -58,19 +58,8 @@ def test_classify_paired_mp4(tmp_path: Path):
 
     kind_j, partner_j = mp.classify_file(jpg, dir_files)
     kind_m, partner_m = mp.classify_file(mp4, dir_files)
-    assert kind_j == "jpg_motion" and Path(partner_j) == mp4
-    assert kind_m == "mp4_paired" and Path(partner_m) == jpg
-
-
-def test_classify_dot_mp_sidecar(tmp_path: Path):
-    # Samsung/Xiaomi style: IMG_x.jpg + IMG_x.jpg.MP
-    jpg = tmp_path / "PXL_1.jpg"
-    side = tmp_path / "PXL_1.jpg.MP"
-    jpg.write_bytes(b"\xff\xd8\xff\xd9")
-    side.write_bytes(b"\x00\x00\x00\x18ftypmp42")
-    dir_files = [jpg, side]
-    kind_j, partner_j = mp.classify_file(jpg, dir_files)
-    assert kind_j == "jpg_motion" and Path(partner_j) == side
+    assert kind_j == "jpg" and partner_j is None
+    assert kind_m == "mp4_only" and partner_m is None
 
 
 def test_classify_standalone(tmp_path: Path):
@@ -83,13 +72,34 @@ def test_classify_standalone(tmp_path: Path):
     assert mp.classify_file(vid, dir_files)[0] == "mp4_only"
 
 
-def test_ambiguous_jpg_jpeg_do_not_claim_same_sidecar(tmp_path: Path):
-    jpg = tmp_path / "IMG_1.jpg"
-    jpeg = tmp_path / "IMG_1.jpeg"
-    video = tmp_path / "IMG_1.mp4"
-    for p in (jpg, jpeg, video):
-        p.write_bytes(b"x")
-    files = [jpg, jpeg, video]
-    assert mp.classify_file(jpg, files) == ("jpg", None)
-    assert mp.classify_file(jpeg, files) == ("jpg", None)
-    assert mp.classify_file(video, files) == ("mp4_only", None)
+def test_stage0_migrates_legacy_filename_pair_to_standalone(tmp_path: Path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    jpg, video = root / "same.jpg", root / "same.mp4"
+    jpg.write_bytes(b"not decoded because identity is unchanged")
+    video.write_bytes(b"video")
+    database = tmp_path / "inventory.sqlite"
+    conn = db.open_db(database)
+    still_id = db.insert_file(conn, {
+        "path": str(jpg), "basename": jpg.name, "size_bytes": jpg.stat().st_size,
+        "mtime_ns": jpg.stat().st_mtime_ns, "file_kind": "jpg_motion",
+    })
+    video_id = db.insert_file(conn, {
+        "path": str(video), "basename": video.name, "size_bytes": video.stat().st_size,
+        "mtime_ns": video.stat().st_mtime_ns, "file_kind": "mp4_paired",
+    })
+    db.set_motion_partner(conn, still_id, video_id)
+    conn.commit()
+    conn.close()
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump({
+        "paths": {"root": str(root), "db": str(database),
+                  "output_dir": str(tmp_path / "out")},
+    }), encoding="utf-8")
+
+    stage0_inventory.run(config_path=str(config))
+    conn = db.open_db(database)
+    still, video_row = db.get_file(conn, still_id), db.get_file(conn, video_id)
+    conn.close()
+    assert still["file_kind"] == "jpg" and still["motion_partner_id"] is None
+    assert video_row["file_kind"] == "mp4_only" and video_row["motion_partner_id"] is None

@@ -108,8 +108,8 @@ move to recoverable trash (local undo / Google's trash), never permanent delete.
 - **Check-in photos** (a landmark is the subject, a person re-poses in front)
   → **kept separately**. A face-position guard refuses to merge frames where
   the person clearly moved, so your "same spot, different pose" shots survive.
-- **Motion / live photos** (Xiaomi etc., embedded or paired `.mp4`/`.MP`) →
-  the video lives and dies with its JPEG.
+- **Motion / live photos** (Xiaomi etc., video embedded inside the JPEG) →
+  handled as one intact file. Separate MP4/MOV files stay standalone.
 
 "Best" frame is chosen by image quality (MUSIQ), face sharpness, and
 resolution — see `docs/ALGORITHM.md §4`.
@@ -343,7 +343,7 @@ always has a time. Wrong times only affect burst windowing, not exact-dup.
 vendor XMP markers by default (cheap), which covers phones that append the video
 to the JPEG tail with a proper marker. If your phone appends the video without
 any marker, set `scan.embedded_full_scan_max_bytes` to e.g. `20000000` to also
-scan file tails (slower). Paired `.mp4`/`.MP` sidecars are always detected.
+scan file tails (slower). Separate `.mp4`/`.MP` files are not paired by name.
 
 **Thumbnails are missing in the review.** The review UI deliberately never reads
 an original photo, so a missing thumbnail always means Stage 1 could not produce
@@ -381,3 +381,12 @@ scripts/gptk_delete.js      # Google Photos cloud-delete console script
 docs/ALGORITHM.md           # every threshold explained
 tests/                      # pytest suite (`python -m pytest tests/`)
 ```
+
+### Developer test gates
+
+Use `scripts/test-fast.sh` while iterating or before a local commit. It keeps the
+core DB, inventory, decision-safety, Stage 1 and thumbnail regressions, while
+skipping the repeated localhost-server and 100k-library integration fixtures.
+Run `scripts/test-full.sh` before push/release, and whenever changing the review
+server, pagination, end-to-end pipeline, SigLIP/routing, or benchmark/reporting.
+The full suite remains authoritative; tests are tiered, not deleted.
