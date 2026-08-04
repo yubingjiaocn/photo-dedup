@@ -443,6 +443,7 @@ src/schema.py               # SQLite DDL + additive migrations
 src/stage1_telemetry.py     # Stage 1 per-phase timing (host-wall vs CUDA events)
 src/stage1_pipeline.py      # bounded, ordered CPU prefetch (one sequential reader)
 src/stage1_backends.py      # DINOv2 + shape-grouped batched MUSIQ/CLIP-IQA + YuNet
+src/stage1_setup.py         # admission, pending-work query, detectors, closing stats
 src/stage1_settings.py      # validated loop knobs + the stated memory bound
 scripts/gptk_delete.js      # Google Photos cloud-delete console script
 docs/ALGORITHM.md           # every threshold explained

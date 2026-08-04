@@ -390,5 +390,3 @@ def test_stub_embedding_is_unchanged_by_per_image_preparation():
     assert np.array_equal(together, apart)
     norms = np.linalg.norm(together, axis=1)
     assert np.allclose(norms, 1.0, atol=1e-6)
-
-

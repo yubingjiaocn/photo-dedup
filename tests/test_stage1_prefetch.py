@@ -355,5 +355,3 @@ def test_no_work_produces_no_batches_and_no_threads_left_behind(tmp_path):
     while threading.active_count() > before and time.monotonic() < deadline:
         time.sleep(0.02)
     assert threading.active_count() <= before
-
-

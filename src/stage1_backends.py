@@ -25,17 +25,16 @@ The three-call shape
 
 Why IQA batching groups by shape (measured, not assumed)
 -------------------------------------------------------
-Measured on the real weights (``docs/STAGE1_THROUGHPUT.md``;
-``python -m scripts.verify_iqa_batching`` re-checks it): stacking equal-shaped
-tensors is score-preserving (MUSIQ to ~1e-05, CLIP-IQA to ~5e-05, the residual
-being batch-dependent cuDNN kernel selection), but heterogeneous shapes cannot be
-batched honestly -- ``torch.cat`` is impossible, pyiqa rejects lists, and
-zero-padding to a common size moves MUSIQ by 1.7-3.4 points and CLIP-IQA by
-0.08-0.12. Both models resize internally from whatever tensor they are given, so
-its height and width are part of the feature definition and padding would be a
-silent scoring change. Grouping by shape instead collapses N calls into one per
-distinct bounded size, which for a real library (one camera, two orientations) is
-one or two per batch.
+Measured on the real weights (``docs/STAGE1_THROUGHPUT.md``): stacking
+equal-shaped tensors is score-preserving (MUSIQ to ~1e-05, CLIP-IQA to ~5e-05,
+the residual being batch-dependent cuDNN kernel selection), but heterogeneous
+shapes cannot be batched honestly -- ``torch.cat`` is impossible, pyiqa rejects
+lists, and zero-padding to a common size moves MUSIQ by 1.7-3.4 points and
+CLIP-IQA by 0.08-0.12. Both models resize internally from whatever tensor they
+are given, so its height and width are part of the feature definition and padding
+would be a silent scoring change. Grouping by shape instead collapses N calls into
+one per distinct bounded size, which for a real library (one camera, two
+orientations) is one or two per batch.
 
 Batching removes the per-image ``.item()`` synchronisation, not kernel time: these
 metrics are compute-bound at a 1920 px long edge (65.4 ms/image at batch 1, 64.2
