@@ -49,15 +49,19 @@ h1{font-size:20px;margin:0 0 8px}
 .stats,.notice{color:#9cf;margin:8px 0;font-size:13px;line-height:1.6}
 .notice{padding:9px 11px;background:#18232b;border-radius:6px}
 nav{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:12px 0}
-button,select{padding:6px 11px;background:#222;color:#eee;border:1px solid #555;border-radius:5px}
+button,select{padding:6px 11px;background:#222;color:#eee;border:1px solid #555;border-radius:5px;cursor:pointer}
 button.on{background:#2b4;color:#000;font-weight:bold}
-button:disabled{opacity:.4}
+button:disabled{opacity:.4;cursor:not-allowed}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
 .card,.group{border:1px solid #555;padding:7px;border-radius:6px;background:#1a1a1a}
-.group{margin-bottom:12px;width:100%;box-sizing:border-box}
+.group{margin-bottom:12px;width:100%;box-sizing:border-box;position:relative}
+.group.focused{border-color:#fc3;box-shadow:0 0 12px rgba(255,204,51,0.5)}
+.group.reviewed{border-left:4px solid #2b4}
+.group.marked{border-left:4px solid #f93}
 .keep{border-color:#4c9}.maybe{border-color:#fc3}.unknown{border-color:#999}
 .auto_remove{border-color:#c55}.ungrouped{border-color:#456}
 img{display:block;width:190px;height:160px;object-fit:contain;background:#000;border-radius:3px}
+.card{position:relative}.card.focused{border-color:#fc3;box-shadow:0 0 8px rgba(255,204,51,0.4)}
 .card img{cursor:zoom-in}.card button{font-size:11px;margin-top:5px;width:100%}
 .miss{width:190px;height:160px;background:#221c1c;color:#c88;font-size:12px;
  display:flex;align-items:center;justify-content:center;text-align:center;border-radius:3px}
@@ -71,6 +75,17 @@ img{display:block;width:190px;height:160px;object-fit:contain;background:#000;bo
 .pane{min-width:0;min-height:0;display:flex;flex-direction:column;align-items:center}
 .pane img{width:100%;height:calc(100vh - 100px);object-fit:contain;background:#000;cursor:default}
 .pane .label{font-size:12px;color:#fc9;margin-bottom:4px}
+.help{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.9);display:none;
+ align-items:center;justify-content:center;padding:20px}.help.open{display:flex}
+.help-box{background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px;max-width:600px;
+ max-height:90vh;overflow-y:auto}
+.help-box h2{margin-top:0;color:#fc3}
+.help-box table{width:100%;border-collapse:collapse;margin:10px 0}
+.help-box td{padding:8px;border-bottom:1px solid #333}
+.help-box td:first-child{color:#fc3;font-family:monospace;white-space:nowrap}
+.review-actions{position:absolute;top:7px;right:7px;display:none;gap:4px}
+.group.focused .review-actions{display:flex}
+.review-actions button{padding:4px 8px;font-size:11px}
 </style></head><body>
 <h1>照片去重 - 审阅</h1>
 <div class="notice" id="perf">PERFORMANCE_PANEL</div>
@@ -88,6 +103,8 @@ img{display:block;width:190px;height:160px;object-fit:contain;background:#000;bo
  <label>每页 <select id="size">
   <option value="50">50</option><option value="100" selected>100</option>
   <option value="200">200</option></select> 张</label>
+ <span>&nbsp;|&nbsp;</span>
+ <button id="helpBtn">快捷键 ?</button>
 </nav>
 <div class="stats" id="stats">SUMMARY_TEXT</div>
 <div class="row" id="content"></div>
@@ -100,10 +117,35 @@ img{display:block;width:190px;height:160px;object-fit:contain;background:#000;bo
   <div class="pane" id="rightPane"><div class="label" id="rightLabel"></div><img id="rightImage"></div>
  </div>
 </div>
+<div class="help" id="help">
+ <div class="help-box">
+  <h2>快捷键说明</h2>
+  <table>
+   <tr><td>? 或 F1</td><td>显示/隐藏此帮助</td></tr>
+   <tr><td>Esc</td><td>关闭查看器/帮助</td></tr>
+   <tr><td colspan="2" style="color:#fc3;font-weight:bold">GROUPS 模式导航</td></tr>
+   <tr><td>↑ / K</td><td>上一组</td></tr>
+   <tr><td>↓ / J</td><td>下一组</td></tr>
+   <tr><td>← / H</td><td>组内上一张</td></tr>
+   <tr><td>→ / L</td><td>组内下一张</td></tr>
+   <tr><td colspan="2" style="color:#fc3;font-weight:bold">查看</td></tr>
+   <tr><td>Enter / Space</td><td>打开/关闭高清图</td></tr>
+   <tr><td>C</td><td>切换对比模式（当前照片 vs. AI keeper）</td></tr>
+   <tr><td colspan="2" style="color:#fc3;font-weight:bold">审阅动作</td></tr>
+   <tr><td>A</td><td>接受 AI keeper，标记已审</td></tr>
+   <tr><td>P</td><td>设当前照片为人工 keeper，标记已审</td></tr>
+   <tr><td>M</td><td>标记稍后再看</td></tr>
+   <tr><td>U</td><td>清除本组人工状态</td></tr>
+  </table>
+  <p style="color:#999;font-size:12px;margin-top:12px">动作后自动前进至下一组（U 除外）。所有状态仅写入 output 目录，原图永远只读。</p>
+  <button onclick="closeHelp()" style="width:100%;margin-top:12px">关闭 Esc</button>
+ </div>
+</div>
 <script>
 const content=document.getElementById('content'),stats=document.getElementById('stats');
 let view='ALL',page=1,pages=1,size=100,loadGeneration=0;
 let visibleItems=[],groupMembers=new Map(),viewerItems=[],viewerIndex=0;
+let focusedGroupIndex=-1,focusedCardIndex=-1,reviewState={};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function tile(r){
  const cls=esc(String(r.decision||'ungrouped').toLowerCase());
@@ -117,8 +159,29 @@ function tile(r){
   +`<button onclick="openViewer(${r.file_id})">查看高清大图</button></div></div>`;
 }
 function groupBlock(g){
- return `<div class=group><div class=tag>分组 #${g.group_id} [${esc(g.group_type)}] &middot; `
-  +`${g.member_count} 张</div><div class=row>${(g.members||[]).map(tile).join('')}</div></div>`;
+ const state=reviewState[g.group_id]||{};
+ const stateClass=state.action==='accept'||state.action==='pick'?'reviewed':state.action==='mark'?'marked':'';
+ const stateText=state.action==='accept'?'[已审-AI]':state.action==='pick'?`[已审-人工 #${state.file_id}]`:state.action==='mark'?'[稍后]':'';
+ return `<div class="group ${stateClass}" data-group-id="${g.group_id}">`
+  +`<div class=tag>分组 #${g.group_id} [${esc(g.group_type)}] &middot; ${g.member_count} 张 ${stateText}</div>`
+  +`<div class="review-actions">`
+  +`<button onclick="reviewAction(${g.group_id},'accept')">A 接受AI</button>`
+  +`<button onclick="reviewAction(${g.group_id},'mark')">M 稍后</button>`
+  +`<button onclick="reviewAction(${g.group_id},'clear')">U 清除</button>`
+  +`</div>`
+  +`<div class=row>${(g.members||[]).map((m,i)=>tileWithIndex(m,i)).join('')}</div></div>`;
+}
+function tileWithIndex(r,i){
+ const cls=esc(String(r.decision||'ungrouped').toLowerCase());
+ const img=r.thumb==='ok'
+  ?`<img loading="lazy" src="/api/thumb/${r.file_id}.jpg" onclick="openViewer(${r.file_id})" title="点击按需从原图库加载高清大图" onerror="this.outerHTML='<div class=miss>缩略图缺失<br>（不会自动回源读取机械盘）</div>'">`
+  :`<div class=miss>缩略图不可用<br>${esc(r.thumb_error||r.thumb||'未生成')}</div>`;
+ return `<div class="card ${cls}" data-file-id="${r.file_id}" data-card-index="${i}">${img}<div class=cap><span class=tag>${esc(r.decision)}</span>`
+  +`${r.is_keep?'（保留项）':''}<br>${esc(r.basename)}<br>${r.width||'?'}x${r.height||'?'}`
+  +` &middot; 质量=${r.quality_score??'?'} &middot; 人脸=${r.face_count??'?'}<br>`
+  +`${esc(r.exif_datetime||'无拍摄时间')}<br>${esc(r.reason||'')}`
+  +`<button onclick="openViewer(${r.file_id})">查看高清大图</button>`
+  +`<button onclick="pickKeeper(${r.file_id})">P 设为keeper</button></div></div>`;
 }
 function setButtons(){
  document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===view));
@@ -140,16 +203,21 @@ async function load(){
   document.getElementById('mode').textContent=
    '本地服务器模式。缩略图仅从 Stage 1 写入的 SSD 缓存读取，翻页绝不会回源读取机械盘上的原图。'
    +'本页面只读：不会移动、删除或修改任何原图。';
-  stats.textContent=`${view}：共 ${d.total} 项 · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} 项`
-   +` · 本页之后还剩 ${d.remaining_after_page} 项`;
   groupMembers=new Map();
   if(view==='GROUPS')d.items.forEach(g=>groupMembers.set(Number(g.group_id),g.members||[]));
   visibleItems=view==='GROUPS'?d.items.flatMap(g=>g.members||[]):d.items;
   content.innerHTML=d.items.map(view==='GROUPS'?groupBlock:tile).join('')||'<div>本视图没有条目。</div>';
   const s=await (await fetch('/api/status')).json();
   if(generation!==loadGeneration)return;
+  reviewState=s.review_state||{};
+  const rs=s.review_state||{reviewed:0,marked:0,total:0};
+  stats.textContent=`${view}：共 ${d.total} 项 · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} 项`
+   +` · 本页之后还剩 ${d.remaining_after_page} 项`;
+  if(view==='GROUPS')stats.textContent+=` · 已审 ${rs.reviewed} · 稍后 ${rs.marked}`;
   stats.textContent+=` · 缩略图缓存 ${s.thumb_cache_files} 个文件 / `
    +`${(s.thumb_cache_bytes/1073741824).toFixed(2)} GiB`;
+  focusedGroupIndex=-1;focusedCardIndex=-1;
+  if(view==='GROUPS'&&d.items.length>0){setGroupFocus(0)}
  }catch(e){
   stats.textContent='分页浏览需要本地服务器（不要加 --no-serve）。'+e.message;
  }
@@ -183,7 +251,78 @@ document.getElementById('compare').onclick=()=>{
 document.getElementById('vprev').onclick=()=>stepViewer(-1);document.getElementById('vnext').onclick=()=>stepViewer(1);
 function closeViewer(){lightbox.classList.remove('open');leftImage.removeAttribute('src');rightImage.removeAttribute('src');viewerItems=[];viewerIndex=0}
 document.getElementById('closeViewer').onclick=closeViewer;
-document.addEventListener('keydown',e=>{if(!lightbox.classList.contains('open'))return;if(e.key==='Escape')closeViewer();else if(e.key==='ArrowLeft')stepViewer(-1);else if(e.key==='ArrowRight')stepViewer(1)});
+function openHelp(){document.getElementById('help').classList.add('open')}
+function closeHelp(){document.getElementById('help').classList.remove('open')}
+document.getElementById('helpBtn').onclick=openHelp;
+function setGroupFocus(idx){
+ document.querySelectorAll('.group').forEach(g=>g.classList.remove('focused'));
+ const groups=document.querySelectorAll('.group');
+ if(idx>=0&&idx<groups.length){focusedGroupIndex=idx;groups[idx].classList.add('focused');groups[idx].scrollIntoView({block:'nearest',behavior:'smooth'});focusedCardIndex=0;setCardFocus(0)}
+}
+function setCardFocus(idx){
+ const group=document.querySelectorAll('.group')[focusedGroupIndex];
+ if(!group)return;
+ const cards=group.querySelectorAll('.card');
+ cards.forEach(c=>c.classList.remove('focused'));
+ if(idx>=0&&idx<cards.length){focusedCardIndex=idx;cards[idx].classList.add('focused');cards[idx].scrollIntoView({block:'nearest',behavior:'smooth'})}
+}
+async function reviewAction(gid,action){
+ const group=document.querySelectorAll('.group')[focusedGroupIndex];
+ let fid=null;
+ if(action==='pick'&&group){
+  const card=group.querySelectorAll('.card')[focusedCardIndex];
+  fid=card?Number(card.dataset.fileId):null;
+  if(!fid){alert('请先选择一张照片');return}
+ }
+ try{
+  const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:gid,file_id:fid,action})});
+  const d=await r.json();
+  if(!r.ok||d.error){alert('操作失败: '+(d.error||'未知错误'));return}
+  await load();
+  if(action!=='clear'&&focusedGroupIndex<document.querySelectorAll('.group').length-1){setGroupFocus(focusedGroupIndex+1)}
+ }catch(e){alert('操作失败: '+e.message)}
+}
+function pickKeeper(fid){const groups=document.querySelectorAll('.group');if(focusedGroupIndex>=0&&focusedGroupIndex<groups.length){const gid=Number(groups[focusedGroupIndex].dataset.groupId);reviewAction(gid,'pick')}}
+document.addEventListener('keydown',e=>{
+ const help=document.getElementById('help');
+ if(help.classList.contains('open')){if(e.key==='Escape'||e.key==='?'||e.key==='F1'){e.preventDefault();closeHelp()}return}
+ if(lightbox.classList.contains('open')){
+  if(e.key==='Escape'){e.preventDefault();closeViewer()}
+  else if(e.key==='ArrowLeft'||e.key==='h'||e.key==='H'){e.preventDefault();stepViewer(-1)}
+  else if(e.key==='ArrowRight'||e.key==='l'||e.key==='L'){e.preventDefault();stepViewer(1)}
+  else if(e.key==='c'||e.key==='C'){e.preventDefault();document.getElementById('compare').click()}
+  return
+ }
+ if(e.key==='?'||e.key==='F1'){e.preventDefault();openHelp();return}
+ if(view!=='GROUPS')return;
+ const groups=document.querySelectorAll('.group');
+ if(groups.length===0)return;
+ if(e.key==='ArrowUp'||e.key==='k'||e.key==='K'){e.preventDefault();if(focusedGroupIndex>0)setGroupFocus(focusedGroupIndex-1)}
+ else if(e.key==='ArrowDown'||e.key==='j'||e.key==='J'){e.preventDefault();if(focusedGroupIndex<groups.length-1)setGroupFocus(focusedGroupIndex+1)}
+ else if(e.key==='ArrowLeft'||e.key==='h'||e.key==='H'){e.preventDefault();if(focusedCardIndex>0)setCardFocus(focusedCardIndex-1)}
+ else if(e.key==='ArrowRight'||e.key==='l'||e.key==='L'){
+  e.preventDefault();
+  const group=groups[focusedGroupIndex];
+  const cards=group?group.querySelectorAll('.card'):[];
+  if(focusedCardIndex<cards.length-1)setCardFocus(focusedCardIndex+1)
+ }
+ else if(e.key==='Enter'||e.key===' '){
+  e.preventDefault();
+  const group=groups[focusedGroupIndex];
+  const card=group?group.querySelectorAll('.card')[focusedCardIndex]:null;
+  if(card){const fid=Number(card.dataset.fileId);if(fid)openViewer(fid)}
+ }
+ else if(e.key==='a'||e.key==='A'){e.preventDefault();const gid=Number(groups[focusedGroupIndex].dataset.groupId);reviewAction(gid,'accept')}
+ else if(e.key==='p'||e.key==='P'){e.preventDefault();const gid=Number(groups[focusedGroupIndex].dataset.groupId);reviewAction(gid,'pick')}
+ else if(e.key==='m'||e.key==='M'){e.preventDefault();const gid=Number(groups[focusedGroupIndex].dataset.groupId);reviewAction(gid,'mark')}
+ else if(e.key==='u'||e.key==='U'){e.preventDefault();const gid=Number(groups[focusedGroupIndex].dataset.groupId);reviewAction(gid,'clear')}
+ else if(e.key==='c'||e.key==='C'){
+  e.preventDefault();
+  const group=groups[focusedGroupIndex];
+  const card=group?group.querySelectorAll('.card')[focusedCardIndex]:null;
+  if(card){const fid=Number(card.dataset.fileId);openViewer(fid);setTimeout(()=>document.getElementById('compare').click(),100)}
+ }
+});
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;page=1;load()});
 document.getElementById('prev').onclick=()=>{if(page>1){page--;load()}};
 document.getElementById('next').onclick=()=>{if(page<pages){page++;load()}};

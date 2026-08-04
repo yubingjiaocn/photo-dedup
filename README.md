@@ -208,13 +208,35 @@ Re-runs reuse thumbnails only when the recorded source size/mtime and pixel size
 still match and the JPEG is really on disk; edit or replace an original and its
 thumbnail is regenerated instead of served stale. Delete `output/thumbs/` to
 rebuild the cache from scratch (that costs another Stage 1 pass over those
-photos). The UI is strictly read-only: there is no move, delete, or keep action.
+photos).
 
-**Not in this milestone:** persistent manual marking (KEEP / review-later /
-quarantine-candidate written back to SQLite). The current release is a read-only
-reviewer, so the deletion manifests can only ever contain byte-identical
-`AUTO_REMOVE` items. Manual marking is the next milestone; it will not change
-that rule.
+### GROUPS review workbench (keyboard-first)
+
+The GROUPS view now supports keyboard-driven review with persistent human decisions:
+
+**Navigation** (GROUPS mode):
+- `↑/K` — previous group
+- `↓/J` — next group  
+- `←/H` — previous photo in group
+- `→/L` — next photo in group
+- `Enter/Space` — open/close high-res viewer
+- `C` — compare current photo vs. AI keeper
+- `Esc` — close viewer/help
+- `?/F1` — show keyboard shortcuts
+
+**Review actions** (focused group):
+- `A` — accept AI keeper, mark reviewed (auto-advance)
+- `P` — set current photo as human keeper, mark reviewed (auto-advance)
+- `M` — mark group for later review (auto-advance)
+- `U` — clear human decision for this group (no advance)
+
+All human decisions are stored in `output/review_state.json` (atomic writes on every
+change). **Original photos remain read-only**; AI decisions and deletion manifests
+are unchanged. Human state is an independent overlay. The review UI shows total/reviewed/marked
+counts and highlights reviewed/marked groups with color-coded borders.
+
+Delete manifests still contain only byte-identical `AUTO_REMOVE` items. Manual decisions
+do not create new deletion entries — they guide which groups need further attention.
 
 ---
 

@@ -24,12 +24,13 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import db, root_scope, thumbnails
+from . import db, review_state, root_scope, thumbnails
 
 DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
@@ -37,6 +38,7 @@ VIEWS = ("ALL", "MAYBE", "UNKNOWN", "GROUPS")
 _THUMB_RE = re.compile(r"^/api/thumb/(\d{1,18})\.jpg$")
 _ORIGINAL_RE = re.compile(r"^/api/original/(\d{1,18})$")
 _GROUP_RE = re.compile(r"^/api/group/(\d{1,18})$")
+_ACTION_RE = re.compile(r"^/api/action$")
 _DENY_NAMES = {"inventory.sqlite", "inventory.sqlite-wal", "inventory.sqlite-shm"}
 
 
@@ -111,6 +113,7 @@ class ReviewData:
             print("[review][WARN] this output directory has no recorded photo root "
                   "(created before root identity); serving every row it contains")
         self.summary = self._read_summary()
+        self.state = review_state.ReviewState(self.output)
 
     def close(self) -> None:
         with self._lock:
@@ -222,7 +225,36 @@ class ReviewData:
             "thumb_cache_bytes": cache_bytes,
             "summary": self.summary,
             "scope": {"root": self.scope.path, "root_key": self.scope.key},
+            "review_state": self.state.summary(),
         }
+
+    def apply_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply review action. Returns success/error response."""
+        group_id = payload.get("group_id")
+        file_id = payload.get("file_id")
+        action = payload.get("action")
+
+        if not isinstance(group_id, int) or not isinstance(action, str):
+            return {"error": "group_id (int) and action (str) are required"}
+
+        error = review_state.validate_action(
+            self._conn, group_id, file_id, action, self.scope
+        )
+        if error:
+            return {"error": error}
+
+        if action == "clear":
+            self.state.clear_group(group_id)
+        else:
+            decision = {
+                "action": action,
+                "timestamp": int(time.time()),
+            }
+            if file_id is not None:
+                decision["file_id"] = int(file_id)
+            self.state.set_group(group_id, decision)
+
+        return {"ok": True, "summary": self.state.summary()}
 
 
 def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandler]:
@@ -261,6 +293,26 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
                 self.send_error(404)
                 return
             super().do_GET()
+
+        def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+            if self.path != "/api/action":
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length < 1 or length > 8192:
+                    self._send_json({"error": "invalid content length"}, status=400)
+                    return
+                body = self.rfile.read(length)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    self._send_json({"error": "payload must be JSON object"}, status=400)
+                    return
+                response = data.apply_action(payload)
+                status = 200 if "ok" in response else 400
+                self._send_json(response, status=status)
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
 
         def _static_allowed(self, raw_path: str) -> bool:
             parts = [part for part in unquote(raw_path).replace("\\", "/").split("/")

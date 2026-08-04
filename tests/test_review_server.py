@@ -390,14 +390,16 @@ def test_server_denies_db_thumb_directory_and_traversal(tmp_path):
 
 
 def test_review_ui_offers_no_mutation_endpoint(tmp_path):
+    """POST is only allowed on /api/action, not on read-only endpoints."""
     output, _photos = _build_output(tmp_path, 3)
     with _Served(output) as base:
         import urllib.request
 
+        # POST to read-only endpoints should be rejected
         request = urllib.request.Request(f"{base}/api/page", method="POST", data=b"x")
         with pytest.raises(HTTPError) as excinfo:
             urllib.request.urlopen(request)
-        assert excinfo.value.code in (400, 405, 501)
+        assert excinfo.value.code == 404  # do_POST only handles /api/action
 
 
 def test_server_binds_loopback_only(tmp_path):

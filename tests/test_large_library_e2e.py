@@ -314,16 +314,24 @@ def test_review_page_is_chinese_and_localhost_only(pipeline):
 
 
 def test_ui_exposes_no_manual_marking_endpoint_this_milestone(pipeline):
-    """Manual KEEP/REVIEW-LATER marking is deliberately not in this milestone."""
+    """Manual marking exists but never changes delete manifests or DB decisions.
+
+    Human decisions go to output/review_state.json (independent overlay) and never
+    create AUTO_REMOVE entries. The DB remains a read-only cache in the UI.
+    """
     output = pipeline["output"]
     conn = db.open_db(output / "inventory.sqlite")
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
+    # No separate review_marks table - human state is in JSON only
     assert "review_marks" not in tables
     page = (output / "review.html").read_text(encoding="utf-8")
-    for absent in ("/api/mark", "method:'POST'", 'method="post"'):
-        assert absent not in page
+    # POST endpoint exists at /api/action for human decisions
+    assert "/api/action" in page
+    assert "method:'POST'" in page
+    # But /api/mark (old name) should not exist
+    assert "/api/mark" not in page
 
 
 def test_only_byte_identical_duplicates_are_proposed_for_removal(pipeline):
