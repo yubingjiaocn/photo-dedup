@@ -283,10 +283,26 @@ Activate the environment first: `\.venv\Scripts\activate`
    continues where it stopped.*
 
 4. **Stage 2 — cluster** (CPU, minutes). Re-run freely after tweaking thresholds
-   — it reads the cache, not the images:
+   — it reads the cached features, not the images:
    ```
    python -m src.stage2_cluster
    ```
+   To re-run only Stage 2 and Stage 3 (without re-reading images):
+   ```
+   python -m src.stage2_cluster
+   python -m src.stage3_report
+   ```
+
+   **Windows with custom config:** If you used a separate config file (e.g., to
+   specify a custom `paths.db` pointing to an existing
+   `F:\photo-dedup\photo-review-full\inventory.sqlite` or custom `paths.output_dir`),
+   use the rebuild script to ensure Stage 2+3 use the correct config and root,
+   avoiding accidental re-scan:
+   ```
+   python -m src.rebuild_review --config run-config.yaml --root E:\Photos
+   ```
+   This runs Stage 2 then Stage 3 serially with your specified config. Do **not**
+   re-run Stage 0/1 unless you intend to rebuild the feature cache.
 
 ### Offline scene/SigLIP shadow calibration (read-only)
 

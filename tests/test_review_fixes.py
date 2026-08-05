@@ -104,9 +104,11 @@ def _get(base: str, path: str) -> dict:
 def test_groups_page_returns_current_page_state(tmp_path):
     """Page response includes review_state for visible groups."""
     output, _photos = _build_output_with_groups(tmp_path, 10)
+    fp1 = review_state.compute_member_fingerprint([1, 2])
+    fp2 = review_state.compute_member_fingerprint([3, 4])
     state = review_state.ReviewState(output)
-    state.set_group(1, {"action": "accept", "timestamp": 1234567890})
-    state.set_group(2, {"action": "mark", "timestamp": 1234567891})
+    state.set_group(1, {"action": "accept", "timestamp": 1234567890}, fp1)
+    state.set_group(2, {"action": "mark", "timestamp": 1234567891}, fp2)
 
     with _Served(output) as base:
         page = _get(base, "/api/page?view=GROUPS&page=1&page_size=100")
@@ -205,11 +207,14 @@ def test_status_filters_stale_groups_from_summary(tmp_path):
     """After restart with different scope, stale state not counted."""
     output, _photos = _build_output_with_groups(tmp_path, 10)
 
-    # Record decisions for groups 1-3
+    # Record decisions for groups 1-3 with correct fingerprints
+    fp1 = review_state.compute_member_fingerprint([1, 2])
+    fp2 = review_state.compute_member_fingerprint([3, 4])
+    fp3 = review_state.compute_member_fingerprint([5, 6])
     state = review_state.ReviewState(output)
-    state.set_group(1, {"action": "accept", "timestamp": 1234567890})
-    state.set_group(2, {"action": "mark", "timestamp": 1234567891})
-    state.set_group(3, {"action": "pick", "file_id": 5, "timestamp": 1234567892})
+    state.set_group(1, {"action": "accept", "timestamp": 1234567890}, fp1)
+    state.set_group(2, {"action": "mark", "timestamp": 1234567891}, fp2)
+    state.set_group(3, {"action": "pick", "file_id": 5, "timestamp": 1234567892}, fp3)
 
     # Now simulate group 3 is out of scope (delete its members from DB)
     conn = db.open_db(output / "inventory.sqlite")

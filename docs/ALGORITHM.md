@@ -155,31 +155,44 @@ exposure classifications are review evidence only and never cause AUTO_REMOVE.
 
 A file lands in **exactly one** group. Layers run in priority order and a
 union-find (DSU) merges members; each final group is labelled by its strongest
-edge type (`exact_dup` > `burst` > `similar_scene`).
+edge type (`sha_exact` > `phash_near` > `burst` > `similar_scene`).
 
-### Layer 1 — pHash near-duplicate candidates
-- **Rule:** pHash Hamming distance ≤ `phash_hamming_threshold` (**default 2**).
-- **Why 2:** 0 is only hash-identical, not byte-identical; 1–2 tolerates JPEG re-encode / a resave
-  without letting genuinely different photos in. Above ~4 you start merging
-  merely-similar images, which is what Layer 2 is *for* (with time gating).
-- **Performance:** naïve all-pairs is O(N²) ≈ 10¹⁰ for 100k — too slow. We use
-  **multi-index hashing**: split the 64-bit hash into four 16-bit bands. By the
-  pigeonhole principle, two hashes within Hamming 2 must share **≥ 2** of the 4
-  bands, so they will collide in at least one band bucket. We only compare
-  within buckets. (Guaranteed correct for threshold ≤ 3; if you set it higher,
-  increase the band count or accept recall loss — noted in code.)
-- DSU connectivity never grants deletion trust. Every candidate is compared
-  directly with the selected keeper, and only matching non-empty SHA-256 values
-  use the automatic duplicate lane. Thus A≈B≈C chaining cannot remove C.
+### Layer 1 — SHA-256 byte-exact (frozen)
+- **Rule:** Files with identical non-empty SHA-256 content hashes form groups with
+  **no time restriction**. These are true byte-identical duplicates.
+- **Why unrestricted time:** Copied/synced files may appear weeks or months apart
+  across different storage events (e.g., phone backup → computer import → cloud sync).
+  Byte identity proves duplication regardless of timestamp.
+- **Frozen after Layer 1:** SHA-exact components do not absorb additional photos via
+  visual similarity in later layers. This prevents cross-date copies from bridging
+  unrelated photo sessions through visual grouping.
+- **Performance:** SHA hashes are bucketed for O(N) grouping.
 
-### Layer 2 — Burst / continuous shot
+### Layer 2 — pHash near-duplicate (time-windowed)
+- **Rule:** pHash Hamming distance ≤ `phash_hamming_threshold` (**default 2**)
+  **AND** within `burst_window_seconds` (**default 30 s**).
+- **Why time-windowed:** Without byte identity, pHash hamming ≤ 2 is a visual
+  approximation that can match re-encodes but also unrelated similar scenes.
+  The 30-second window keeps these matches temporally local and prevents
+  merging the same Disney parade float shot weeks apart.
+- **Why 2:** 0 is only hash-identical, not byte-identical; 1–2 tolerates JPEG
+  re-encode / a resave without letting genuinely different photos in. Above ~4
+  you start merging merely-similar images.
+- **Performance:** Within each 30-second time window, pairwise comparison with
+  shared-band prefilter. Split the 64-bit hash into four 16-bit bands; by
+  pigeonhole, two hashes within Hamming 2 must share ≥ 2 bands, so we skip pairs
+  with fewer than 2 shared bands before computing full Hamming distance. This is
+  O(K²) per window where K is the burst size, not a full O(N²) scan.
+- **Skips frozen SHA groups:** Pairs where either file is already in a SHA-exact
+  component are not eligible, maintaining SHA group isolation.
+
+### Layer 3 — Burst / continuous shot (DINO)
 - **Rule:** within `burst_window_seconds` (**default 30 s**) *and* DINOv2 cosine
   ≥ `dinov2_threshold` (**default 0.92**) → same group, **unless** the check-in
   face guard fires (§3).
 - **Why 30 s:** phone burst mode and "take three to be safe" behaviour cluster
   within seconds; 30 s is generous enough to catch human-paced re-shoots but
-  short enough that unrelated photos rarely share a window. Chains are allowed
-  (A~B, B~C ⇒ A,B,C) so a longer burst still forms one group.
+  short enough that unrelated photos rarely share a window.
 - **Why cosine 0.92:** empirically the band where "same shot, tiny changes"
   lives. Lower (0.85) starts pulling in "same room, different subject"; higher
   (0.96) misses bursts where someone waved an arm. 0.92 is the conservative
@@ -187,13 +200,19 @@ edge type (`exact_dup` > `burst` > `similar_scene`).
 - **Time source:** EXIF `DateTimeOriginal`, falling back to a timestamp parsed
   from the filename (`IMG_YYYYMMDD_HHMMSS`), falling back to file mtime — so
   windowing always has *a* value.
+- **Skips frozen SHA groups:** Prevents SHA-exact groups from absorbing visually
+  similar but non-identical photos.
+- **Time-span validation:** Union attempts that would cause max(timestamp) -
+  min(timestamp) > 30s are rejected at merge time, blocking transitive A-B-C
+  chains that would violate the window constraint.
 
-### Layer 3 — Similar scene (loose) — **OFF by default**
+### Layer 4 — Similar scene (loose) — **OFF by default**
 - **Rule:** longer window (`loose_window_seconds`, default 300 s) + stricter
   cosine (`loose_dinov2_threshold`, default 0.96), same face guard.
 - **Why off:** this is precisely where check-in photos get wrongly merged (same
   spot, minutes apart, person moved). Enable only if you specifically want to
   collapse "shot the same object repeatedly" and have reviewed the face guard.
+- **Skips frozen SHA groups:** Same isolation as Layer 3.
 
 ---
 

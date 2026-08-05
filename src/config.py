@@ -97,7 +97,7 @@ _DEFAULTS: Dict[str, Any] = {
         ),
     },
     "cluster": {
-        "burst_window_seconds": 30,
+        "burst_window_seconds": 30,  # Visual grouping time window (30s)
         "dinov2_threshold": 0.92,
         "phash_hamming_threshold": 2,
         "face_pose_shift_ratio": 0.30,
@@ -218,6 +218,23 @@ class Config:
 
     def as_dict(self) -> Dict[str, Any]:
         return dict(self._data)
+
+    def validate(self) -> None:
+        """Fail closed on invalid config values before any stage runs.
+
+        Call this after load_config() in CLI entry points to reject invalid
+        thresholds early with clear error messages.
+        """
+        # phash_hamming_threshold must be in [0, 2] range
+        threshold = self.cluster.get("phash_hamming_threshold")
+        if threshold is not None:
+            threshold_int = int(threshold)
+            if threshold_int < 0 or threshold_int > 2:
+                raise ValueError(
+                    f"cluster.phash_hamming_threshold={threshold_int} is out of valid range [0, 2]. "
+                    f"Current band-prefilter algorithm only supports hamming thresholds 0-2. "
+                    f"Set to 2 (default) for near-duplicate detection."
+                )
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

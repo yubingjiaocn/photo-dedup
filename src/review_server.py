@@ -114,6 +114,10 @@ class ReviewData:
                   "(created before root identity); serving every row it contains")
         self.summary = self._read_summary()
         self.state = review_state.ReviewState(self.output)
+        # Validate fingerprints and prune stale decisions after stage2 rerun
+        stale_count = self.state.validate_and_prune_stale(self._conn, self.scope)
+        if stale_count > 0:
+            print(f"[review] Pruned {stale_count} stale group decision(s) from prior stage2 run")
 
     def close(self) -> None:
         with self._lock:
@@ -292,13 +296,21 @@ class ReviewData:
         if action == "clear":
             self.state.clear_group(group_id)
         else:
+            # Fetch current members to compute fingerprint
+            member_fingerprint = None
+            with self._lock:
+                member_rows = db.group_page_by_id(self._conn, group_id, scope=self.scope)
+                if member_rows:
+                    member_file_ids = [int(row["file_id"]) for row in member_rows]
+                    member_fingerprint = review_state.compute_member_fingerprint(member_file_ids)
+
             decision = {
                 "action": action,
                 "timestamp": int(time.time()),
             }
             if file_id is not None:
                 decision["file_id"] = int(file_id)
-            self.state.set_group(group_id, decision)
+            self.state.set_group(group_id, decision, member_fingerprint)
 
         return {"ok": True, "summary": self.state.summary()}
 

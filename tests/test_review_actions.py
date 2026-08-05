@@ -390,9 +390,13 @@ def test_review_state_concurrent_reads_while_writing(tmp_path):
 def test_page_endpoint_includes_review_state_on_load(tmp_path):
     """P0-1: /api/page must include review_state so UI can render on first load."""
     output, _photos = _build_output_with_groups(tmp_path, 6)
+    conn = db.open_db(output / "inventory.sqlite")
+    fp1 = review_state.compute_member_fingerprint([1, 2])
+    fp2 = review_state.compute_member_fingerprint([3, 4])
+    conn.close()
     state = review_state.ReviewState(output)
-    state.set_group(1, {"action": "accept", "timestamp": 1234})
-    state.set_group(2, {"action": "pick", "file_id": 4, "timestamp": 1235})
+    state.set_group(1, {"action": "accept", "timestamp": 1234}, fp1)
+    state.set_group(2, {"action": "pick", "file_id": 4, "timestamp": 1235}, fp2)
 
     with _Served(output) as base:
         page_data = _get(base, "/api/page?view=GROUPS&page=1&page_size=100")

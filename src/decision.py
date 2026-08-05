@@ -45,18 +45,16 @@ def _exposure(member: Mapping[str, Any]) -> tuple[str, str, float]:
 def decide_group(
     members: Sequence[Mapping[str, Any]], keeper: int, scores: Mapping[int, float],
     group_type: str, *, profile: str = "balanced",
-    phash_distances: Mapping[int, int] | None = None,
     group_trusted: bool = True,
     safe_duplicates: Mapping[int, bool] | None = None,
 ) -> Dict[str, Any]:
-    """Decide each member; ``keeper`` and distance keys are local indices."""
+    """Decide each member; keeper and safe_duplicates keys are local indices."""
     policy = PROFILES.get(profile)
     if policy is None:
         raise ValueError(f"unknown decision profile: {profile}")
     decisions: Dict[int, Dict[str, Any]] = {}
     decisions[keeper] = _record("KEEP", 1.0, "GROUP_KEEPER", scores[keeper], 0.0)
     keeper_exp, _, _ = _exposure(members[keeper])
-    distances = phash_distances or {}
     direct_duplicates = safe_duplicates or {}
     for idx, member in enumerate(members):
         if idx == keeper:
@@ -65,14 +63,26 @@ def decide_group(
         exp_state, exp_reason, _severity = _exposure(member)
         if not _critical_available(member):
             decisions[idx] = _record("UNKNOWN", 0.0, "FEATURE_MISSING", scores[idx], margin)
-        elif group_type == "similar_scene":
-            decisions[idx] = _record("MAYBE", 0.0, "SUBJECTIVE_ONLY: similar_scene", scores[idx], margin)
         elif direct_duplicates.get(idx, False):
+            # Byte-identical (SHA-256 match) - only automatic removal path
             decisions[idx] = _record("AUTO_REMOVE", 1.0, "BYTE_IDENTICAL", scores[idx], margin)
         elif not group_trusted:
-            decisions[idx] = _record("MAYBE", 0.0, "GROUP_IMPURE", scores[idx], margin)
-        elif group_type == "exact_dup" and distances.get(idx, 64) <= 2:
+            # Non-SHA visual groups that failed trust still preserve their specific reason
+            if group_type == "phash_near":
+                decisions[idx] = _record("MAYBE", 0.0, "PHASH_NEAR_UNTRUSTED", scores[idx], margin)
+            elif group_type == "similar_scene":
+                decisions[idx] = _record("MAYBE", 0.0, "SIMILAR_SCENE_UNTRUSTED", scores[idx], margin)
+            else:
+                decisions[idx] = _record("MAYBE", 0.0, "GROUP_IMPURE", scores[idx], margin)
+        elif group_type == "sha_exact":
+            # SHA-exact group but this specific pair doesn't share SHA - should not happen
+            # if logic is correct, but handle defensively
+            decisions[idx] = _record("MAYBE", 0.0, "SHA_GROUP_NO_MATCH", scores[idx], margin)
+        elif group_type == "phash_near":
+            # pHash near-duplicate without byte identity - requires review
             decisions[idx] = _record("MAYBE", 0.0, "PHASH_NEAR_DUP_ONLY", scores[idx], margin)
+        elif group_type == "similar_scene":
+            decisions[idx] = _record("MAYBE", 0.0, "SUBJECTIVE_ONLY: similar_scene", scores[idx], margin)
         elif _face_conflict(members[keeper], member):
             decisions[idx] = _record("MAYBE", 0.0, "FACE_COUNT_MISMATCH", scores[idx], margin)
         elif exp_state == "reject" and keeper_exp != "reject":

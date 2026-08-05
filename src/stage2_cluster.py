@@ -6,9 +6,21 @@ re-running *only* this stage -- no images are read.
 
 Three layers, applied in priority order (a file lands in exactly one group):
 
-  Layer 1  exact_dup      pHash hamming <= threshold        (any time)
-  Layer 2  burst          <= 30s apart AND DINOv2 cos >= t   (+ check-in split)
-  Layer 3  similar_scene  longer window, stricter cos        (off by default)
+  Layer 1  sha_exact       byte-identical SHA-256            (any time, frozen after Layer 1)
+  Layer 2  phash_near      pHash hamming <= 2, <= 30s apart (visual window)
+  Layer 3  burst           <= 30s apart AND DINOv2 cos >= t  (+ check-in split)
+  Layer 4  similar_scene   longer window, stricter cos       (off by default)
+
+Time constraints
+----------------
+- **Byte-identical** (SHA-256 match): no time restriction. These are true duplicates
+  and may span arbitrary time if copied/synced across dates. SHA groups are frozen
+  after Layer 1 and never absorb additional photos via visual similarity.
+- **pHash near-duplicates** (hamming ≤ 2 but SHA mismatch): 30-second window. Without
+  byte identity these are visual approximations that must stay temporally local.
+- **DINO bursts** and **similar_scene**: existing 30s/300s windows continue to apply.
+- All visual groups (non-SHA) enforce: max(timestamp) - min(timestamp) ≤ window,
+  blocking A-B-C transitive chains that would violate the span constraint.
 
 Check-in split
 --------------
@@ -20,10 +32,12 @@ to union them -- so a run of check-in shots stays as separate keepers.
 
 Efficiency
 ----------
-Exact-dup uses multi-index hashing: split the 64-bit pHash into four 16-bit
-bands; for hamming <= 2 (pigeonhole) two colliding items must share >=2 bands,
-so we only compare within band buckets -- no O(N^2) scan. Burst uses a time
-sliding window, so comparisons stay local.
+SHA-exact uses hash bucketing. pHash-near uses time-sorted sliding window with
+shared-band prefilter: split the 64-bit pHash into four 16-bit bands; for hamming
+<= 2 (pigeonhole) two colliding items must share >=2 bands, so we skip pairs with
+fewer than 2 shared bands before computing full Hamming. This is O(K²) per window
+where K is the burst size, not a full O(N²) scan. Burst uses time sliding window,
+so comparisons stay local.
 """
 
 from __future__ import annotations
@@ -42,84 +56,10 @@ from . import db
 from . import root_scope
 from . import quality as Q
 from . import decision as D
+from . import cluster_layers as CL
 
-PRIORITY = {"exact_dup": 3, "burst": 2, "similar_scene": 1}
+PRIORITY = {"sha_exact": 4, "phash_near": 3, "burst": 2, "similar_scene": 1}
 
-
-# --- union-find ------------------------------------------------------------
-
-class DSU:
-    """Disjoint-set union with path compression + union by size."""
-
-    def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
-        self.size = [1] * n
-
-    def find(self, x: int) -> int:
-        root = x
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[x] != root:
-            self.parent[x], x = root, self.parent[x]
-        return root
-
-    def union(self, a: int, b: int) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra == rb:
-            return
-        if self.size[ra] < self.size[rb]:
-            ra, rb = rb, ra
-        self.parent[rb] = ra
-        self.size[ra] += self.size[rb]
-
-
-# --- face helpers ----------------------------------------------------------
-
-def parse_faces(faces_json: Optional[str]) -> List[Dict[str, Any]]:
-    if not faces_json:
-        return []
-    try:
-        return json.loads(faces_json)
-    except (ValueError, TypeError):
-        return []
-
-
-def dominant_face_center(
-    faces: Sequence[Dict[str, Any]], width: int, height: int, min_score: float
-) -> Optional[Tuple[float, float]]:
-    """Normalised (cx, cy) in 0..1 of the highest-confidence usable face."""
-    usable = [f for f in faces if float(f.get("score", 0.0)) >= min_score]
-    if not usable or not width or not height:
-        return None
-    best = max(usable, key=lambda f: float(f.get("score", 0.0)))
-    x, y, w, h = (float(v) for v in (best.get("bbox") or [0, 0, 0, 0])[:4])
-    return ((x + w / 2.0) / width, (y + h / 2.0) / height)
-
-
-def face_pose_shift(
-    faces_i: Sequence[Dict[str, Any]], wi: int, hi: int,
-    faces_j: Sequence[Dict[str, Any]], wj: int, hj: int,
-    min_score: float,
-) -> Optional[float]:
-    """Normalised face-center displacement between two frames.
-
-    Returns None when either frame lacks a usable face (so the split rule does
-    not apply -- backgrounds-only bursts group normally).
-    """
-    ci = dominant_face_center(faces_i, wi, hi, min_score)
-    cj = dominant_face_center(faces_j, wj, hj, min_score)
-    if ci is None or cj is None:
-        return None
-    dx = abs(ci[0] - cj[0])
-    dy = abs(ci[1] - cj[1])
-    return max(dx, dy)
-
-
-def should_split_by_face(shift: Optional[float], ratio: float) -> bool:
-    return shift is not None and shift > ratio
-
-
-# --- keep selection --------------------------------------------------------
 
 def _face_quality_of(meta_json: Optional[str]) -> float:
     if not meta_json:
@@ -132,11 +72,7 @@ def _face_quality_of(meta_json: Optional[str]) -> float:
 
 
 def select_keep(members: Sequence[Dict[str, Any]], cfg: Config) -> Tuple[int, Dict[int, float]]:
-    """Return (index_of_keeper, {index: score}) for a group's member dicts.
-
-    Each member dict needs: quality_score, quality_meta, width, height, size_bytes.
-    Ties break toward the larger file (original vs recompressed).
-    """
+    """Return (index_of_keeper, {index: score}) for a group's member dicts."""
     w = cfg.quality
     scores: Dict[int, float] = {}
     for idx, m in enumerate(members):
@@ -151,13 +87,15 @@ def select_keep(members: Sequence[Dict[str, Any]], cfg: Config) -> Tuple[int, Di
             weight_resolution=float(w.get("weight_resolution", 0.1)),
         )
         scores[idx] = s
-    # Pick max score; tie-break on larger size then smaller id-order.
     keep = max(range(len(members)),
                key=lambda i: (scores[i], members[i].get("size_bytes") or 0))
     return keep, scores
 
 
-# --- pHash exact-dup layer -------------------------------------------------
+def _sha_hashes(rows: Sequence[Any]) -> List[Optional[str]]:
+    """Extract SHA-256 hashes, keeping None for missing hashes."""
+    return [r["content_sha256"] if r["content_sha256"] else None for r in rows]
+
 
 def _phash_ints(rows: Sequence[Any]) -> List[Optional[int]]:
     out: List[Optional[int]] = []
@@ -167,37 +105,68 @@ def _phash_ints(rows: Sequence[Any]) -> List[Optional[int]]:
     return out
 
 
-def layer1_exact_dup(
-    dsu: DSU, phash_ints: Sequence[Optional[int]], threshold: int
+def layer2_phash_near(
+    dsu: CL.DSU,
+    phash_ints: Sequence[Optional[int]],
+    sha_hashes: Sequence[Optional[str]],
+    timestamps: Sequence[Optional[int]],
+    threshold: int,
+    window_seconds: int,
+    frozen_components: set[int],
 ) -> List[Tuple[int, int, str]]:
-    """Union files whose pHash hamming distance <= threshold. Returns edges."""
+    """Union files whose pHash hamming <= threshold AND within window, enforcing span.
+
+    Skips pairs where:
+    - Either file is in a frozen SHA-exact component
+    - Either has the same SHA-256 (covered by layer1_sha_exact)
+    - Merging would violate span constraint
+    """
+    if threshold < 0:
+        raise ValueError(f"phash_hamming_threshold={threshold} must be >= 0")
+    if threshold > 2:
+        raise ValueError(f"phash_hamming_threshold={threshold} > 2 not supported by current band algorithm")
+    if window_seconds <= 0:
+        raise ValueError(f"window_seconds={window_seconds} must be > 0")
     edges: List[Tuple[int, int, str]] = []
+    n = len(phash_ints)
     bands = 4
     band_bits = 16
     mask = (1 << band_bits) - 1
-    for band in range(bands):
-        shift = band * band_bits
-        buckets: Dict[int, List[int]] = {}
-        for idx, h in enumerate(phash_ints):
-            if h is None:
+
+    for i in range(n):
+        if phash_ints[i] is None or timestamps[i] is None:
+            continue
+        if dsu.find(i) in frozen_components:
+            continue
+        ti = timestamps[i]
+
+        j = i + 1
+        while j < n and timestamps[j] is not None and (timestamps[j] - ti) <= window_seconds:
+            if phash_ints[j] is None:
+                j += 1
                 continue
-            buckets.setdefault((h >> shift) & mask, []).append(idx)
-        for members in buckets.values():
-            if len(members) < 2:
+            if dsu.find(j) in frozen_components:
+                j += 1
                 continue
-            for a in range(len(members)):
-                for b in range(a + 1, len(members)):
-                    i, j = members[a], members[b]
-                    if dsu.find(i) == dsu.find(j):
-                        continue
-                    hi, hj = phash_ints[i], phash_ints[j]
-                    if bin(hi ^ hj).count("1") <= threshold:
-                        dsu.union(i, j)
-                        edges.append((i, j, "exact_dup"))
+            if sha_hashes[i] is not None and sha_hashes[i] == sha_hashes[j]:
+                j += 1
+                continue
+            if dsu.find(i) == dsu.find(j):
+                j += 1
+                continue
+
+            hi, hj = phash_ints[i], phash_ints[j]
+            shared_bands = sum(
+                1 for band in range(bands)
+                if ((hi >> (band * band_bits)) & mask) == ((hj >> (band * band_bits)) & mask)
+            )
+            if shared_bands >= 2:
+                if bin(hi ^ hj).count("1") <= threshold:
+                    if dsu.union_if_span_within(i, j, window_seconds):
+                        edges.append((i, j, "phash_near"))
+            j += 1
     return edges
 
-
-# --- burst / similar layer -------------------------------------------------
 
 def _unit_embeddings(rows: Sequence[Any]) -> Tuple[np.ndarray, np.ndarray]:
     embs = np.zeros((len(rows), 768), dtype=np.float32)
@@ -218,7 +187,7 @@ def _unit_embeddings(rows: Sequence[Any]) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def layer_window(
-    dsu: DSU,
+    dsu: CL.DSU,
     rows: Sequence[Any],
     units: np.ndarray,
     timestamps: Sequence[int],
@@ -230,35 +199,42 @@ def layer_window(
     min_face_score: float,
     edge_type: str,
     valid_embeddings: Optional[np.ndarray] = None,
+    frozen_components: Optional[set[int]] = None,
 ) -> List[Tuple[int, int, str]]:
-    """Time-windowed similarity union with check-in face split. Returns edges."""
+    """Time-windowed similarity union with span enforcement and face split."""
+    if window_seconds <= 0:
+        raise ValueError(f"window_seconds={window_seconds} must be > 0")
     edges: List[Tuple[int, int, str]] = []
+    frozen = frozen_components or set()
     n = len(rows)
     for i in range(n):
         ti = timestamps[i]
         if ti is None or (valid_embeddings is not None and not valid_embeddings[i]):
+            continue
+        if dsu.find(i) in frozen:
             continue
         j = i + 1
         while j < n and timestamps[j] is not None and (timestamps[j] - ti) <= window_seconds:
             if (valid_embeddings is not None and not valid_embeddings[j]):
                 j += 1
                 continue
+            if dsu.find(j) in frozen:
+                j += 1
+                continue
             if dsu.find(i) != dsu.find(j):
                 cos = float(np.dot(units[i], units[j]))
                 if cos >= cos_threshold:
-                    shift = face_pose_shift(
+                    shift = CL.face_pose_shift(
                         faces[i], rows[i]["width"], rows[i]["height"],
                         faces[j], rows[j]["width"], rows[j]["height"],
                         min_face_score,
                     )
-                    if not should_split_by_face(shift, face_ratio):
-                        dsu.union(i, j)
-                        edges.append((i, j, edge_type))
+                    if not CL.should_split_by_face(shift, face_ratio):
+                        if dsu.union_if_span_within(i, j, window_seconds):
+                            edges.append((i, j, edge_type))
             j += 1
     return edges
 
-
-# --- orchestration ---------------------------------------------------------
 
 def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
     """Run all enabled clustering layers and persist groups. Returns stats."""
@@ -268,15 +244,30 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         print("[stage2] no features found -- run stage1 first.")
         return {"groups": 0, "files": 0}
 
-    dsu = DSU(n)
-    phash_ints = _phash_ints(rows)
-    units, valid_embeddings = _unit_embeddings(rows)
     timestamps = [r["exif_timestamp"] for r in rows]
-    faces = [parse_faces(r["faces_json"]) for r in rows]
+    dsu = CL.DSU(n, timestamps)
+    phash_ints = _phash_ints(rows)
+    sha_hashes = _sha_hashes(rows)
+    units, valid_embeddings = _unit_embeddings(rows)
+    faces = [CL.parse_faces(r["faces_json"]) for r in rows]
 
     cc = cfg.cluster
     edges: List[Tuple[int, int, str]] = []
-    edges += layer1_exact_dup(dsu, phash_ints, int(cc.get("phash_hamming_threshold", 2)))
+
+    # Layer 1: SHA-256 byte-exact (any time, frozen after this layer)
+    sha_edges = CL.layer1_sha_exact(dsu, sha_hashes)
+    edges += sha_edges
+    frozen_components = {dsu.find(i) for i, j, _ in sha_edges}
+
+    # Layer 2: pHash near-duplicates (30s window, skip frozen SHA components)
+    edges += layer2_phash_near(
+        dsu, phash_ints, sha_hashes, timestamps,
+        threshold=int(cc.get("phash_hamming_threshold", 2)),
+        window_seconds=int(cc.get("burst_window_seconds", 30)),
+        frozen_components=frozen_components,
+    )
+
+    # Layer 3: DINO burst (30s window, skip frozen SHA components)
     edges += layer_window(
         dsu, rows, units, timestamps, faces,
         window_seconds=int(cc.get("burst_window_seconds", 30)),
@@ -285,7 +276,10 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         min_face_score=float(cc.get("min_face_score", 0.6)),
         edge_type="burst",
         valid_embeddings=valid_embeddings,
+        frozen_components=frozen_components,
     )
+
+    # Layer 4: Similar scene (optional, longer window, skip frozen)
     if bool(cc.get("enable_loose_similar", False)):
         edges += layer_window(
             dsu, rows, units, timestamps, faces,
@@ -295,6 +289,7 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             min_face_score=float(cc.get("min_face_score", 0.6)),
             edge_type="similar_scene",
             valid_embeddings=valid_embeddings,
+            frozen_components=frozen_components,
         )
 
     # Label each component by its strongest edge type.
@@ -325,20 +320,51 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         keep_local, scores = select_keep(members, cfg)
         keep_file_id = int(rows[member_idx[keep_local]]["id"])
         gtype = comp_type.get(root, "burst")
-        keep_hash = rows[member_idx[keep_local]]["phash"]
-        distances = {
-            local: Q.hamming(keep_hash, rows[gi]["phash"])
-            for local, gi in enumerate(member_idx)
-        }
-        # DSU reachability is not enough: require every burst member to remain
-        # close to the selected representative, preventing A~B~C chaining from
-        # turning an outlier into an automatic removal.
-        if all(valid_embeddings[gi] for gi in member_idx):
-            purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
-                         for gi in member_idx)
+
+        # Validate time-span constraint for visual groups
+        # CRITICAL: visual groups (non-SHA) must have complete timestamps for all members
+        member_timestamps = [timestamps[gi] for gi in member_idx]
+        member_timestamps_valid = [t for t in member_timestamps if t is not None]
+        if gtype != "sha_exact":
+            # Visual groups MUST have timestamps for ALL members
+            if len(member_timestamps_valid) != len(member_idx):
+                # Incomplete timestamp coverage -> reject as untrusted
+                group_trusted = False
+                purity = -1.0
+            elif len(member_timestamps_valid) >= 2:
+                time_span = max(member_timestamps_valid) - min(member_timestamps_valid)
+                expected_window = {
+                    "phash_near": int(cc.get("burst_window_seconds", 30)),
+                    "burst": int(cc.get("burst_window_seconds", 30)),
+                    "similar_scene": int(cc.get("loose_window_seconds", 300)),
+                }.get(gtype, int(cc.get("burst_window_seconds", 30)))
+                if time_span > expected_window:
+                    # Transitive chain violation - downgrade trust
+                    group_trusted = False
+                    purity = -1.0
+                else:
+                    # DSU reachability is not enough: require every burst member to remain
+                    # close to the selected representative, preventing A~B~C chaining from
+                    # turning an outlier into an automatic removal.
+                    if all(valid_embeddings[gi] for gi in member_idx):
+                        purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
+                                     for gi in member_idx)
+                    else:
+                        purity = -1.0
+                    group_trusted = gtype == "burst" and purity >= float(cc.get("dinov2_threshold", 0.92))
+            else:
+                # Visual group with <2 valid timestamps -> untrusted
+                group_trusted = False
+                purity = -1.0
         else:
-            purity = -1.0
-        group_trusted = gtype == "burst" and purity >= float(cc.get("dinov2_threshold", 0.92))
+            # SHA-exact groups: always trusted for byte-identical members
+            if all(valid_embeddings[gi] for gi in member_idx):
+                purity = min(float(np.dot(units[member_idx[keep_local]], units[gi]))
+                             for gi in member_idx)
+            else:
+                purity = -1.0
+            group_trusted = gtype == "sha_exact"
+
         keeper_sha = rows[member_idx[keep_local]]["content_sha256"]
         safe_duplicates = {
             local: bool(keeper_sha and keeper_sha == rows[gi]["content_sha256"])
@@ -346,7 +372,7 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         }
         result = D.decide_group(
             members, keep_local, scores, gtype, profile=profile,
-            phash_distances=distances, group_trusted=group_trusted,
+            group_trusted=group_trusted,
             safe_duplicates=safe_duplicates,
         )
         member_tuples = []
@@ -396,6 +422,7 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
 def run(config_path: Optional[str] = None,
         root_override: Optional[str] = None) -> Dict[str, int]:
     cfg = load_config(config_path)
+    cfg.validate()  # Fail closed on invalid thresholds before any DB access
     # Fail closed before the database is opened/created (see stage 1).
     root_scope.preflight_stage(cfg.db_path, root_override, cfg.declared_root)
     conn = db.open_db(cfg.db_path)

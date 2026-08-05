@@ -107,12 +107,12 @@ features:
   yunet_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 cluster:
-  burst_window_seconds: 30       # Layer-2 sliding time window
+  burst_window_seconds: 30       # Visual grouping time window (pHash-near, DINO burst)
   dinov2_threshold: 0.92         # cosine >= this => same burst (higher = stricter)
-  phash_hamming_threshold: 2     # Layer-1 exact-dup: hamming <= this
+  phash_hamming_threshold: 2     # pHash near-dup: hamming <= this (within time window). Valid: 0-2
   face_pose_shift_ratio: 0.30    # face-center move > 30% of img width => split group
   min_face_score: 0.6            # ignore YuNet faces below this confidence
-  enable_loose_similar: false    # Layer-3 (slow, easy to over-merge). Off by default.
+  enable_loose_similar: false    # Layer-4 similar_scene (slow, easy to over-merge). Off by default.
   loose_window_seconds: 300
   loose_dinov2_threshold: 0.96
 

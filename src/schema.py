@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_review_index_file ON review_index(file_id);
 
 CREATE TABLE IF NOT EXISTS groups (
   id INTEGER PRIMARY KEY,
-  group_type TEXT,              -- 'exact_dup' | 'burst' | 'similar_scene'
+  group_type TEXT,              -- 'sha_exact' | 'phash_near' | 'burst' | 'similar_scene'
   keep_file_id INTEGER,
   member_count INTEGER,
   created_at INTEGER,
