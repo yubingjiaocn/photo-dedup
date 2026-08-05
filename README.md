@@ -484,8 +484,12 @@ src/stage1_backends.py      # DINOv2 + shape-grouped batched MUSIQ/CLIP-IQA + Yu
 src/stage1_setup.py         # admission, pending-work query, detectors, closing stats
 src/stage1_settings.py      # validated loop knobs + the stated memory bound
 scripts/gptk_delete.js      # Google Photos cloud-delete console script
+scripts/verification/       # real-weight/real-GPU checks CI cannot express
 docs/ALGORITHM.md           # every threshold explained
 docs/STAGE1_THROUGHPUT.md   # the measurements behind the throughput defaults
+docs/WINDOWS_BENCHMARK.md   # opt-in Windows throughput harness
+docs/archive/               # completed design research (why the thresholds are these)
+research/                   # runtime data only: SigLIP prompt bank (config points here)
 tests/                      # pytest suite (`python -m pytest tests/`)
 ```
 

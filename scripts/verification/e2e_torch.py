@@ -114,7 +114,7 @@ print(f"max |MUSIQ diff|      = {max_q:.3e}")
 print(f"max |CLIP-IQA diff|   = {max_clip:.3e}")
 print(f"max |sharpness diff|  = {max_sharp:.3e}   (must be 0: same CPU code)")
 print(f"max |embedding diff|  = {max_emb:.3e}   (float16 storage)")
-print(f"phash / sha256 / faces / exposure : IDENTICAL")
+print("phash / sha256 / faces / exposure : IDENTICAL")
 
 sc = serial_stats["phase_telemetry"]["counters"]
 fc = fast_stats["phase_telemetry"]["counters"]
