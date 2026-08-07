@@ -106,11 +106,19 @@ export function App({ deps }: { deps: AppDeps }) {
 
   // === async orchestration ================================================
 
-  const loadQueue = useCallback(async (opts: { keepIndex?: boolean } = {}) => {
+  const loadQueue = useCallback(async (opts: {
+    keepIndex?: boolean;
+    queue?: Queue;
+    page?: number;
+    size?: number;
+  } = {}) => {
     const generation = ++loadGenRef.current;
     const s = stateRef.current;
+    const targetQueue = opts.queue ?? s.queue;
+    const targetPage = opts.page ?? s.page;
+    const targetSize = opts.size ?? s.size;
     try {
-      const data = await api.fetchGroupPage(s.queue, s.page, s.size);
+      const data = await api.fetchGroupPage(targetQueue, targetPage, targetSize);
       if (generation !== loadGenRef.current) return;
       dispatch({ type: 'groupPageLoaded', data, keepIndex: opts.keepIndex === true });
       controllerRef.current!.reset();
@@ -119,11 +127,18 @@ export function App({ deps }: { deps: AppDeps }) {
     }
   }, [showToast]);
 
-  const loadBrowse = useCallback(async () => {
+  const loadBrowse = useCallback(async (opts: {
+    view?: BrowseView;
+    page?: number;
+    size?: number;
+  } = {}) => {
     const generation = ++loadGenRef.current;
     const s = stateRef.current;
+    const targetView = opts.view ?? (s.view as BrowseView);
+    const targetPage = opts.page ?? s.page;
+    const targetSize = opts.size ?? s.size;
     try {
-      const data = await api.fetchBrowsePage(s.view as BrowseView, s.page, s.size);
+      const data = await api.fetchBrowsePage(targetView, targetPage, targetSize);
       if (generation !== loadGenRef.current) return;
       dispatch({ type: 'browsePageLoaded', items: data.items || [], page: data.page, pages: data.pages, total: data.total });
       const status = await api.fetchStatus();
@@ -143,7 +158,7 @@ export function App({ deps }: { deps: AppDeps }) {
     async (name: Queue) => {
       if (QUEUES.indexOf(name) < 0) return;
       dispatch({ type: 'setQueue', queue: name });
-      await loadQueue();
+      await loadQueue({ queue: name, page: 1 });
     },
     [loadQueue],
   );
@@ -151,19 +166,25 @@ export function App({ deps }: { deps: AppDeps }) {
   const goView = useCallback(
     async (name: View) => {
       dispatch({ type: 'setView', view: name });
-      if (name === 'GROUPS') await loadQueue();
-      else await loadBrowse();
+      if (name === 'GROUPS') await loadQueue({ page: 1 });
+      else await loadBrowse({ view: name, page: 1 });
     },
     [loadQueue, loadBrowse],
   );
 
   const focusGroup = useCallback(
-    async (groupId: number, fileId: number | null) => {
+    async (groupId: number, fileId: number | null, target?: {
+      queue?: Queue;
+      size?: number;
+    }) => {
       const s = stateRef.current;
+      const targetQueue = target?.queue ?? s.queue;
+      const targetSize = target?.size ?? s.size;
       try {
-        const found = await api.locate(s.queue, groupId, s.size);
-        dispatch({ type: 'setPage', page: found.page || 1 });
-        await loadQueue();
+        const found = await api.locate(targetQueue, groupId, targetSize);
+        const targetPage = found.page || 1;
+        dispatch({ type: 'setPage', page: targetPage });
+        await loadQueue({ queue: targetQueue, page: targetPage, size: targetSize });
         const after = stateRef.current;
         const wanted = found.group_id != null ? Number(found.group_id) : null;
         const at = after.groups.findIndex((g) => Number(g.group_id) === wanted);
@@ -174,7 +195,7 @@ export function App({ deps }: { deps: AppDeps }) {
           if (hit >= 0) dispatch({ type: 'showIndex', index: hit });
         }
       } catch {
-        await loadQueue();
+        await loadQueue({ queue: targetQueue, page: 1, size: targetSize });
       }
     },
     [loadQueue],
@@ -186,8 +207,9 @@ export function App({ deps }: { deps: AppDeps }) {
       try {
         const next = await api.nextInQueue(s.queue, decidedGroupId, s.size);
         dispatch({ type: 'setQueueCounts', queueCounts: next.queue_counts || s.queueCounts });
-        dispatch({ type: 'setPage', page: next.page || 1 });
-        await loadQueue();
+        const targetPage = next.page || 1;
+        dispatch({ type: 'setPage', page: targetPage });
+        await loadQueue({ page: targetPage });
         const after = stateRef.current;
         const wanted = next.group_id != null ? Number(next.group_id) : null;
         const at = after.groups.findIndex((g) => Number(g.group_id) === wanted);
@@ -258,7 +280,7 @@ export function App({ deps }: { deps: AppDeps }) {
       const undone = data.undo;
       if (undone) {
         if (QUEUES.indexOf(undone.queue) >= 0) dispatch({ type: 'setQueue', queue: undone.queue });
-        await focusGroup(undone.group_id, undone.focus_file_id);
+        await focusGroup(undone.group_id, undone.focus_file_id, { queue: undone.queue });
         showToast(`已撤销上一步，回到分组 #${undone.group_id}`);
       }
     } catch (error) {
@@ -280,14 +302,16 @@ export function App({ deps }: { deps: AppDeps }) {
         return;
       }
       if (delta < 0 && s.page > 1) {
-        dispatch({ type: 'setPage', page: s.page - 1 });
-        await loadQueue();
+        const targetPage = s.page - 1;
+        dispatch({ type: 'setPage', page: targetPage });
+        await loadQueue({ page: targetPage });
         dispatch({ type: 'setGroupIndex', gIndex: Math.max(0, stateRef.current.groups.length - 1) });
         return;
       }
       if (delta > 0 && s.page < s.pages) {
-        dispatch({ type: 'setPage', page: s.page + 1 });
-        await loadQueue();
+        const targetPage = s.page + 1;
+        dispatch({ type: 'setPage', page: targetPage });
+        await loadQueue({ page: targetPage });
         dispatch({ type: 'setGroupIndex', gIndex: 0 });
         return;
       }
@@ -439,13 +463,18 @@ export function App({ deps }: { deps: AppDeps }) {
       restoreRef.current = { groupId: restored.restoreGroupId, fileId: restored.restoreFileId };
     }
     (async () => {
-      const s = stateRef.current;
-      if (mode(s) === 'queue' && restoreRef.current?.groupId != null) {
-        await focusGroup(restoreRef.current.groupId, restoreRef.current.fileId);
-      } else if (mode(s) === 'queue') {
-        await loadQueue();
+      const targetView = restored?.prefs.view ?? stateRef.current.view;
+      const targetQueue = restored?.prefs.queue ?? stateRef.current.queue;
+      const targetSize = restored?.prefs.size ?? stateRef.current.size;
+      if (targetView === 'GROUPS' && restoreRef.current?.groupId != null) {
+        await focusGroup(restoreRef.current.groupId, restoreRef.current.fileId, {
+          queue: targetQueue,
+          size: targetSize,
+        });
+      } else if (targetView === 'GROUPS') {
+        await loadQueue({ queue: targetQueue, page: 1, size: targetSize });
       } else {
-        await loadBrowse();
+        await loadBrowse({ view: targetView as BrowseView, page: 1, size: targetSize });
       }
       bootedRef.current = true;
     })();
@@ -460,6 +489,8 @@ export function App({ deps }: { deps: AppDeps }) {
         controllerRef.current!.reset();
       },
       goQueue,
+      goView,
+      loadBrowse: (view: BrowseView, page = 1, size = stateRef.current.size) => loadBrowse({ view, page, size }),
       focusGroup,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -543,7 +574,7 @@ export function App({ deps }: { deps: AppDeps }) {
         </div>
       )}
       {done && <DonePanel state={state} onGoLater={() => void goQueue('LATER')} onGoDone={() => void goQueue('DONE')} />}
-      {!inQueue && <BrowseList state={state} onOpen={(id) => void openBrowsePhoto(id)} onPage={(p) => { dispatch({ type: 'setPage', page: p }); void loadBrowse(); }} onSize={(sz) => { dispatch({ type: 'setSize', size: sz }); void loadBrowse(); }} />}
+      {!inQueue && <BrowseList state={state} onOpen={(id) => void openBrowsePhoto(id)} onPage={(p) => { dispatch({ type: 'setPage', page: p }); void loadBrowse({ page: p }); }} onSize={(sz) => { dispatch({ type: 'setSize', size: sz }); void loadBrowse({ page: 1, size: sz }); }} />}
       <Help open={state.helpOpen} onClose={() => dispatch({ type: 'setHelp', open: false })} />
       <Toast text={toast.text} show={toast.show} />
     </>
