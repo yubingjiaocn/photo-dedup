@@ -6,6 +6,14 @@ the filesystem; :mod:`src.review_page` substitutes the four placeholders
 (``PERFORMANCE_PANEL``, ``STATIC_NOTICE``, ``SUMMARY_TEXT``, ``STATIC_FALLBACK``)
 and writes the result.
 
+What the page deliberately does *not* show: the reviewer only needs to decide
+which photo to keep, so the visible UI carries no algorithm diagnostics
+(quality score, face count, per-member grouping reason) and no runtime/storage
+internals (stage timings, thumbnail-cache size, which disk a read comes from).
+The two diagnostic containers (``#perf``, ``#mode``) are still rendered, and
+still rewritten by the pipeline, but they are hidden -- ``performance.txt`` and
+the generated report stay the place where those numbers are read.
+
 Front-end boundaries this template must keep:
 
 * Every grid tile and every filmstrip frame is served by ``/api/thumb/<id>.jpg``,
@@ -33,6 +41,8 @@ body{font-family:system-ui,"Microsoft YaHei",Arial,sans-serif;margin:18px;backgr
 h1{font-size:20px;margin:0 0 8px}
 .stats,.notice{color:#9cf;margin:8px 0;font-size:13px;line-height:1.6}
 .notice{padding:9px 11px;background:#18232b;border-radius:6px}
+/* Diagnostics stay in the document (the pipeline rewrites #perf) but out of sight. */
+.diag{display:none!important}
 nav{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:12px 0}
 button,select{padding:6px 11px;background:#222;color:#eee;border:1px solid #555;border-radius:5px;cursor:pointer}
 button.on{background:#2b4;color:#000;font-weight:bold}
@@ -96,8 +106,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
 @media(max-width:700px){:root{--tile:min(100%,300px);--tileh:clamp(180px,45vw,300px)}}
 </style></head><body>
 <h1>照片去重 - 审阅</h1>
-<div class="notice" id="perf">PERFORMANCE_PANEL</div>
-<div class="notice" id="mode">STATIC_NOTICE</div>
+<div class="notice diag" id="perf" hidden>PERFORMANCE_PANEL</div>
+<div class="notice diag" id="mode" hidden>STATIC_NOTICE</div>
 <nav>
  <button data-view="ALL">全部（时间线）</button>
  <button data-view="MAYBE">待确认 MAYBE</button>
@@ -150,8 +160,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
    <tr><td>U</td><td>清除本组人工状态</td></tr>
   </table>
   <p style="color:#999;font-size:12px;margin-top:12px">A/P/M 后自动前进至下一组；若在相册模式按下，
-  大图保持打开并直接显示下一组，便于连续审阅（U 停在本组）。底部缩略图只读 SSD 缓存，
-  高清原图仅在相册模式打开时按需读取；所有状态仅写入 output 目录，原图永远只读。</p>
+  大图保持打开并直接显示下一组，便于连续审阅（U 停在本组）。
+  所有状态仅写入 output 目录，原图永远只读。</p>
   <button onclick="closeHelp()" style="width:100%;margin-top:12px">关闭 Esc</button>
  </div>
 </div>
@@ -183,10 +193,12 @@ function badges(r,aiId,humanId,short){
 }
 function thumbTag(r,attrs){
  const fid=Number(r.file_id);
+ // Short, plain wording on failure: the reviewer needs to know the preview is
+ // missing, not which decoder raised what.
  return r.thumb==='ok'
   ?`<img loading="lazy" src="/api/thumb/${fid}.jpg" ${attrs||''}`
-   +` onerror="this.outerHTML='<div class=miss>缩略图缺失<br>（不会自动回源读取机械盘）</div>'">`
-  :`<div class=miss>缩略图不可用<br>${esc(r.thumb_error||r.thumb||'未生成')}</div>`;
+   +` onerror="this.outerHTML='<div class=miss>缩略图缺失</div>'">`
+  :`<div class=miss>缩略图不可用</div>`;
 }
 function photoTile(r,index,aiId,humanId){
  const cls=esc(String(r.decision||'ungrouped').toLowerCase());
@@ -194,11 +206,10 @@ function photoTile(r,index,aiId,humanId){
  const human=humanId!=null&&Number(humanId)===fid;
  const idxAttr=index==null?'':` data-card-index="${index}"`;
  return `<div class="card ${cls}${human?' keep':''}" data-file-id="${fid}"${idxAttr}>`
-  +thumbTag(r,`onclick="openViewer(${fid})" title="点击按需从原图库加载高清大图"`)
+  +thumbTag(r,`onclick="openViewer(${fid})" title="点击查看高清大图"`)
   +`<div class=cap><span class=tag>${esc(r.decision)}</span>${badges(r,aiId,humanId)}<br>`
-  +`${esc(r.basename)}<br>${r.width||'?'}x${r.height||'?'}`
-  +` &middot; 质量=${r.quality_score??'?'} &middot; 人脸=${r.face_count??'?'}<br>`
-  +`${esc(r.exif_datetime||'无拍摄时间')}<br>${esc(r.reason||'')}`
+  +`${esc(r.basename)}<br>${r.width||'?'}x${r.height||'?'}<br>`
+  +`${esc(r.exif_datetime||'无拍摄时间')}`
   +`<button onclick="openViewer(${fid})">查看高清大图</button>`
   +(index==null?'':`<button onclick="pickKeeper(${fid})">P 设为keeper</button>`)
   +`</div></div>`;
@@ -249,11 +260,10 @@ function updateStats(d,s){
  const groups=document.querySelectorAll('.group');
  const globalOffset=(d.page-1)*d.page_size+(focusedGroupIndex>=0?focusedGroupIndex+1:1);
  const itemLabel=view==='GROUPS'?'组':'项';
- stats.textContent=`${view}：共 ${d.total} ${itemLabel} · 第 ${d.page}/${d.pages} 页 · 本页 ${d.shown} ${itemLabel}`
-  +` · 本页之后还剩 ${d.remaining_after_page} ${itemLabel}`;
- if(view==='GROUPS'&&groups.length>0)stats.textContent+=` · 已审 ${rs.reviewed}/${d.total} · 稍后 ${rs.marked} · 当前 ${globalOffset}/${d.total}`;
- stats.textContent+=` · 缩略图缓存 ${s.thumb_cache_files} 个文件 / `
-  +`${(s.thumb_cache_bytes/1073741824).toFixed(2)} GiB`;
+ // Progress only: how much there is, where you are, how much you have decided.
+ stats.textContent=`${view}：共 ${d.total} ${itemLabel} · 第 ${d.page}/${d.pages} 页`;
+ if(view==='GROUPS'&&groups.length>0)stats.textContent+=` · 当前 ${globalOffset}/${d.total}`
+  +` · 已审 ${rs.reviewed}/${d.total} · 稍后 ${rs.marked}`;
 }
 async function load(preserveFocus){
  const generation=++loadGeneration;
@@ -266,10 +276,6 @@ async function load(preserveFocus){
   if(generation!==loadGeneration)return;
   if(d.error)throw new Error(d.error);
   page=d.page;pages=d.pages;
-  document.getElementById('mode').textContent=
-   '本地服务器模式。列表与相册底栏的缩略图仅从 Stage 1 写入的 SSD 缓存读取，翻页绝不会回源读取机械盘上的原图；'
-   +'高清原图只在你打开相册模式时按需读取。'
-   +'本页面只读：不会移动、删除或修改任何原图。';
   groupMembers=new Map();
   if(view==='GROUPS')d.items.forEach(g=>groupMembers.set(Number(g.group_id),g.members||[]));
   visibleItems=view==='GROUPS'?d.items.flatMap(g=>g.members||[]):d.items;
@@ -307,7 +313,7 @@ function showOne(r){
  document.getElementById('leftLabel').innerHTML=
   `${esc(r.decision)} · ${esc(r.basename)}${badges(r,aiId,humanId)}`;
  document.getElementById('viewerTitle').textContent=
-  `高清原图（按需读取 HDD） ${r.width||'?'}×${r.height||'?'}`
+  `${r.width||'?'}×${r.height||'?'}`
   +` · 组内第 ${viewerIndex+1}/${viewerItems.length} 张`
   +(viewerGroupId!=null?` · 分组 #${viewerGroupId}`:'');
  document.getElementById('compare').style.display=

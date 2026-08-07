@@ -12,6 +12,11 @@ everything here:
   local server fills page by page from SQLite, so a 100k-photo library does not
   become a 100k-entry HTML document. The static block is only a small
   ``file://`` fallback.
+* **Diagnostics are generated but not displayed.** The performance panel is
+  still written (and later rewritten in place by the pipeline) so
+  ``review.html`` remains a complete report artifact, but the reviewer's page
+  hides it along with the storage-mode notice; tiles carry no quality score,
+  face count or grouping reason.
 
 The UI text is Chinese; internal state names (MAYBE/UNKNOWN/KEEP/AUTO_REMOVE and
 group types) stay English to match the database and the manifests.
@@ -20,6 +25,7 @@ group types) stay English to match the database and the manifests.
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -54,22 +60,24 @@ _STATIC_NOTICE = (
 
 
 def _tile(output_dir: Path, rec: Dict[str, Any]) -> str:
-    """Static-fallback tile using only an already-cached SSD thumbnail."""
+    """Static-fallback tile using only an already-cached SSD thumbnail.
+
+    Shows what a reviewer needs to recognise the photo (decision, name, pixel
+    size, capture time) and no algorithm diagnostics: quality score, face count
+    and the internal grouping ``reason`` stay out of the UI.
+    """
     decision = str(rec.get("decision") or "UNKNOWN")
     uri = cached_thumb_uri(output_dir, rec.get("file_id"))
     if uri:
         image = f'<img loading="lazy" src="{html.escape(uri)}">'
     else:
         image = '<div class="miss">缩略图不可用<br>thumbnail unavailable</div>'
-    score = rec.get("quality_score")
-    score_txt = f"{score:.1f}" if isinstance(score, (int, float)) else "?"
     return (
         f'<div class="card {html.escape(decision.lower())}">{image}<div class="cap">'
         f'<span class="tag">{html.escape(decision)}</span><br>'
         f'{html.escape(str(rec.get("basename") or ""))}<br>'
-        f'{rec.get("width") or "?"}x{rec.get("height") or "?"} &middot; 质量={score_txt} '
-        f'&middot; 人脸={rec.get("face_count") if rec.get("face_count") is not None else "?"}<br>'
-        f'{html.escape(str(rec.get("reason") or ""))}</div></div>'
+        f'{rec.get("width") or "?"}x{rec.get("height") or "?"}<br>'
+        f'{html.escape(str(rec.get("exif_datetime") or "无拍摄时间"))}</div></div>'
     )
 
 
@@ -106,8 +114,13 @@ def render_html(
     )
 
 
-_PANEL_START = '<div class="notice" id="perf">'
+_PANEL_START = '<div class="notice diag" id="perf" hidden>'
 _PANEL_END = "</div>"
+# The panel is hidden from the reviewer but still rewritten in place, so match the
+# opening tag by its id instead of its exact attribute list. That keeps pages
+# produced by earlier versions (plain ``<div class="notice" id="perf">``)
+# rewritable too.
+_PANEL_OPEN_RE = re.compile(r'<div\b[^>]*\bid="perf"[^>]*>')
 
 
 def rewrite_performance_panel(review_html: Path, panel: str) -> bool:
@@ -117,10 +130,10 @@ def rewrite_performance_panel(review_html: Path, panel: str) -> bool:
         text = review_html.read_text(encoding="utf-8")
     except OSError:
         return False
-    start = text.find(_PANEL_START)
-    if start < 0:
+    opening = _PANEL_OPEN_RE.search(text)
+    if opening is None:
         return False
-    body_start = start + len(_PANEL_START)
+    body_start = opening.end()
     end = text.find(_PANEL_END, body_start)
     if end < 0:
         return False

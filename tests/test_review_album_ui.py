@@ -9,6 +9,12 @@ without a browser:
 * assert the security boundary that matters here: the filmstrip and the grid
   address ``/api/thumb/<id>.jpg`` only, ``/api/original/<id>`` appears only on
   the explicitly opened viewer panes, and no source path is ever rendered.
+
+Section 7 additionally pins the *absence* of algorithm and runtime diagnostics
+from the visible UI: quality scores, face counts, grouping reasons, per-page
+remainders, thumbnail-cache sizes and which physical disk a read comes from are
+not the reviewer's business, even though the underlying API still returns them
+and ``review.html`` still carries the (hidden) performance panel.
 """
 
 from __future__ import annotations
@@ -131,6 +137,10 @@ console.log(JSON.stringify({
     # The un-thumbnailed member degrades to a placeholder, never a source read.
     assert "缩略图不可用" in out["html"]
     assert "width:190px" not in out["html"]
+    # The placeholder stays short and human: no decoder exception detail, no
+    # lecture about which disk is or is not being read.
+    assert "decode failed" not in out["html"]
+    assert "机械盘" not in out["html"] and "HDD" not in out["html"]
 
 
 # --- 2. album layout: one main photo + clickable filmstrip -----------------
@@ -354,3 +364,172 @@ def test_page_never_renders_a_source_path_field():
     page = review_template.PAGE_TEMPLATE
     for forbidden in ("r.path", "m.path", "item.path", "record.path", "file://"):
         assert forbidden not in page, f"template references {forbidden}"
+
+
+# --- 7. no diagnostics in the visible UI ----------------------------------
+
+# Substrings that must not appear anywhere in the template or in the markup the
+# render helpers produce. Algorithm internals (left) and runtime/storage
+# internals (right) are equally out of scope for a reviewer who only has to pick
+# a photo.
+_DIAGNOSTIC_STRINGS = (
+    "r.quality_score", "r.face_count", "r.reason", "r.thumb_error",
+    "质量=", "人脸=",
+    "d.shown", "d.remaining_after_page",
+    "s.thumb_cache_files", "s.thumb_cache_bytes", "缩略图缓存", "GiB",
+    "HDD", "机械盘", "回源", "SSD 缓存", "本地服务器模式",
+)
+
+
+def test_template_contains_no_diagnostic_strings():
+    page = review_template.PAGE_TEMPLATE
+    for forbidden in _DIAGNOSTIC_STRINGS:
+        assert forbidden not in page, f"template still shows diagnostic {forbidden!r}"
+
+
+def test_rendered_page_contains_no_diagnostic_strings():
+    """Same gate on the assembled page, so a placeholder cannot smuggle them back.
+
+    ``GiB`` is checked against the template only: the assembled page legitimately
+    reports how much space the AUTO_REMOVE manifest would reclaim, which is a
+    number the user acts on, unlike the thumbnail-cache size that used to sit in
+    the stats line.
+    """
+    data = {"groups": [], "queues": {"MAYBE": [], "UNKNOWN": []},
+            "delete_paths": [], "total_delete_bytes": 0}
+    page = review_page.render_html(data, Path("/tmp"), review_limit=0)
+    for forbidden in ("质量=", "人脸=", "缩略图缓存", "HDD", "机械盘", "回源"):
+        assert forbidden not in page, f"rendered page still shows {forbidden!r}"
+
+
+def test_photo_tile_shows_identity_not_scores():
+    """A card keeps decision, keeper badges, name, size and capture time only."""
+    probe = _MEMBERS + """
+console.log(JSON.stringify({
+ keeper:photoTile(members[1],1,12,11),
+ dup:photoTile(members[0],0,12,11)}));
+"""
+    out = _run_js(probe)
+    keeper, dup = out["keeper"], out["dup"]
+    # Kept: what the photo is and what the machine/human decided about it.
+    assert "KEEP" in keeper and "IMG_0002.jpg" in keeper
+    assert "4000x3000" in keeper
+    assert 'class="badge ai"' in keeper
+    assert 'class="badge human"' in dup  # human keeper is file 11
+    assert "查看高清大图" in keeper and "pickKeeper(" in keeper
+    # Dropped: the numbers only the algorithm cares about.
+    for html_out in (keeper, dup):
+        assert "71.5" not in html_out and "41.2" not in html_out
+        assert "质量" not in html_out and "人脸" not in html_out
+        assert "best" not in html_out and "low margin" not in html_out
+
+
+def test_stats_line_reports_progress_only():
+    """updateStats must show totals/paging/review progress and nothing else."""
+    probe = """
+const d={page:2,pages:5,total:120,page_size:10,shown:10,remaining_after_page:100};
+const s={review_state:{reviewed:7,marked:2,total:120},
+ thumb_cache_files:250,thumb_cache_bytes:1073741824};
+view='GROUPS';updateStats(d,s);
+const groupsText=document.getElementById('stats').textContent;
+view='ALL';updateStats(d,s);
+console.log(JSON.stringify({groupsText,allText:document.getElementById('stats').textContent}));
+"""
+    out = _run_js(probe)
+    for text in (out["groupsText"], out["allText"]):
+        assert "120" in text and "2/5" in text          # total and page position
+        assert "缩略图缓存" not in text and "GiB" not in text
+        assert "本页之后还剩" not in text and "100" not in text
+        assert "250" not in text
+    # GROUPS adds review progress; the DOM stub reports no .group nodes, so the
+    # 'current' offset is only appended when groups actually exist.
+    assert "已审" not in out["allText"]
+
+
+def test_stats_line_adds_review_progress_when_groups_are_present():
+    probe = """
+const fake=[{},{},{}];
+document.querySelectorAll=sel=>sel==='.group'?fake:[];
+const d={page:1,pages:1,total:3,page_size:10,shown:3,remaining_after_page:0};
+const s={review_state:{reviewed:1,marked:1,total:3},
+ thumb_cache_files:9,thumb_cache_bytes:1073741824};
+view='GROUPS';focusedGroupIndex=1;updateStats(d,s);
+console.log(JSON.stringify({text:document.getElementById('stats').textContent}));
+"""
+    out = _run_js(probe)
+    text = out["text"]
+    assert "已审 1/3" in text and "稍后 1" in text and "当前 2/3" in text
+    assert "GiB" not in text and "缩略图缓存" not in text
+
+
+def test_viewer_title_shows_size_and_position_not_the_storage_path():
+    probe = _MEMBERS + """
+viewerItems=members;viewerIndex=2;viewerGroupId=7;view='GROUPS';
+showOne(members[2]);
+console.log(JSON.stringify({title:document.getElementById('viewerTitle').textContent,
+ label:document.getElementById('leftLabel').innerHTML}));
+"""
+    out = _run_js(probe)
+    title = out["title"]
+    assert "4000×3000" in title
+    assert "组内第 3/3 张" in title
+    assert "分组 #7" in title
+    # No implementation detail about where the pixels came from.
+    assert "HDD" not in title and "按需读取" not in title and "原图" not in title
+    # The pane label still identifies the photo and its keeper status.
+    assert "IMG_0003.jpg" in out["label"] and "MAYBE" in out["label"]
+
+
+def test_diagnostic_containers_exist_but_are_hidden():
+    """#perf/#mode stay in the document so the pipeline can still rewrite them."""
+    page = review_template.PAGE_TEMPLATE
+    assert 'id="perf"' in page and 'id="mode"' in page
+    for block in ('<div class="notice diag" id="perf" hidden>',
+                  '<div class="notice diag" id="mode" hidden>'):
+        assert block in page, f"missing hidden diagnostic container: {block}"
+    assert ".diag{display:none!important}" in page
+    # The mode notice is no longer re-filled with storage prose on every load.
+    assert "document.getElementById('mode').textContent=" not in page
+
+
+def test_performance_panel_is_still_generated_and_rewritable(tmp_path):
+    """Hiding the panel must not break the report: content and rewrite survive."""
+    data = {"groups": [], "queues": {"MAYBE": [], "UNKNOWN": []},
+            "delete_paths": [], "total_delete_bytes": 0}
+    review = tmp_path / "review.html"
+    review.write_text(
+        review_page.render_html(data, tmp_path, review_limit=0,
+                                performance_panel="stage1 12.5s"),
+        encoding="utf-8")
+    assert "stage1 12.5s" in review.read_text(encoding="utf-8")
+    assert review_page.rewrite_performance_panel(review, "stage1 9.0s") is True
+    text = review.read_text(encoding="utf-8")
+    assert "stage1 9.0s" in text and "stage1 12.5s" not in text
+
+
+def test_static_fallback_tile_drops_scores_and_keeps_identity(tmp_path):
+    """The file:// fallback follows the same rule as the served tiles."""
+    rec = {"file_id": 3, "basename": "IMG_0003.jpg", "decision": "MAYBE",
+           "width": 4000, "height": 3000, "quality_score": 55.0, "face_count": 2,
+           "reason": "low margin", "exif_datetime": "2026-01-01 09:30:00"}
+    tile = review_page._tile(tmp_path, rec)
+    assert "IMG_0003.jpg" in tile and "MAYBE" in tile
+    assert "4000x3000" in tile and "2026-01-01 09:30:00" in tile
+    assert "55.0" not in tile and "质量" not in tile
+    assert "人脸" not in tile and "low margin" not in tile
+
+
+def test_public_api_still_returns_the_diagnostic_fields(tmp_path):
+    """Only the UI is trimmed: the read-only API contract is unchanged."""
+    from src import review_server
+
+    row = {"file_id": 5, "group_id": 1, "decision": "MAYBE", "basename": "a.jpg",
+           "width": 10, "height": 8, "size_bytes": 99, "exif_datetime": None,
+           "file_kind": "jpg", "quality_score": 55.5, "face_count": 2,
+           "reason": "low margin", "thumb_status": "ok", "thumb_error": None,
+           "is_keep": 0}
+    item = review_server._public_item(row)
+    assert item["quality_score"] == 55.5
+    assert item["face_count"] == 2
+    assert item["reason"] == "low margin"
+    assert "path" not in item
