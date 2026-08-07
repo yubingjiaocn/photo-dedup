@@ -15,11 +15,14 @@ everything here:
 * **Diagnostics are generated but not displayed.** The performance panel is
   still written (and later rewritten in place by the pipeline) so
   ``review.html`` remains a complete report artifact, but the reviewer's page
-  hides it along with the storage-mode notice; tiles carry no quality score,
-  face count or grouping reason.
+  hides it along with the storage-mode notice. Algorithm diagnostics (quality
+  score, face count, grouping reason) are reachable only through the workbench's
+  collapsible 推荐依据 panel, for the one group on screen; fallback tiles carry
+  none of them.
 
-The UI text is Chinese; internal state names (MAYBE/UNKNOWN/KEEP/AUTO_REMOVE and
-group types) stay English to match the database and the manifests.
+The UI text is Chinese; internal values (MAYBE/UNKNOWN/KEEP/AUTO_REMOVE and
+group types) are translated for display with the original value kept beside them
+in small type, so the page and the database stay easy to line up.
 """
 
 from __future__ import annotations
@@ -54,9 +57,18 @@ def cached_thumb_uri(output_dir: Path, file_id: int | None) -> str | None:
 
 
 _STATIC_NOTICE = (
-    "静态后备页面。请启动本地服务器（默认开启）以分页浏览完整的全部时间线、"
-    "MAYBE、UNKNOWN 和 GROUPS 视图。"
+    "静态后备页面。请启动本地服务器（默认开启）以使用未审队列工作台，"
+    "以及分页浏览完整的全部时间线、待确认和未知视图。"
 )
+
+# Display names for the decisions a fallback tile can carry. The internal value
+# is still shown, in small type, so a tile can be matched to the database.
+_DECISION_LABELS = {
+    "KEEP": "保留",
+    "AUTO_REMOVE": "建议删除",
+    "MAYBE": "待确认",
+    "UNKNOWN": "未知",
+}
 
 
 def _tile(output_dir: Path, rec: Dict[str, Any]) -> str:
@@ -67,6 +79,7 @@ def _tile(output_dir: Path, rec: Dict[str, Any]) -> str:
     and the internal grouping ``reason`` stay out of the UI.
     """
     decision = str(rec.get("decision") or "UNKNOWN")
+    label = _DECISION_LABELS.get(decision.upper(), decision)
     uri = cached_thumb_uri(output_dir, rec.get("file_id"))
     if uri:
         image = f'<img loading="lazy" src="{html.escape(uri)}">'
@@ -74,7 +87,8 @@ def _tile(output_dir: Path, rec: Dict[str, Any]) -> str:
         image = '<div class="miss">缩略图不可用<br>thumbnail unavailable</div>'
     return (
         f'<div class="card {html.escape(decision.lower())}">{image}<div class="cap">'
-        f'<span class="tag">{html.escape(decision)}</span><br>'
+        f'<span class="tag">{html.escape(label)}</span>'
+        f'<span class="enum">{html.escape(decision)}</span><br>'
         f'{html.escape(str(rec.get("basename") or ""))}<br>'
         f'{rec.get("width") or "?"}x{rec.get("height") or "?"}<br>'
         f'{html.escape(str(rec.get("exif_datetime") or "无拍摄时间"))}</div></div>'
@@ -105,9 +119,9 @@ def render_html(
         .replace(
             "SUMMARY_TEXT",
             f'分组 {len(data["groups"])} 个 &middot; '
-            f'建议自动删除（AUTO_REMOVE）{len(data["delete_paths"])} 个文件 &middot; '
-            f'MAYBE {len(data["queues"]["MAYBE"])} &middot; '
-            f'UNKNOWN {len(data["queues"]["UNKNOWN"])} &middot; '
+            f'建议自动删除 {len(data["delete_paths"])} 个文件 &middot; '
+            f'待确认 {len(data["queues"]["MAYBE"])} &middot; '
+            f'未知 {len(data["queues"]["UNKNOWN"])} &middot; '
             f'约可释放 {data["total_delete_bytes"] / (1024 ** 3):.2f} GiB',
         )
         .replace("STATIC_FALLBACK", "".join(blocks))

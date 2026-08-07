@@ -51,8 +51,8 @@ never moves or deletes a photo**.
    start "" "C:\photo-review\review.html"
    ```
 
-   With `--no-serve` the page shows a small static preview only; the full paged
-   ALL/MAYBE/UNKNOWN/GROUPS browsing needs the local server.
+   With `--no-serve` the page shows a small static preview only; the review
+   workbench and the paged ALL/MAYBE/UNKNOWN browsing need the local server.
 
    Every run also appends a diagnostic log to
    **`<output>\photo-dedup.log`**. It captures the console output, Python and
@@ -180,42 +180,47 @@ and you get the fast layout for free. `_trash` defaults to `E:/Photos/_trash`.
 Stage 1 writes one ~320 px JPEG per still image into `output/thumbs/`, named by
 inventory file id, using the image it had already decoded for the models — no
 extra read and no second decode. Stage 3 then builds a compact ordered index
-inside SQLite, and the local server pages it:
+inside SQLite, and the local server pages it.
 
-* **ALL** — the complete timeline of every still image, ordered by capture time
-  then directory then filename, with each photo's decision if it has one.
-* **MAYBE** / **UNKNOWN** — the risk-sorted review queues.
-* **GROUPS** — keeper vs. candidates per group.
+The page opens on the **review workbench**: the pending group queue, one group at
+a time. Beside it are two re-entry queues and three browse lists:
 
-Page size is 50, 100 (default), or 200. Pages come from SQLite with
-`LIMIT/OFFSET`, so the browser never downloads a 100k-entry JSON document, and
+* **未审 / 稍后 / 已完成** — the group queues (no human decision yet / marked for
+  later / accepted or picked). Each tab shows its own count.
+* **全部（时间线）** — the complete timeline of every still image, ordered by
+  capture time then directory then filename, with each photo's decision if it
+  has one.
+* **待确认** / **未知** — the risk-sorted review lists (`MAYBE` / `UNKNOWN`).
+
+Queue membership is computed **on the server**: `/api/page?view=GROUPS&queue=…`
+returns one page of that queue with the queue's own `total`, so the browser never
+downloads the whole group list to filter it. Page size is 50, 100 (default), or
+200, and every page comes from SQLite with `LIMIT/OFFSET`.
+
 `/api/thumb/<id>.jpg` serves **only** files that already exist in
 `output/thumbs`. A photo whose thumbnail could not be produced shows an explicit
-"thumbnail unavailable" tile with the recorded reason (also listed in
-`review_summary.json` and `summary.txt`) — it is never silently blank and never
-triggers a fallback read of the original.
+"thumbnail unavailable" tile (the reason is recorded in `review_summary.json` and
+`summary.txt`) — it is never silently blank and never triggers a fallback read of
+the original.
 
-Normal browsing and pagination remain SSD-thumbnail-only. Grid tiles scale with
-the window (a responsive `auto-fill` grid, ~240–460px per tile, collapsing to one
-column on a narrow window) so faces are actually judgeable without opening
-anything — they are still just the cached thumbnails.
+Browsing and pagination remain SSD-thumbnail-only. Browse tiles scale with the
+window (a responsive `auto-fill` grid collapsing to one column when narrow), and
+**D** switches between 舒适 and 紧凑 density, which is remembered. A tile is one
+click anywhere on the card.
 
-Clicking **查看高清大图** is the sole opt-in HDD read: the loopback server streams
-exactly that inventoried JPEG/PNG after validating its stored size and mtime. It
-never returns a source path. Closing the viewer releases the image URLs.
+Reading an original is the only HDD access, and only for what is on screen: the
+loopback server streams exactly that inventoried JPEG/PNG after validating its
+stored size and mtime, and never returns a source path. Leaving a photo releases
+the image URL. Nothing is prefetched — JSON and thumbnails are cheap, originals
+are not.
 
-In GROUPS the viewer is an **album browser**: one large main photo plus a
-clickable thumbnail strip of the whole group along the bottom. The strip is fed
-by `/api/thumb/<id>.jpg` (SSD cache) and marks, distinguishably, the photo you
-are on (`当前`), the AI keeper (`🤖AI`) and your own keeper (`👤人工`). Only the
-main photo is an original read; `C` still opens the temporary two-pane split
-against the AI keeper (at most two originals) and toggles back. `←/H` and `→/L`
-stay within the group.
-
-The page is in Chinese; internal state names (`MAYBE`, `UNKNOWN`, `KEEP`,
-`AUTO_REMOVE`, group types) stay in English so they match the DB, the manifests,
-and `docs/ALGORITHM.md`. The server binds `127.0.0.1` only — it is not reachable
-from the LAN.
+The page is in Chinese. Internal values (`MAYBE`, `UNKNOWN`, `KEEP`,
+`AUTO_REMOVE`, group types, grouping reasons) are translated for display and kept
+verbatim in small type next to the translation, so the UI still lines up with the
+DB, the manifests and `docs/ALGORITHM.md`. Status colours are consistent: yellow
+is focus, green is finished, blue/violet is the AI recommendation, orange is
+"later", and red means destructive only. The server binds `127.0.0.1` only — it
+is not reachable from the LAN.
 
 Re-runs reuse thumbnails only when the recorded source size/mtime and pixel size
 still match and the JPEG is really on disk; edit or replace an original and its
@@ -223,49 +228,117 @@ thumbnail is regenerated instead of served stale. Delete `output/thumbs/` to
 rebuild the cache from scratch (that costs another Stage 1 pass over those
 photos).
 
-### GROUPS review workbench (keyboard-first)
+### The review workbench (keyboard-first)
 
-The GROUPS view supports keyboard-driven review with persistent human decisions.
+The workbench is on screen as soon as the page loads — there is nothing to open
+first. It has a group header (position in the queue, group type, member count,
+current decision), one main photo, a filmstrip of the whole group, and a fixed
+action bar.
 
-**List navigation** (GROUPS mode):
-- `↑/K` — previous group
-- `↓/J` — next group
-- `←/H` — previous photo in group
-- `→/L` — next photo in group
-- `Enter/Space` — open/close the high-res album viewer
-- `C` — compare current photo vs. AI keeper
-- `Esc` — close viewer/help
-- `?/F1` — show keyboard shortcuts
+**Review actions**
 
-**Inside the open album viewer** the same keys keep working, so a review run
-never needs the mouse:
-- `←/H`, `→/L` — previous/next photo in the group (clicking a strip frame is equivalent)
-- `C` — toggle the temporary two-pane comparison against the AI keeper
-- `A`, `P`, `M`, `U` — the review actions below
-- `Enter/Space` or `Esc` — close
+| Key | Action |
+|---|---|
+| `A` | 保留 AI 推荐 — the group is finished and leaves the pending queue |
+| `P` | 保留当前照片 — the photo on stage becomes the keeper; group finished |
+| `M` | 稍后处理 — the group moves to the 稍后 queue |
+| `U` | 撤销上一步 — undo the most recent decision and jump back to that group and photo |
 
-**Review actions** (focused group, from the list or the viewer):
-- `A` — accept AI keeper, mark reviewed (auto-advance)
-- `P` — set the *currently shown* photo as human keeper, mark reviewed (auto-advance)
-- `M` — mark group for later review (auto-advance)
-- `U` — clear human decision for this group (no advance)
+Each action shows a short toast and moves on by itself, so a whole queue can be
+walked from the keyboard. One write is in flight at a time: a held key or a fast
+double-tap decides the group once, not twice, and the buttons are disabled while
+the request is out. `A` is unavailable for a group that has no AI recommendation
+in this scope (which a group straddling two photo roots can produce) — use `P`.
+After each decision the server is asked which group comes next in the queue, so
+advancing is always forward even when the queue loses a whole page. `U` is a real undo: the server keeps a bounded history
+in `review_state.json`, so it restores the group's exact previous state —
+including "no decision at all" — survives a page reload or a server restart, and
+refuses to reach outside the current photo root. It also comes back to the photo
+that was on screen, not the group's first member: every decision sends a
+`context_file_id` that the server validates as a member of that group and stores
+beside the undo step, never inside the decision (`A`/`M` still choose no photo).
+When the pending queue empties, the page says **本轮审阅完成** and offers the 稍后
+and 已完成 counts to jump to, rather than sitting on the last group.
 
-After `A`/`P`/`M` the next group is focused as before, and if the album viewer was
-open it **stays open** on that next group — so you can sit on `P`/`A` and walk a
-whole page of groups at full resolution. `U` keeps you on the current photo.
+**Navigation**
 
-All human decisions are stored in `output/review_state.json` (atomic writes on every
-change). **Original photos remain read-only**; AI decisions and deletion manifests
-are unchanged. Human state is an independent overlay. The review UI shows total/reviewed/marked
-counts and highlights reviewed/marked groups with color-coded borders.
+| Key | Action |
+|---|---|
+| `J`/`↓`, `K`/`↑` | next / previous group |
+| `L`/`→`, `H`/`←` | next / previous photo in the group (clicking a filmstrip frame is equivalent) |
+| `Esc` | close the browse viewer / close help |
+| `?`/`F1` | keyboard help |
 
-Delete manifests still contain only byte-identical `AUTO_REMOVE` items. Manual decisions
-do not create new deletion entries — they guide which groups need further attention.
+**Looking at the photo**
 
-`tests/test_review_album_ui.py` gates the template in CI (it runs the embedded
-script in `node` behind a DOM stub and asserts the thumb-only/original-on-demand
-boundary); `scripts/verification/album_viewer_browser.py` is the real-Chromium
-pass over the same behaviour.
+| Key | Action |
+|---|---|
+| hold `C` | blink the main photo to the AI recommendation; release to come back |
+| `Shift`+`C` | two-pane compare (current vs. AI recommendation), again to close |
+| wheel / drag | zoom / pan; both panes stay in sync while comparing |
+| `F` or double click | back to fit |
+| `1` | 100% (actual pixels) |
+| `E` | show/hide 推荐依据 |
+| `D` | list density 舒适 / 紧凑 |
+
+Scale is capped and pan is bounded to the scaled image, so a photo cannot be
+zoomed or dragged out of sight. The shortcut hint is always visible in the action
+bar.
+
+**推荐依据** is the one place algorithm diagnostics appear: closed by default, and
+when opened it shows the quality score, face count, system decision and reason
+for the members of the group on screen, with Chinese labels and the internal enum
+in small type. Cards, headers and the progress line carry none of it.
+
+A reload restores the queue, the density, the 推荐依据 state and the group you
+were on; if that group has meanwhile left the queue, `/api/locate` lands you on
+the next one.
+
+All human decisions are stored in `output/review_state.json` (atomic writes on
+every change). **Original photos remain read-only**; AI decisions and deletion
+manifests are unchanged. Human state is an independent overlay.
+
+The page is the only thing served statically: `/api/action` requires a JSON
+content type and rejects a cross-site `Origin`/`Referer` (a header-less local
+script still works), and every other file in the output directory — the deletion
+manifests, the review state, the summary, the log — is reachable only through the
+read-only API, or not at all. `review_state.json` is written compactly and fsynced
+before the rename, so a power loss cannot leave a truncated file behind. A file
+this build cannot read is renamed to `review_state.corrupt-<timestamp>.json` and
+the reviewer sees a banner at the top of the page saying so and naming the kept
+file — review continues normally, and new decisions save. If that rename itself
+cannot be done, the decision is **refused** rather than overwriting the file the
+warning just promised to keep. A write that fails for any other reason is rolled
+back in memory too, so the API never reports a decision that is not on disk and
+the next successful write cannot smuggle a failed one along.
+
+Because a Stage 2 rerun can hand the same `group_id` to a different set of
+photos, every decision *and* every undo step records the fingerprint of the
+members it was about, and all of them are re-checked against the group's current
+members when the server starts. Anything that cannot be proven to still match is
+ignored — including a step whose decision was already cleared, which is otherwise
+exactly how a stale decision could come back through undo. Pruning happens in
+memory only, and the original file is copied to `review_state.pre-prune.json`
+first, so nothing the reviewer recorded is destroyed.
+
+Delete manifests still contain only byte-identical `AUTO_REMOVE` items. Manual
+decisions do not create new deletion entries — they guide which groups need
+further attention.
+
+The queues are classified in memory from `review_state.json` on each request,
+which is comfortably fast at the size this tool targets:
+`tests/test_review_scale.py` holds a synthetic 30k-group library under a loose
+per-interaction ceiling as a regression fence. Much larger libraries are not a
+tested configuration — the review index in SQLite scales, this in-memory
+classification is what would need to move first.
+
+`tests/test_review_queues.py` gates the queue totals, paging, state transitions,
+undo and root scoping; `tests/test_review_hardening.py` gates the cross-site,
+static-exposure and state-durability rules; `tests/test_review_workbench_ui.py` gates the front end in
+CI (it runs the embedded script in `node` behind a DOM stub and asserts the
+thumb-only/original-on-demand boundary);
+`scripts/verification/album_viewer_browser.py` is the real-Chromium pass over the
+same behaviour.
 
 ---
 
@@ -398,8 +471,9 @@ This is **not** a threshold-setting or production-decision tool.
    omitted because a filename is not unique. Stage 3 reads no photos at all.
 
 6. **Review** — open `output/review.html` (the one-command pipeline serves it
-   for you). Page through the ALL timeline for a full pass over the library, or
-   jump to MAYBE / UNKNOWN / GROUPS. Read `output/summary.txt` for totals.
+   for you). It lands on the 未审 group queue; walk it with `A`/`P`/`M`, or switch
+   to the 全部 timeline / 待确认 / 未知 browse lists for a full pass over the
+   library. Read `output/summary.txt` for totals.
 
 7. **Delete locally** — first do a dry run (default), then apply:
    ```
@@ -552,7 +626,9 @@ src/                        # pipeline (each stage is a `python -m src.<stage>`)
 src/thumbnails.py           # SSD thumbnail cache written from Stage 1's decode
 src/review_server.py        # local-only paged review API (SSD thumbnails only)
 src/review_page.py          # renders review.html (Python side: static fallback tiles)
-src/review_template.py      # the review page itself: markup, CSS, embedded browser script
+src/review_template.py      # the review page shell: markup + the four placeholders
+src/review_styles.py        # the review stylesheet (state colours, density, layout)
+src/review_script.py        # the review browser script (queues, undo, zoom, blink)
 src/pipeline_report.py      # stage timings, throughput, rough ETA, disk report
 src/root_scope.py           # durable root identity + per-run scope (fail closed)
 src/runtime_config.py       # the one --root/--output -> paths mapping both CLIs use
@@ -584,6 +660,9 @@ The full suite remains authoritative; tests are tiered, not deleted.
 
 Changing the review UI additionally requires `node` on PATH: the review page's
 embedded script is parsed *and* executed under a DOM stub by
-`tests/test_review_html_js_syntax.py` and `tests/test_review_album_ui.py`. For UI
-work that touches focus, layout reflow or which URLs the page requests, also run
-the real-browser pass in `scripts/verification/album_viewer_browser.py`.
+`tests/test_review_html_js_syntax.py` and `tests/test_review_workbench_ui.py`, the
+queue/undo semantics behind it by `tests/test_review_queues.py`, the write and
+static boundary by `tests/test_review_hardening.py`, and the per-interaction cost
+by `tests/test_review_scale.py`. For UI work that touches focus, layout reflow,
+zoom gestures, request races or which URLs the page requests, also run the
+real-browser pass in `scripts/verification/album_viewer_browser.py`.

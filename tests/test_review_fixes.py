@@ -111,17 +111,15 @@ def test_groups_page_returns_current_page_state(tmp_path):
     state.set_group(2, {"action": "mark", "timestamp": 1234567891}, fp2)
 
     with _Served(output) as base:
-        page = _get(base, "/api/page?view=GROUPS&page=1&page_size=100")
-        assert "review_state" in page
-        # Keys are ints in the dict returned from API
-        assert 1 in page["review_state"] or "1" in page["review_state"]
-        rs = page["review_state"]
-        if isinstance(list(rs.keys())[0], str):
-            assert rs["1"]["action"] == "accept"
-            assert rs["2"]["action"] == "mark"
-        else:
-            assert rs[1]["action"] == "accept"
-            assert rs[2]["action"] == "mark"
+        # Group 1 was accepted and group 2 marked, so they live in the DONE and
+        # LATER queues; each page carries the state of its own groups.
+        done = _get(base, "/api/page?view=GROUPS&queue=DONE&page=1&page_size=100")
+        later = _get(base, "/api/page?view=GROUPS&queue=LATER&page=1&page_size=100")
+        assert "review_state" in done and "review_state" in later
+        assert {str(k) for k in done["review_state"]} == {"1"}
+        assert {str(k) for k in later["review_state"]} == {"2"}
+        assert list(done["review_state"].values())[0]["action"] == "accept"
+        assert list(later["review_state"].values())[0]["action"] == "mark"
 
 
 # Issue 7: ReviewState concurrent access safety

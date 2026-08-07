@@ -309,6 +309,68 @@ def group_page_by_id(conn: sqlite3.Connection, group_id: int,
     ).fetchall()
 
 
+def group_ids_in_scope(conn: sqlite3.Connection,
+                      scope: "RootScope | None" = None) -> List[int]:
+    """Every group id visible in ``scope``, ascending.
+
+    One integer column, no member rows: this is what lets the server filter the
+    review queues (pending/later/done, held in ``review_state.json``) and answer
+    a page with its own ``LIMIT/OFFSET`` instead of shipping whole groups to the
+    browser and filtering them there.
+    """
+    predicate, params = _scope_sql(scope, "f")
+    return [int(row["id"]) for row in conn.execute(
+        "SELECT g.id FROM groups g WHERE EXISTS ("
+        "SELECT 1 FROM group_members gm JOIN files f ON f.id = gm.file_id "
+        f"WHERE gm.group_id = g.id AND {predicate}) ORDER BY g.id",
+        params,
+    )]
+
+
+def group_page_by_ids(conn: sqlite3.Connection, group_ids: Sequence[int],
+                      scope: "RootScope | None" = None) -> List[sqlite3.Row]:
+    """Member rows for an explicit, already-paged list of group ids.
+
+    Same projection and scoping rules as :func:`group_page`; the caller has done
+    the ordering and slicing, so this is bounded by one page of groups.
+    """
+    ids = [int(gid) for gid in group_ids]
+    if not ids:
+        return []
+    id_params = {f"gid{index}": gid for index, gid in enumerate(ids)}
+    placeholders = ", ".join(f":{name}" for name in id_params)
+    member_predicate, member_params = _scope_sql(scope, "f")
+    counted, count_params = _scope_sql(scope, "cf")
+    predicate, params = _scope_sql(scope, "sf")
+    rows = conn.execute(
+        f"""
+        SELECT g.id AS group_id, g.group_type,
+               (SELECT COUNT(*) FROM group_members cgm
+                  JOIN files cf ON cf.id = cgm.file_id
+                 WHERE cgm.group_id = g.id AND {counted}) AS member_count,
+               g.member_count AS clustered_member_count,
+               gm.file_id, gm.is_keep, gm.decision, gm.reason,
+               f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
+               f.file_kind, fe.quality_score, fe.face_count,
+               t.status AS thumb_status, t.error AS thumb_error
+        FROM groups g
+        JOIN group_members gm ON gm.group_id = g.id
+        JOIN files f ON f.id = gm.file_id AND {member_predicate}
+        LEFT JOIN features fe ON fe.file_id = gm.file_id
+        LEFT JOIN thumbnails t ON t.file_id = gm.file_id
+        WHERE g.id IN ({placeholders})
+          AND EXISTS (
+            SELECT 1 FROM group_members sgm JOIN files sf ON sf.id = sgm.file_id
+            WHERE sgm.group_id = g.id AND {predicate}
+          )
+        ORDER BY g.id, gm.is_keep DESC, gm.file_id
+        """,
+        {**params, **member_params, **count_params, **id_params},
+    ).fetchall()
+    order = {gid: index for index, gid in enumerate(ids)}
+    return sorted(rows, key=lambda row: order.get(int(row["group_id"]), len(order)))
+
+
 def count_groups(conn: sqlite3.Connection, scope: "RootScope | None" = None) -> int:
     """Groups with at least one member inside ``scope``."""
     if scope is None or not getattr(scope, "bound", False):

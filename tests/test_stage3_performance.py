@@ -90,17 +90,20 @@ def test_cached_thumb_uri_only_reports_existing_files(tmp_path):
     assert stage3_report.cached_thumb_uri(tmp_path, 3) == "thumbs/3.jpg"
 
 
-def test_render_html_declares_the_page_size_choices_and_all_view(tmp_path):
+def test_render_html_declares_the_queues_the_browse_views_and_the_page_sizes(tmp_path):
     page = stage3_report.render_html(_data(), tmp_path, review_limit=1)
+    # The group queues are the entry point; ALL/MAYBE/UNKNOWN stay as browse lists.
+    for queue in ("PENDING", "LATER", "DONE"):
+        assert f'data-queue="{queue}"' in page
     assert 'data-view="ALL"' in page
     assert 'data-view="MAYBE"' in page
     assert 'data-view="UNKNOWN"' in page
-    assert 'data-view="GROUPS"' in page
     assert "/api/original/" in page
-    assert "与组内 KEEP 对比" in page
+    assert "双栏对比 Shift+C" in page
     assert "ArrowLeft" in page and "ArrowRight" in page
     assert "/api/group/" in page
-    assert "leftImage.removeAttribute('src')" in page
+    assert "/api/locate?" in page
+    assert "removeAttribute('src')" in page
     for size in (50, 100, 200):
         assert f'value="{size}"' in page
 

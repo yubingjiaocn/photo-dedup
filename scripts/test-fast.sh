@@ -23,4 +23,5 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_stage1_throughput.py \
   tests/test_stage1_resume.py \
   tests/test_thumbnails.py \
+  tests/test_review_workbench_ui.py \
   tests/test_stage3_performance.py

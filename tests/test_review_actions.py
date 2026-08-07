@@ -399,17 +399,15 @@ def test_page_endpoint_includes_review_state_on_load(tmp_path):
     state.set_group(2, {"action": "pick", "file_id": 4, "timestamp": 1235}, fp2)
 
     with _Served(output) as base:
-        page_data = _get(base, "/api/page?view=GROUPS&page=1&page_size=100")
+        # Both groups carry a decision, so they sit in the DONE queue.
+        page_data = _get(base, "/api/page?view=GROUPS&queue=DONE&page=1&page_size=100")
         assert "review_state" in page_data
         # review_state should be a dict keyed by group_id
         rs = page_data["review_state"]
         assert isinstance(rs, dict)
-        assert 1 in rs or "1" in str(rs)  # Can be int or str key from JSON
-        # Check it has the right shape
-        for gid in [1, 2]:
-            gid_key = gid if gid in rs else str(gid)
-            if gid_key in rs:
-                assert rs[gid_key]["action"] in ("accept", "pick")
+        assert {str(k) for k in rs} == {"1", "2"}
+        for value in rs.values():
+            assert value["action"] in ("accept", "pick")
 
 
 def test_review_state_validates_loaded_data(tmp_path):
