@@ -187,6 +187,8 @@ def review_page(conn: sqlite3.Connection, view: str, offset: int,
     """One page of a view, joined with display metadata and thumbnail status.
 
     Source paths stay in the DB; the server projects only path-free fields.
+    ``gm.is_keep`` is selected so the flat timeline can label the AI keeper the
+    same way the GROUPS view does; it is NULL for ungrouped photos.
     Scoped for the same reason as :func:`review_index_count`.
     """
     if view not in REVIEW_VIEWS:
@@ -199,6 +201,7 @@ def review_page(conn: sqlite3.Connection, view: str, offset: int,
         SELECT ri.position, ri.file_id, ri.group_id, ri.decision, ri.risk,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
                f.file_kind, fe.quality_score, fe.face_count, gm.reason,
+               gm.is_keep,
                t.status AS thumb_status, t.error AS thumb_error
         FROM review_index ri
         JOIN files f ON f.id = ri.file_id

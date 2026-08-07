@@ -192,12 +192,22 @@ Page size is 50, 100 (default), or 200. Pages come from SQLite with
 `review_summary.json` and `summary.txt`) — it is never silently blank and never
 triggers a fallback read of the original.
 
-Normal browsing and pagination remain SSD-thumbnail-only. Clicking **查看高清大图**
-is the sole opt-in HDD read: the loopback server streams exactly that inventoried
-JPEG/PNG after validating its stored size and mtime. It never returns a source
-path. In GROUPS, the lightbox compares the keeper and selected candidate side by
-side (at most two originals) and Left/Right stays within that group; closing the
-lightbox releases both image URLs.
+Normal browsing and pagination remain SSD-thumbnail-only. Grid tiles scale with
+the window (a responsive `auto-fill` grid, ~240–460px per tile, collapsing to one
+column on a narrow window) so faces are actually judgeable without opening
+anything — they are still just the cached thumbnails.
+
+Clicking **查看高清大图** is the sole opt-in HDD read: the loopback server streams
+exactly that inventoried JPEG/PNG after validating its stored size and mtime. It
+never returns a source path. Closing the viewer releases the image URLs.
+
+In GROUPS the viewer is an **album browser**: one large main photo plus a
+clickable thumbnail strip of the whole group along the bottom. The strip is fed
+by `/api/thumb/<id>.jpg` (SSD cache) and marks, distinguishably, the photo you
+are on (`当前`), the AI keeper (`🤖AI`) and your own keeper (`👤人工`). Only the
+main photo is an original read; `C` still opens the temporary two-pane split
+against the AI keeper (at most two originals) and toggles back. `←/H` and `→/L`
+stay within the group.
 
 The page is in Chinese; internal state names (`MAYBE`, `UNKNOWN`, `KEEP`,
 `AUTO_REMOVE`, group types) stay in English so they match the DB, the manifests,
@@ -212,23 +222,34 @@ photos).
 
 ### GROUPS review workbench (keyboard-first)
 
-The GROUPS view now supports keyboard-driven review with persistent human decisions:
+The GROUPS view supports keyboard-driven review with persistent human decisions.
 
-**Navigation** (GROUPS mode):
+**List navigation** (GROUPS mode):
 - `↑/K` — previous group
 - `↓/J` — next group
 - `←/H` — previous photo in group
 - `→/L` — next photo in group
-- `Enter/Space` — open/close high-res viewer
+- `Enter/Space` — open/close the high-res album viewer
 - `C` — compare current photo vs. AI keeper
 - `Esc` — close viewer/help
 - `?/F1` — show keyboard shortcuts
 
-**Review actions** (focused group):
+**Inside the open album viewer** the same keys keep working, so a review run
+never needs the mouse:
+- `←/H`, `→/L` — previous/next photo in the group (clicking a strip frame is equivalent)
+- `C` — toggle the temporary two-pane comparison against the AI keeper
+- `A`, `P`, `M`, `U` — the review actions below
+- `Enter/Space` or `Esc` — close
+
+**Review actions** (focused group, from the list or the viewer):
 - `A` — accept AI keeper, mark reviewed (auto-advance)
-- `P` — set current photo as human keeper, mark reviewed (auto-advance)
+- `P` — set the *currently shown* photo as human keeper, mark reviewed (auto-advance)
 - `M` — mark group for later review (auto-advance)
 - `U` — clear human decision for this group (no advance)
+
+After `A`/`P`/`M` the next group is focused as before, and if the album viewer was
+open it **stays open** on that next group — so you can sit on `P`/`A` and walk a
+whole page of groups at full resolution. `U` keeps you on the current photo.
 
 All human decisions are stored in `output/review_state.json` (atomic writes on every
 change). **Original photos remain read-only**; AI decisions and deletion manifests
@@ -237,6 +258,11 @@ counts and highlights reviewed/marked groups with color-coded borders.
 
 Delete manifests still contain only byte-identical `AUTO_REMOVE` items. Manual decisions
 do not create new deletion entries — they guide which groups need further attention.
+
+`tests/test_review_album_ui.py` gates the template in CI (it runs the embedded
+script in `node` behind a DOM stub and asserts the thumb-only/original-on-demand
+boundary); `scripts/verification/album_viewer_browser.py` is the real-Chromium
+pass over the same behaviour.
 
 ---
 
@@ -475,6 +501,8 @@ setup_windows.bat           # one-shot environment setup
 src/                        # pipeline (each stage is a `python -m src.<stage>`)
 src/thumbnails.py           # SSD thumbnail cache written from Stage 1's decode
 src/review_server.py        # local-only paged review API (SSD thumbnails only)
+src/review_page.py          # renders review.html (Python side: static fallback tiles)
+src/review_template.py      # the review page itself: markup, CSS, embedded browser script
 src/pipeline_report.py      # stage timings, throughput, rough ETA, disk report
 src/root_scope.py           # durable root identity + per-run scope (fail closed)
 src/schema.py               # SQLite DDL + additive migrations
@@ -484,7 +512,7 @@ src/stage1_backends.py      # DINOv2 + shape-grouped batched MUSIQ/CLIP-IQA + Yu
 src/stage1_setup.py         # admission, pending-work query, detectors, closing stats
 src/stage1_settings.py      # validated loop knobs + the stated memory bound
 scripts/gptk_delete.js      # Google Photos cloud-delete console script
-scripts/verification/       # real-weight/real-GPU checks CI cannot express
+scripts/verification/       # real-weight/real-GPU/real-browser checks CI cannot express
 docs/ALGORITHM.md           # every threshold explained
 docs/STAGE1_THROUGHPUT.md   # the measurements behind the throughput defaults
 docs/WINDOWS_BENCHMARK.md   # opt-in Windows throughput harness
@@ -501,3 +529,9 @@ skipping the repeated localhost-server and 100k-library integration fixtures.
 Run `scripts/test-full.sh` before push/release, and whenever changing the review
 server, pagination, end-to-end pipeline, SigLIP/routing, or benchmark/reporting.
 The full suite remains authoritative; tests are tiered, not deleted.
+
+Changing the review UI additionally requires `node` on PATH: the review page's
+embedded script is parsed *and* executed under a DOM stub by
+`tests/test_review_html_js_syntax.py` and `tests/test_review_album_ui.py`. For UI
+work that touches focus, layout reflow or which URLs the page requests, also run
+the real-browser pass in `scripts/verification/album_viewer_browser.py`.
