@@ -62,7 +62,19 @@ never moves or deletes a photo**.
    never image bytes or embeddings.
 
 The server uses only Python's standard library, listens on `127.0.0.1`, and
-serves the output folder plus a read-only paged API. The command stores its
+serves the output folder plus a read-only paged API. To reopen an existing
+review later **without rerunning any stage**, use the same output directory:
+
+```bat
+python -m src.serve_review --output "C:\photo-review"
+```
+
+This refreshes only the committed front-end build in that output directory and
+then serves its existing `inventory.sqlite`, thumbnails and `review_state.json`.
+It does not scan, cluster, regenerate features or touch an original. Add
+`--port 8765` for a fixed port or `--no-open` to suppress browser launch.
+
+The pipeline command stores its
 resumable `inventory.sqlite` beside the review output and uses a temporary
 runtime config, so it does not edit `config.yaml` — and you do not need to
 either: `--root`/`--output` are the only paths you type. `config.yaml` supplies
