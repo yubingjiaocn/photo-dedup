@@ -20,27 +20,24 @@ import datetime as dt
 import http.server
 import platform
 import sys
-import tempfile
 import time
 import traceback
 import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
-import yaml
-
 from . import (
     db,
     pipeline_report,
     review_server,
     root_scope,
+    runtime_config,
     stage0_inventory,
     stage1_features,
     stage2_cluster,
     stage3_report,
     thumbnails,
 )
-from .config import load_config
 
 
 class _Tee:
@@ -71,7 +68,8 @@ def _print_runtime_diagnostics(args: argparse.Namespace, log_path: Path) -> None
     print(f"[diagnostics] executable: {sys.executable}")
     print(
         "[diagnostics] options: "
-        f"root={args.root!r}, output={args.output!r}, backend={args.backend!r}, "
+        f"root={args.root!r}, output={args.output!r}, config={args.config!r}, "
+        f"backend={args.backend!r}, "
         f"limit={args.limit!r}, review_limit={args.review_limit}, "
         f"thumb_px={args.thumb_px}, serve={args.serve}, port={args.port}"
     )
@@ -121,24 +119,6 @@ def serve_review(output: Path, port: int = 0, open_browser: bool = True) -> None
             data.close()
 
 
-def _runtime_config(root: Path, output: Path, backend: str, thumb_px: int) -> dict[str, Any]:
-    """Build an in-memory override without changing the user's config.yaml."""
-    data = load_config().as_dict()
-    data["paths"] = dict(data["paths"])
-    data["paths"].update(
-        root=str(root),
-        db=str(output / "inventory.sqlite"),
-        output_dir=str(output),
-    )
-    data["features"] = dict(data["features"])
-    data["features"]["backend"] = backend
-    thumb_cfg = dict(data["features"].get("thumbnails") or {})
-    thumb_cfg["enabled"] = True
-    thumb_cfg["max_px"] = int(thumb_px)
-    data["features"]["thumbnails"] = thumb_cfg
-    return data
-
-
 def _still_image_count(db_path: Path) -> int:
     """Still images in the inventory (thumbnail + ETA denominator).
 
@@ -170,12 +150,19 @@ def run(
     limit: int | None = None,
     review_limit: int = stage3_report.DEFAULT_REVIEW_LIMIT,
     thumb_px: int = thumbnails.DEFAULT_MAX_PX,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
-    """Run inventory -> features -> cluster -> report. Never executes deletion."""
-    root_path = Path(root).expanduser().resolve()
-    output_path = Path(output).expanduser().resolve()
+    """Run inventory -> features -> cluster -> report. Never executes deletion.
+
+    ``config_path`` is an optional tunables base (default: the repository
+    ``config.yaml``); its ``paths`` never win over ``root``/``output``.
+    """
+    root_path, output_path, db_path = runtime_config.resolve_paths(root, output)
     if not root_path.is_dir():
         raise FileNotFoundError(f"photo root is not a directory: {root_path}")
+    # Explicit tunables file must exist; load_config would otherwise fall back to
+    # the packaged defaults without saying so.
+    runtime_config.base_config_path(config_path)
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
     if review_limit < 1:
@@ -184,30 +171,28 @@ def run(
         raise ValueError("thumb_px must be at least 1")
 
     # Fail closed before creating the output directory or touching the DB.
-    db_path = output_path / "inventory.sqlite"
     requested_scope = root_scope.preflight(db_path, root_path)
     print(f"[pipeline] root scope: {requested_scope.describe()}")
     output_path.mkdir(parents=True, exist_ok=True)
     pipeline_report.print_thumbnail_plan(output_path, _still_image_count(db_path))
 
-    config = _runtime_config(root_path, output_path, backend, thumb_px)
-    with tempfile.TemporaryDirectory(prefix="photo-dedup-") as temp_dir:
-        config_path = Path(temp_dir) / "runtime-config.yaml"
-        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-
+    with runtime_config.written(
+        root_path, output_path, base_config=config_path,
+        backend=backend, thumb_px=thumb_px,
+    ) as runtime_path:
         print(f"[pipeline] stage 0/4: inventory (limit={limit or 'all'})")
         inventory, stage0_seconds = _elapsed(
-            stage0_inventory.run, config_path=str(config_path), limit=limit,
+            stage0_inventory.run, config_path=str(runtime_path), limit=limit,
             run_id=root_scope.new_run_id(),
         )
         print(f"[pipeline] stage 1/4: features + SSD thumbnails "
               f"(backend={backend}, limit={limit or 'all'})")
         features, stage1_seconds = _elapsed(
             stage1_features.run,
-            config_path=str(config_path), backend_override=backend, limit=limit,
+            config_path=str(runtime_path), backend_override=backend, limit=limit,
         )
         print("[pipeline] stage 2/4: cluster")
-        clusters, stage2_seconds = _elapsed(stage2_cluster.run, config_path=str(config_path))
+        clusters, stage2_seconds = _elapsed(stage2_cluster.run, config_path=str(runtime_path))
 
         timings = {
             "stage0": stage0_seconds, "stage1": stage1_seconds,
@@ -226,7 +211,7 @@ def run(
         print("[pipeline] stage 3/4: build paged review")
         report, stage3_seconds = _elapsed(
             stage3_report.run,
-            config_path=str(config_path), review_limit=review_limit,
+            config_path=str(runtime_path), review_limit=review_limit,
             performance_panel=_performance_panel(performance, disk),
         )
 
@@ -274,6 +259,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--root", required=True, help="photo directory to scan")
     parser.add_argument("--output", required=True, help="directory for DB, thumbnails, review")
+    parser.add_argument(
+        "--config", default=None,
+        help=("optional tunables base (thresholds/model settings); its paths are ignored, "
+              "--root/--output decide them (default: the repository config.yaml)"),
+    )
     parser.add_argument("--backend", choices=("torch", "stub"), default="torch")
     parser.add_argument("--limit", type=int, default=None, help="scan/process at most N files")
     parser.add_argument(
@@ -294,11 +284,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     output_path = Path(args.output).expanduser().resolve()
 
+    if args.config is not None and not Path(args.config).expanduser().is_file():
+        print(f"[pipeline][ERROR] config not found: {args.config}", file=sys.stderr)
+        return 1
+
     # Root check happens *first*, before the output directory, the diagnostic log,
     # or any SQLite side file (-wal/-shm) can be created. A rejected run must
     # leave the filesystem exactly as it found it.
     try:
-        root_scope.preflight(output_path / "inventory.sqlite", args.root)
+        root_scope.preflight(runtime_config.db_path_for(output_path), args.root)
     except root_scope.ParameterError as exc:
         print(f"[pipeline][ERROR] {exc}", file=sys.stderr)
         return 2
@@ -313,6 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result = run(
                         args.root, args.output, backend=args.backend, limit=args.limit,
                         review_limit=args.review_limit, thumb_px=args.thumb_px,
+                        config_path=args.config,
                     )
                     if args.serve:
                         serve_review(

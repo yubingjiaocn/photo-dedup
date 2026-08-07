@@ -1,53 +1,59 @@
-"""Rebuild review workbench: re-cluster and regenerate review pages.
+r"""Rebuild the review workbench: re-run Stage 2 + Stage 3 only.
 
-For Windows users with separate config: ensures Stage2+3 use the custom config
-that points to the correct inventory.sqlite and output directory without
-re-running Stage0/1 (which would rescan/recompute features).
+Same command shape as :mod:`src.run_pipeline`, on purpose::
 
-Usage:
-    python -m src.rebuild_review --config run-config.yaml --root E:\\Photos
+    python -m src.rebuild_review --root E:\Photos --output F:\photo-review
+
+``--root``/``--output`` are the two things the user already knows; the paths the
+stages need (``paths.root``, ``paths.db``, ``paths.output_dir``) are derived from
+them by :mod:`src.runtime_config`, exactly as ``run_pipeline`` derives them. There
+is no hand-maintained ``run-config.yaml``, and no way for a rebuild to cluster a
+database other than ``OUTPUT/inventory.sqlite``.
+
+``--config`` is optional and means *tunables only* (cluster thresholds, quality
+weights); any ``paths`` it declares are ignored. Stage 1 knobs (``backend``,
+thumbnail size) are deliberately not settable here: the feature cache already
+exists and a rebuild must not restate how it was computed.
+
+Stage 0/1 are never run, so this never re-reads the photo library. The run fails
+closed unless the resolved database exists, has the schema, and records a
+finished Stage 1 with usable feature rows.
 """
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
 
-from . import stage2_cluster
-from . import stage3_report
+from . import db, root_scope, runtime_config, stage2_cluster, stage3_report
 
 
-def rebuild(config_path: str, root_override: Optional[str] = None) -> int:
-    """Run stage2 then stage3 serially, stopping on first failure.
+def verify_inventory(db_path: Path, root: Path) -> int:
+    """Fail closed unless ``db_path`` is a finished Stage 0/1 inventory for ``root``.
 
-    MUST fail closed if the config-resolved DB path:
-    - doesn't exist (not created by Stage 0/1)
-    - lacks schema_version/stage1_done_at in meta table
-    - has no valid features rows
+    Returns the number of usable feature rows. Refuses when the database:
 
-    This prevents typo in paths.db from creating an empty DB or overwriting
-    existing review.html/delete_local.txt with an invalid rebuild.
+    * doesn't exist (Stage 2 must never *create* one -- a path typo would
+      otherwise produce an empty DB and overwrite a good review.html);
+    * lacks the ``files``/``features``/``meta`` tables;
+    * is bound to a different photo root than ``--root``
+      (:class:`src.root_scope.ParameterError`);
+    * has no ``stage1_done_at``, or no ``status='done'`` feature rows.
+
+    The checks are ordered cheapest-and-most-read-only first: the root binding is
+    verified before :func:`src.db.open_db`, which would migrate the schema, so a
+    rejected rebuild leaves the output directory byte-for-byte as it found it.
     """
-    from pathlib import Path
-    from . import db
-    from .config import load_config
-
-    print(f"[rebuild_review] starting with config={config_path}, root={root_override}")
-
-    # Load config to resolve the DB path
-    cfg = load_config(config_path)
-    db_path = Path(cfg.db_path)
-
-    # Fail closed: DB must exist before we run Stage 2
     if not db_path.is_file():
         raise FileNotFoundError(
             f"[rebuild_review] FATAL: inventory DB not found: {db_path}\n"
-            f"Stage 2+3 must not create a new database. Run Stage 0+1 first to build the feature cache."
+            f"Stage 2+3 must not create a new database. "
+            f"Run Stage 0+1 first (python -m src.run_pipeline) to build the feature cache."
         )
 
-    # Verify DB structure before opening with open_db (which would create schema)
-    import sqlite3
+    # Structure check before db.open_db(), which would create the schema.
     conn_ro = sqlite3.connect(str(db_path), uri=True)
     try:
         tables = {r[0] for r in conn_ro.execute(
@@ -55,67 +61,109 @@ def rebuild(config_path: str, root_override: Optional[str] = None) -> int:
         ).fetchall()}
         if "files" not in tables or "features" not in tables or "meta" not in tables:
             raise ValueError(
-                f"[rebuild_review] FATAL: {db_path} missing essential tables (files/features/meta).\n"
+                f"[rebuild_review] FATAL: {db_path} missing essential tables "
+                f"(files/features/meta).\n"
                 f"This is not a valid photo-dedup inventory. Run Stage 0+1 first."
             )
     finally:
         conn_ro.close()
 
-    # Now open normally to verify Stage 1 completion
+    # Same gate stage 2/3 apply, but before open_db(): a rebuild must never
+    # cluster an inventory belonging to a different photo root.
+    root_scope.preflight(db_path, root)
+
     conn_check = db.open_db(db_path)
     try:
-        stage1_done = db.get_meta(conn_check, "stage1_done_at")
-        if not stage1_done:
+        if not db.get_meta(conn_check, "stage1_done_at"):
             raise ValueError(
                 f"[rebuild_review] FATAL: {db_path} has no stage1_done_at in meta table.\n"
                 f"Stage 1 has not completed. Run it first to populate the features table."
             )
-        # Verify there are actual feature records
-        feature_count = conn_check.execute(
+        feature_count = int(conn_check.execute(
             "SELECT COUNT(*) AS n FROM features WHERE status = 'done'"
-        ).fetchone()["n"]
+        ).fetchone()["n"])
         if feature_count == 0:
             raise ValueError(
                 f"[rebuild_review] FATAL: {db_path} has 0 features rows with status='done'.\n"
-                f"Stage 1 produced no usable features. Run Stage 0+1 first on a valid photo library."
+                f"Stage 1 produced no usable features. "
+                f"Run Stage 0+1 first on a valid photo library."
             )
-        print(f"[rebuild_review] verified: DB exists, schema OK, stage1 done, {feature_count} features")
     finally:
         conn_check.close()
+    print(f"[rebuild_review] verified: DB exists, schema OK, stage1 done, {feature_count} features")
+    return feature_count
 
-    # Stage2: clustering
-    print("[rebuild_review] running stage2_cluster...")
-    stage2_cluster.run(config_path=config_path, root_override=root_override)
 
-    # Stage3: report generation
-    print("[rebuild_review] running stage3_report...")
-    stage3_report.run(config_path=config_path, root_override=root_override)
+def rebuild(root: str, output: str, config_path: Optional[str] = None) -> int:
+    """Rebuild Stage 2 + Stage 3 for one ``--root``/``--output`` pair.
 
+    The inventory must already be ``OUTPUT/inventory.sqlite``. That is asserted
+    twice -- by :func:`verify_inventory` here and by
+    :func:`src.runtime_config.written`, which re-resolves the generated config the
+    way the stages will -- so a rebuild can only touch the database belonging to
+    the given output directory, bound to the given root.
+
+    Raises before running any stage: :class:`FileNotFoundError` (no inventory),
+    :class:`ValueError` (not a finished Stage 1 inventory), or
+    :class:`src.root_scope.ParameterError` (bound to a different root).
+    """
+    root_path, output_path, db_path = runtime_config.resolve_paths(root, output)
+    # Explicit tunables file must exist; load_config would otherwise fall back to
+    # the packaged defaults without saying so.
+    runtime_config.base_config_path(config_path)
+    print(
+        f"[rebuild_review] starting with root={root_path}, output={output_path}, "
+        f"tunables={config_path or 'default config.yaml'}"
+    )
+    verify_inventory(db_path, root_path)
+    # No backend/thumb_px: a rebuild must not restate Stage 1 parameters.
+    with runtime_config.written(
+        root_path, output_path, base_config=config_path
+    ) as runtime_path:
+        print("[rebuild_review] running stage2_cluster...")
+        stage2_cluster.run(config_path=str(runtime_path), root_override=str(root_path))
+        print("[rebuild_review] running stage3_report...")
+        stage3_report.run(config_path=str(runtime_path), root_override=str(root_path))
     print("[rebuild_review] complete")
     return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Rebuild review workbench (Stage2+3) with custom config"
+        description=(
+            "Rebuild the review workbench (Stage 2+3 only) for one --root/--output pair; "
+            "never re-reads photos, never deletes anything."
+        )
     )
     ap.add_argument(
-        "--config",
-        required=True,
-        help="Path to run-config.yaml (must specify paths.db and paths.output_dir)",
+        "--root", required=True,
+        help="photo directory the output directory belongs to (e.g. E:\\Photos)",
     )
     ap.add_argument(
-        "--root",
-        required=True,
-        help="Photo root directory (e.g., E:\\Photos on Windows)",
+        "--output", required=True,
+        help=("directory holding inventory.sqlite, thumbnails and the review "
+              "(the same value you passed to run_pipeline --output)"),
+    )
+    ap.add_argument(
+        "--config", default=None,
+        help=("optional tunables base (cluster thresholds, quality weights); its paths are "
+              "ignored, --root/--output decide them (default: the repository config.yaml)"),
     )
     args = ap.parse_args(argv)
 
-    if not Path(args.config).exists():
-        print(f"[rebuild_review] config not found: {args.config}")
+    if args.config is not None and not Path(args.config).expanduser().is_file():
+        print(f"[rebuild_review][ERROR] config not found: {args.config}", file=sys.stderr)
         return 1
 
-    return rebuild(args.config, args.root)
+    # Fail closed with the reason on stderr and an exit status, not a traceback.
+    try:
+        return rebuild(args.root, args.output, config_path=args.config)
+    except root_scope.ParameterError as exc:
+        print(f"[rebuild_review][ERROR] {exc}", file=sys.stderr)
+        return 2
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[rebuild_review][ERROR] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

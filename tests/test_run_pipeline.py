@@ -231,6 +231,149 @@ def test_main_serves_only_after_pipeline_and_honors_no_open(tmp_path, monkeypatc
     assert calls == ["pipeline", ("serve", output, 8765, False)]
 
 
+def test_main_passes_config_through_to_run(tmp_path, monkeypatch):
+    """``--config`` is optional and reaches :func:`run` as the tunables base."""
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "output"
+    tunables = tmp_path / "my-thresholds.yaml"
+    tunables.write_text("cluster:\n  dinov2_threshold: 0.93\n", encoding="utf-8")
+    received = {}
+
+    def fake_run(*args, **kwargs):
+        received.update(kwargs)
+        return {"report": {"output_dir": str(output)}}
+
+    monkeypatch.setattr(run_pipeline, "run", fake_run)
+    status = run_pipeline.main([
+        "--root", str(root), "--output", str(output),
+        "--config", str(tunables), "--no-serve",
+    ])
+    assert status == 0
+    assert received["config_path"] == str(tunables)
+
+
+def test_main_config_is_optional(tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "output"
+    received = {}
+
+    def fake_run(*args, **kwargs):
+        received.update(kwargs)
+        return {"report": {"output_dir": str(output)}}
+
+    monkeypatch.setattr(run_pipeline, "run", fake_run)
+    assert run_pipeline.main(
+        ["--root", str(root), "--output", str(output), "--no-serve"]
+    ) == 0
+    assert received["config_path"] is None
+
+
+@pytest.mark.parametrize("argv", [[], ["--root", "R"], ["--output", "O"]])
+def test_main_requires_root_and_output(argv, capsys):
+    """Same mandatory shape as ``rebuild_review``; a config cannot supply paths."""
+    with pytest.raises(SystemExit) as excinfo:
+        run_pipeline.main(argv)
+    assert excinfo.value.code == 2
+    assert "required" in capsys.readouterr().err
+
+
+def test_explicit_config_supplies_tunables_but_never_paths(tmp_path, monkeypatch):
+    """``--root``/``--output`` win over any ``paths:`` the config declares.
+
+    A config whose ``paths.db`` pointed somewhere else used to be the documented
+    way to run; now it is inert, so a run can only ever write the database that
+    belongs to the ``--output`` the user typed.
+    """
+    root = tmp_path / "photos"
+    root.mkdir()
+    output = tmp_path / "review"
+    decoy = tmp_path / "decoy"
+    tunables = tmp_path / "tunables.yaml"
+    tunables.write_text(yaml.safe_dump({
+        "paths": {"root": str(decoy / "photos"), "db": str(decoy / "other.sqlite"),
+                  "output_dir": str(decoy)},
+        "cluster": {"dinov2_threshold": 0.931, "burst_window_seconds": 17},
+        "quality": {"weight_iqa": 0.55},
+    }), encoding="utf-8")
+    seen = []
+
+    def record(name, result):
+        def fake(*args, **kwargs):
+            config = yaml.safe_load(Path(kwargs["config_path"]).read_text(encoding="utf-8"))
+            seen.append((name, config))
+            if name == "stage3":
+                _seed_output(output)
+            return result
+
+        return fake
+
+    monkeypatch.setattr(run_pipeline.stage0_inventory, "run", record("stage0", {"files": 1}))
+    monkeypatch.setattr(run_pipeline.stage1_features, "run", record("stage1", {
+        "processed": 1, "thumbnails": {"created": 1, "cache_files": 1,
+                                       "cache_bytes": 2048, "average_bytes": 2048.0}}))
+    monkeypatch.setattr(run_pipeline.stage2_cluster, "run", record("stage2", {"groups": 0}))
+    monkeypatch.setattr(run_pipeline.stage3_report, "run", record("stage3", {
+        "groups": 0, "maybe": 0, "unknown": 0, "delete_files": 0, "all_items": 1,
+        "thumbnails": {"recorded_ok": 1}}))
+
+    run_pipeline.run(
+        str(root), str(output), backend="stub", thumb_px=256, config_path=str(tunables)
+    )
+
+    assert [name for name, _ in seen] == ["stage0", "stage1", "stage2", "stage3"]
+    for _name, config in seen:
+        # paths: from the CLI, always
+        assert config["paths"]["root"] == str(root.resolve())
+        assert config["paths"]["db"] == str(output.resolve() / "inventory.sqlite")
+        assert config["paths"]["output_dir"] == str(output.resolve())
+        assert str(decoy) not in yaml.safe_dump(config["paths"])
+        # tunables: from the config, unchanged
+        assert config["cluster"]["dinov2_threshold"] == 0.931
+        assert config["cluster"]["burst_window_seconds"] == 17
+        assert config["quality"]["weight_iqa"] == 0.55
+        # Stage 1 knobs: from the CLI, because run_pipeline owns Stage 1
+        assert config["features"]["backend"] == "stub"
+        assert config["features"]["thumbnails"]["max_px"] == 256
+    assert not decoy.exists()
+
+
+def test_paths_with_spaces_survive_round_trip(tmp_path, monkeypatch):
+    """``C:\\photo review`` style paths: quoting must be all the user needs."""
+    root = tmp_path / "My Photos 2026"
+    root.mkdir()
+    output = tmp_path / "photo review out"
+    seen = []
+
+    def record(name, result):
+        def fake(*args, **kwargs):
+            seen.append(yaml.safe_load(
+                Path(kwargs["config_path"]).read_text(encoding="utf-8")))
+            if name == "stage3":
+                _seed_output(output)
+            return result
+
+        return fake
+
+    monkeypatch.setattr(run_pipeline.stage0_inventory, "run", record("stage0", {"files": 1}))
+    monkeypatch.setattr(run_pipeline.stage1_features, "run", record("stage1", {
+        "processed": 1, "thumbnails": {"created": 1, "cache_files": 1,
+                                       "cache_bytes": 2048, "average_bytes": 2048.0}}))
+    monkeypatch.setattr(run_pipeline.stage2_cluster, "run", record("stage2", {"groups": 0}))
+    monkeypatch.setattr(run_pipeline.stage3_report, "run", record("stage3", {
+        "groups": 0, "maybe": 0, "unknown": 0, "delete_files": 0, "all_items": 1,
+        "thumbnails": {"recorded_ok": 1}}))
+
+    result = run_pipeline.run(str(root), str(output), backend="stub")
+
+    assert seen and all(c["paths"]["root"] == str(root.resolve()) for c in seen)
+    assert all(
+        c["paths"]["db"] == str(output.resolve() / "inventory.sqlite") for c in seen
+    )
+    assert result["review_html"] == str(output.resolve() / "review.html")
+
+
 def test_main_passes_review_limit_and_thumb_px(tmp_path, monkeypatch):
     root = tmp_path / "photos"
     root.mkdir()

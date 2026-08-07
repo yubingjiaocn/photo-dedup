@@ -64,7 +64,10 @@ never moves or deletes a photo**.
 The server uses only Python's standard library, listens on `127.0.0.1`, and
 serves the output folder plus a read-only paged API. The command stores its
 resumable `inventory.sqlite` beside the review output and uses a temporary
-runtime config, so it does not edit `config.yaml`. If a run fails, the final
+runtime config, so it does not edit `config.yaml` — and you do not need to
+either: `--root`/`--output` are the only paths you type. `config.yaml` supplies
+thresholds and model settings; pass `--config my-thresholds.yaml` to use a
+variant of it (its `paths:` are ignored). If a run fails, the final
 `[pipeline][ERROR]` line states the cause. Stub results are for checking the
 workflow; use `torch` before making real review decisions.
 
@@ -270,8 +273,32 @@ pass over the same behaviour.
 
 Activate the environment first: `\.venv\Scripts\activate`
 
-1. **Edit `config.yaml`** → set `paths.root` to your library (e.g. `E:/Photos`).
-   Optionally review the thresholds under `cluster:` (defaults are sensible).
+**The normal way to run everything is the one command from the Quick Start** — it
+performs steps 2-5 below in order and then serves the review:
+
+```bat
+python -m src.run_pipeline --root "E:\Photos" --output "C:\photo-review" --backend torch
+```
+
+`--root` and `--output` are the only paths you ever type. The command derives
+`paths.root`, `paths.db` (`<output>\inventory.sqlite`) and `paths.output_dir`
+from them into a temporary runtime config, so **you never edit path settings in
+`config.yaml`** and there is no per-run config file to maintain. `config.yaml`
+holds *tunables only* (thresholds, quality weights, model settings); if you keep
+a variant of it, pass it with `--config my-thresholds.yaml` — its `paths:` are
+ignored, because the paths you just typed are the ones you mean. To re-run only
+Stage 2+3 later, use `rebuild_review` with the same two arguments (step 4).
+
+The individual stage commands below are the advanced path: run one at a time, and
+inspect or repeat a single stage. **They take their paths from `config.yaml`**, so
+this is the one case where you set `paths.root`/`paths.db`/`paths.output_dir`
+yourself.
+
+1. **Advanced path only — edit `config.yaml`** → set `paths.root` to your library
+   (e.g. `E:/Photos`), and `paths.db`/`paths.output_dir` if the defaults beside
+   the repo are not where you want them. Skip this entirely when using
+   `run_pipeline`/`rebuild_review`. Optionally review the thresholds under
+   `cluster:` (defaults are sensible).
 
 2. **Stage 0 — inventory** (fast, one sequential pass, resumable):
    ```
@@ -313,22 +340,31 @@ Activate the environment first: `\.venv\Scripts\activate`
    ```
    python -m src.stage2_cluster
    ```
-   To re-run only Stage 2 and Stage 3 (without re-reading images):
+   To re-run only Stage 2 and Stage 3 for a pipeline run's output directory
+   (no image reads, no feature recomputation), use the rebuild command — it takes
+   **the same `--root`/`--output` you gave `run_pipeline`**:
    ```
-   python -m src.stage2_cluster
-   python -m src.stage3_report
+   python -m src.rebuild_review --root "E:\Photos" --output "C:\photo-review"
    ```
+   It derives `paths.root`, `paths.db` (`<output>\inventory.sqlite`) and
+   `paths.output_dir` from those two arguments, exactly like `run_pipeline` does,
+   so a rebuild can never cluster a different database than the run it rebuilds.
+   **There is no per-run config file** — paths are never read from a config file,
+   only from `--root`/`--output`.
 
-   **Windows with custom config:** If you used a separate config file (e.g., to
-   specify a custom `paths.db` pointing to an existing
-   `F:\photo-dedup\photo-review-full\inventory.sqlite` or custom `paths.output_dir`),
-   use the rebuild script to ensure Stage 2+3 use the correct config and root,
-   avoiding accidental re-scan:
+   The rebuild **fails closed before touching anything** if
+   `<output>\inventory.sqlite` is missing, is not a photo-dedup inventory, is
+   bound to a different `--root`, or has no completed Stage 1 with usable
+   features. It never runs Stage 0/1, so the feature cache is never rebuilt by
+   accident.
+
+   Trying different thresholds? Put them in a copy of `config.yaml` and pass
+   `--config`. It supplies **tunables only** (`cluster:`, `quality:`,
+   `decision:`); any `paths:` inside it are ignored, because `--root`/`--output`
+   decide the paths:
    ```
-   python -m src.rebuild_review --config run-config.yaml --root E:\Photos
+   python -m src.rebuild_review --root "E:\Photos" --output "C:\photo-review" --config my-thresholds.yaml
    ```
-   This runs Stage 2 then Stage 3 serially with your specified config. Do **not**
-   re-run Stage 0/1 unless you intend to rebuild the feature cache.
 
 ### Offline scene/SigLIP shadow calibration (read-only)
 
@@ -387,7 +423,21 @@ This is **not** a threshold-setting or production-decision tool.
 
 ## Tuning
 
-Everything lives in `config.yaml`; `docs/ALGORITHM.md` explains each value.
+Everything lives in `config.yaml` — **tunables only**, no paths to maintain;
+`docs/ALGORITHM.md` explains each value. Edit it in place, or keep a variant and
+pass it to either entry point with `--config`:
+
+```bat
+python -m src.run_pipeline    --root "E:\Photos" --output "C:\photo-review" --config my-thresholds.yaml
+python -m src.rebuild_review  --root "E:\Photos" --output "C:\photo-review" --config my-thresholds.yaml
+```
+
+Both commands ignore any `paths:` in that file: `--root`/`--output` always decide
+`paths.root`, `paths.db` and `paths.output_dir`. A missing `--config` file is an
+error, never a silent fall back to defaults. Relative paths *inside* the file
+(`features.scene_routing` model/prompt) keep resolving beside that file, not
+beside the temporary runtime config. After a threshold change, re-run only
+Stage 2+3 with `rebuild_review` — no photos are read.
 
 ### Optional closed-eye shadow metadata
 
@@ -495,7 +545,7 @@ bottleneck, which is the intended outcome.
 ## Layout
 
 ```
-config.yaml                 # all tunables
+config.yaml                 # all tunables (paths come from --root/--output)
 requirements.txt            # deps (torch installed separately, see setup)
 setup_windows.bat           # one-shot environment setup
 src/                        # pipeline (each stage is a `python -m src.<stage>`)
@@ -505,6 +555,8 @@ src/review_page.py          # renders review.html (Python side: static fallback 
 src/review_template.py      # the review page itself: markup, CSS, embedded browser script
 src/pipeline_report.py      # stage timings, throughput, rough ETA, disk report
 src/root_scope.py           # durable root identity + per-run scope (fail closed)
+src/runtime_config.py       # the one --root/--output -> paths mapping both CLIs use
+src/rebuild_review.py       # re-run Stage 2+3 only for an existing --output (fail closed)
 src/schema.py               # SQLite DDL + additive migrations
 src/stage1_telemetry.py     # Stage 1 per-phase timing (host-wall vs CUDA events)
 src/stage1_pipeline.py      # bounded, ordered CPU prefetch (one sequential reader)
