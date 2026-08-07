@@ -12,12 +12,12 @@ from src import run_pipeline
 
 
 def _seed_output(output: Path) -> Path:
-    """Minimal served output directory: review page + a real (empty) review DB."""
+    """A served output directory as Stage 3 leaves it: the installed review UI
+    (committed Preact build) plus a real (empty) review DB."""
+    from src import review_page
+
     output.mkdir(parents=True, exist_ok=True)
-    (output / "review.html").write_text(
-        '<h1>Photo Dedup - Review</h1><div class="notice" id="perf">old</div>',
-        encoding="utf-8",
-    )
+    review_page.install_review_ui(output)
     conn = db.open_db(output / "inventory.sqlite")
     conn.commit()
     conn.close()
@@ -62,15 +62,13 @@ def test_pipeline_order_limit_output_and_never_execute(tmp_path, monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not execute")),
     )
 
-    result = run_pipeline.run(
-        str(root), str(output), backend="stub", limit=2, review_limit=37
-    )
+    result = run_pipeline.run(str(root), str(output), backend="stub", limit=2)
 
     assert [call[0] for call in calls] == ["stage0", "stage1", "stage2", "stage3"]
     assert calls[0][1]["limit"] == 2
     assert calls[1][1]["limit"] == 2
     assert calls[1][1]["backend_override"] == "stub"
-    assert calls[3][1]["review_limit"] == 37
+    assert set(calls[3][1]) == {"config_path"}
     assert all(call[2]["paths"]["output_dir"] == str(output.resolve()) for call in calls)
     assert all(call[2]["paths"]["db"] == str(output.resolve() / "inventory.sqlite") for call in calls)
     # Runtime config enables the SSD thumbnail cache without touching config.yaml.
@@ -129,9 +127,13 @@ def test_pipeline_reports_stage_times_throughput_and_rough_eta(tmp_path, monkeyp
     assert "Thumbnail cache (SSD)" in text
     assert "SSD free space" in text
 
+    # Performance now lives only in performance.txt / review_summary.json; the
+    # served review UI carries no runtime diagnostics, so the page must NOT embed
+    # them. review.html is the committed Preact entry (loads a hashed bundle).
     page = (output / "review.html").read_text(encoding="utf-8")
-    assert "Observed performance and thumbnail disk usage" in page
-    assert "ROUGH full-library Stage 1 ETA" in page
+    assert "Observed performance and thumbnail disk usage" not in page
+    assert "ROUGH full-library Stage 1 ETA" not in page
+    assert 'id="app"' in page and "assets/" in page
 
 
 def test_low_disk_space_warns_but_does_not_abort(tmp_path, monkeypatch, capsys):
@@ -189,7 +191,10 @@ def test_server_is_local_output_root_and_returns_review(tmp_path):
     try:
         assert server.server_address[0] == "127.0.0.1"
         assert url.endswith("/review.html")
-        assert b"Photo Dedup - Review" in urlopen(url).read()
+        # The served entry is the compiled Preact page: a Chinese <title> and the
+        # app mount point that loads the hashed bundle.
+        page = urlopen(url).read().decode("utf-8")
+        assert "照片去重" in page and 'id="app"' in page
         for probe in ("/../secret.txt", "/inventory.sqlite", "/thumbs/1.jpg"):
             with pytest.raises(HTTPError) as excinfo:
                 urlopen(url.rsplit("/", 1)[0] + probe)
@@ -374,7 +379,7 @@ def test_paths_with_spaces_survive_round_trip(tmp_path, monkeypatch):
     assert result["review_html"] == str(output.resolve() / "review.html")
 
 
-def test_main_passes_review_limit_and_thumb_px(tmp_path, monkeypatch):
+def test_main_passes_thumb_px(tmp_path, monkeypatch):
     root = tmp_path / "photos"
     root.mkdir()
     output = tmp_path / "output"
@@ -388,9 +393,8 @@ def test_main_passes_review_limit_and_thumb_px(tmp_path, monkeypatch):
     status = run_pipeline.main(
         [
             "--root", str(root), "--output", str(output),
-            "--review-limit", "23", "--thumb-px", "256", "--no-serve",
+            "--thumb-px", "256", "--no-serve",
         ]
     )
     assert status == 0
-    assert received["review_limit"] == 23
     assert received["thumb_px"] == 256

@@ -65,7 +65,7 @@ def test_chained_exact_component_only_direct_byte_duplicate_can_manifest(tmp_pat
 
     stats = s2.run(cfg)
     assert stats["auto_remove"] == 1
-    report = s3.run(cfg, no_thumbs=True)
+    report = s3.run(cfg)
     assert report["delete_files"] == 1
     manifest = (tmp_path / "out" / "delete_local.txt").read_text()
     assert "b.jpg" in manifest
@@ -101,7 +101,7 @@ def test_invalid_embedding_in_phash_group_becomes_unknown(tmp_path):
     conn.close()
     stats = s2.run(cfg)
     assert stats["unknown"] == 1
-    s3.run(cfg, no_thumbs=True)
+    s3.run(cfg)
     assert (tmp_path / "out" / "delete_local.txt").read_text() == ""
 
 

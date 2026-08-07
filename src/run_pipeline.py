@@ -70,8 +70,8 @@ def _print_runtime_diagnostics(args: argparse.Namespace, log_path: Path) -> None
         "[diagnostics] options: "
         f"root={args.root!r}, output={args.output!r}, config={args.config!r}, "
         f"backend={args.backend!r}, "
-        f"limit={args.limit!r}, review_limit={args.review_limit}, "
-        f"thumb_px={args.thumb_px}, serve={args.serve}, port={args.port}"
+        f"limit={args.limit!r}, thumb_px={args.thumb_px}, "
+        f"serve={args.serve}, port={args.port}"
     )
     try:
         import torch
@@ -134,21 +134,11 @@ def _still_image_count(db_path: Path) -> int:
         conn.close()
 
 
-def _performance_panel(performance: dict[str, Any], disk: dict[str, Any] | None) -> str:
-    """Compact HTML panel embedded in review.html (same numbers as the file)."""
-    import html as html_mod
-
-    lines = pipeline_report.render_lines(performance, disk)
-    body = "<br>".join(html_mod.escape(line) for line in lines if line)
-    return f"<strong>Observed performance and thumbnail disk usage</strong><br>{body}"
-
-
 def run(
     root: str,
     output: str,
     backend: str = "torch",
     limit: int | None = None,
-    review_limit: int = stage3_report.DEFAULT_REVIEW_LIMIT,
     thumb_px: int = thumbnails.DEFAULT_MAX_PX,
     config_path: str | None = None,
 ) -> dict[str, Any]:
@@ -165,8 +155,6 @@ def run(
     runtime_config.base_config_path(config_path)
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1")
-    if review_limit < 1:
-        raise ValueError("review_limit must be at least 1")
     if thumb_px < 1:
         raise ValueError("thumb_px must be at least 1")
 
@@ -211,11 +199,13 @@ def run(
         print("[pipeline] stage 3/4: build paged review")
         report, stage3_seconds = _elapsed(
             stage3_report.run,
-            config_path=str(runtime_path), review_limit=review_limit,
-            performance_panel=_performance_panel(performance, disk),
+            config_path=str(runtime_path),
         )
 
     # Stage 3's own wall time is measured, then folded into the written report.
+    # Performance now lives only in performance.txt / review_summary.json -- the
+    # served UI carries no runtime diagnostics, so there is no in-page panel to
+    # rewrite after the fact.
     timings["stage3"] = stage3_seconds
     performance = pipeline_report.build_performance(
         timings, inventory, features, library_still_images=still_images
@@ -224,9 +214,6 @@ def run(
         output_path, still_images, dict(report.get("thumbnails") or thumb_stats)
     )
     pipeline_report.write_performance_file(output_path, performance, disk)
-    stage3_report.rewrite_performance_panel(
-        output_path / "review.html", _performance_panel(performance, disk)
-    )
 
     review = output_path / "review.html"
     result = {
@@ -267,11 +254,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--backend", choices=("torch", "stub"), default="torch")
     parser.add_argument("--limit", type=int, default=None, help="scan/process at most N files")
     parser.add_argument(
-        "--review-limit", type=int, default=stage3_report.DEFAULT_REVIEW_LIMIT,
-        help=("static file:// fallback tile count; paged server views are always complete "
-              f"(default: {stage3_report.DEFAULT_REVIEW_LIMIT})"),
-    )
-    parser.add_argument(
         "--thumb-px", type=int, default=thumbnails.DEFAULT_MAX_PX,
         help=f"thumbnail long edge in pixels (default: {thumbnails.DEFAULT_MAX_PX})",
     )
@@ -306,8 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 try:
                     result = run(
                         args.root, args.output, backend=args.backend, limit=args.limit,
-                        review_limit=args.review_limit, thumb_px=args.thumb_px,
-                        config_path=args.config,
+                        thumb_px=args.thumb_px, config_path=args.config,
                     )
                     if args.serve:
                         serve_review(

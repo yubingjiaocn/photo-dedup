@@ -298,11 +298,14 @@ All human decisions are stored in `output/review_state.json` (atomic writes on
 every change). **Original photos remain read-only**; AI decisions and deletion
 manifests are unchanged. Human state is an independent overlay.
 
-The page is the only thing served statically: `/api/action` requires a JSON
-content type and rejects a cross-site `Origin`/`Referer` (a header-less local
-script still works), and every other file in the output directory — the deletion
-manifests, the review state, the summary, the log — is reachable only through the
-read-only API, or not at all. `review_state.json` is written compactly and fsynced
+Only the compiled review UI is served statically — `review.html` plus the hashed
+`assets/*` chunks named in `review_assets.json`, and nothing else: `/api/action`
+requires a JSON content type and rejects a cross-site `Origin`/`Referer` (a
+header-less local script still works), and every other file in the output
+directory — the deletion manifests, the review state, the summary, the log — is
+reachable only through the read-only API, or not at all. The server reads that
+manifest as its allow-list rather than trusting the directory, so a stray file
+dropped in the output folder is never web-served. `review_state.json` is written compactly and fsynced
 before the rename, so a power loss cannot leave a truncated file behind. A file
 this build cannot read is renamed to `review_state.corrupt-<timestamp>.json` and
 the reviewer sees a banner at the top of the page saying so and naming the kept
@@ -334,11 +337,13 @@ classification is what would need to move first.
 
 `tests/test_review_queues.py` gates the queue totals, paging, state transitions,
 undo and root scoping; `tests/test_review_hardening.py` gates the cross-site,
-static-exposure and state-durability rules; `tests/test_review_workbench_ui.py` gates the front end in
-CI (it runs the embedded script in `node` behind a DOM stub and asserts the
-thumb-only/original-on-demand boundary);
-`scripts/verification/album_viewer_browser.py` is the real-Chromium pass over the
-same behaviour.
+static-exposure and state-durability rules; `tests/test_review_frontend_build.py`
+gates the committed build, its manifest and the served static allow-list. The
+review UI itself is a Preact application under `frontend/` (see
+[`frontend/README.md`](frontend/README.md) and [`FRONTEND_DECISION.md`](FRONTEND_DECISION.md));
+its logic is unit-tested with Vitest (`frontend/test/`) and its real-browser
+behaviour by `frontend/harness/` (run `python3 frontend/harness/run_all.py`),
+which `scripts/verification/album_viewer_browser.py` forwards to.
 
 ---
 
@@ -464,10 +469,12 @@ This is **not** a threshold-setting or production-decision tool.
    ```
    python -m src.stage3_report
    ```
-   Produces in `output/`: `review.html` (the paged UI), `review_summary.json`,
-   `delete_local.txt`, `delete_cloud.json`, `summary.txt`, and the compact
-   pagination index inside `inventory.sqlite`. Manifests contain only
-   `AUTO_REMOVE` decisions. Cloud entries without a timestamp and size are
+   Produces in `output/`: the paged review UI (`review.html`, the hashed
+   `assets/*` chunks, and the `review_assets.json` allow-list — the committed
+   `frontend/dist/` build copied in, no Node required), plus
+   `review_summary.json`, `delete_local.txt`, `delete_cloud.json`, `summary.txt`,
+   and the compact pagination index inside `inventory.sqlite`. Manifests contain
+   only `AUTO_REMOVE` decisions. Cloud entries without a timestamp and size are
    omitted because a filename is not unique. Stage 3 reads no photos at all.
 
 6. **Review** — open `output/review.html` (the one-command pipeline serves it
@@ -625,10 +632,10 @@ setup_windows.bat           # one-shot environment setup
 src/                        # pipeline (each stage is a `python -m src.<stage>`)
 src/thumbnails.py           # SSD thumbnail cache written from Stage 1's decode
 src/review_server.py        # local-only paged review API (SSD thumbnails only)
-src/review_page.py          # renders review.html (Python side: static fallback tiles)
-src/review_template.py      # the review page shell: markup + the four placeholders
-src/review_styles.py        # the review stylesheet (state colours, density, layout)
-src/review_script.py        # the review browser script (queues, undo, zoom, blink)
+src/review_assets.py        # locate/install the committed frontend build + manifest
+src/review_page.py          # install the compiled review UI into the output dir
+frontend/                   # Preact review UI (Vite + TypeScript; dist/ is committed)
+frontend/dist/              # committed build the pipeline serves (no Node at runtime)
 src/pipeline_report.py      # stage timings, throughput, rough ETA, disk report
 src/root_scope.py           # durable root identity + per-run scope (fail closed)
 src/runtime_config.py       # the one --root/--output -> paths mapping both CLIs use
@@ -658,11 +665,22 @@ Run `scripts/test-full.sh` before push/release, and whenever changing the review
 server, pagination, end-to-end pipeline, SigLIP/routing, or benchmark/reporting.
 The full suite remains authoritative; tests are tiered, not deleted.
 
-Changing the review UI additionally requires `node` on PATH: the review page's
-embedded script is parsed *and* executed under a DOM stub by
-`tests/test_review_html_js_syntax.py` and `tests/test_review_workbench_ui.py`, the
-queue/undo semantics behind it by `tests/test_review_queues.py`, the write and
-static boundary by `tests/test_review_hardening.py`, and the per-interaction cost
-by `tests/test_review_scale.py`. For UI work that touches focus, layout reflow,
-zoom gestures, request races or which URLs the page requests, also run the
-real-browser pass in `scripts/verification/album_viewer_browser.py`.
+The pytest gates for the review server stay in Python: the queue/undo semantics
+by `tests/test_review_queues.py`, the write and static boundary by
+`tests/test_review_hardening.py`, the committed build and served allow-list by
+`tests/test_review_frontend_build.py`, and the per-interaction cost by
+`tests/test_review_scale.py`.
+
+**Changing the review UI needs Node** (only for development — the runtime never
+does). The UI is a Preact app under `frontend/`; rebuild and commit `dist/` after
+any change (see [`frontend/README.md`](frontend/README.md)):
+
+```bash
+cd frontend && npm ci && npm run typecheck && npm test && npm run build
+git add frontend/src frontend/dist   # commit source and the rebuilt artifact together
+```
+
+`npm test` runs the Vitest reducer/keyboard/component/pool suite. For behaviour
+that touches focus, zoom gestures, request races or which URLs the page requests,
+run the real-browser pass: `python3 frontend/harness/run_all.py` (or
+`scripts/verification/album_viewer_browser.py`, which forwards to it).

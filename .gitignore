@@ -10,11 +10,19 @@ _trash/
 output/
 *.log
 
-# Generated review artifacts
-review.html
-delete_local.txt
-delete_cloud.json
-summary.txt
+# Generated review artifacts (anchored to the repo root so a working copy left
+# there is ignored, while the committed frontend build under frontend/dist/ --
+# including its review.html -- is tracked as the runtime source of truth).
+/review.html
+/delete_local.txt
+/delete_cloud.json
+/summary.txt
+
+# Frontend build tooling: node_modules is regenerable; frontend/dist is NOT --
+# it is the committed, reproducible build the Python runtime serves without Node.
+frontend/node_modules/
+# Generated verification output (screenshots + request logs from the browser harness).
+frontend/artifacts/
 
 # Models / weights (downloaded on first run)
 models/

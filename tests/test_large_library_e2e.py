@@ -175,9 +175,11 @@ def test_performance_and_disk_numbers_are_visible(pipeline):
     assert disk["estimated_total_bytes"] is not None
     assert disk["free_bytes"] is not None
 
+    # The served UI carries no runtime diagnostics: those numbers live in
+    # performance.txt (asserted above), never embedded in the page.
     page = (output / "review.html").read_text(encoding="utf-8")
-    assert "ROUGH full-library Stage 1 ETA" in page
-    assert "SSD free space" in page
+    assert "ROUGH full-library Stage 1 ETA" not in page
+    assert "SSD free space" not in page
 
 
 # --- paged review over the served output ----------------------------------
@@ -294,14 +296,31 @@ def test_same_name_video_is_standalone_and_not_thumbnailed(pipeline):
     assert thumb_rows["n"] == 0          # videos are not thumbnailed or analysed
 
 
+def _bundle_text(output) -> str:
+    """Concatenated JS/CSS of the installed UI bundle (the UI's shipped content).
+
+    The Chinese chrome and endpoint wiring live in the compiled bundle now, not
+    in the entry HTML, so page-content assertions read what the server serves.
+    """
+    from src import review_assets
+
+    manifest = review_assets.load_manifest(output)
+    assert manifest is not None, "installed UI has no review_assets.json"
+    parts = [(output / "review.html").read_text(encoding="utf-8")]
+    for asset in manifest["assets"]:
+        parts.append((output / asset).read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 def test_review_page_is_chinese_and_localhost_only(pipeline):
     page = (pipeline["output"] / "review.html").read_text(encoding="utf-8")
-    assert 'lang="zh-CN"' in page
-    assert "照片去重" in page
-    assert "全部（时间线）" in page
-    assert "每页" in page
+    assert 'lang="zh-CN"' in page  # the entry document is still declared Chinese
+    bundle = _bundle_text(pipeline["output"])
+    assert "照片去重" in bundle
+    assert "全部（时间线）" in bundle
+    assert "每页" in bundle
     # Internal state names stay English, as agreed.
-    assert 'data-view="MAYBE"' in page and 'data-view="UNKNOWN"' in page
+    assert "MAYBE" in bundle and "UNKNOWN" in bundle
     server, thread, base = _serve(pipeline["output"])
     try:
         assert base.startswith("http://127.0.0.1:")
@@ -326,12 +345,12 @@ def test_ui_exposes_no_manual_marking_endpoint_this_milestone(pipeline):
     conn.close()
     # No separate review_marks table - human state is in JSON only
     assert "review_marks" not in tables
-    page = (output / "review.html").read_text(encoding="utf-8")
+    bundle = _bundle_text(output)
     # POST endpoint exists at /api/action for human decisions
-    assert "/api/action" in page
-    assert "method:'POST'" in page
+    assert "/api/action" in bundle
+    assert "POST" in bundle
     # But /api/mark (old name) should not exist
-    assert "/api/mark" not in page
+    assert "/api/mark" not in bundle
 
 
 def test_only_byte_identical_duplicates_are_proposed_for_removal(pipeline):

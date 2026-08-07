@@ -31,9 +31,6 @@ from PIL import Image, ImageDraw  # noqa: E402
 
 from src import db, review_page, review_server, thumbnails  # noqa: E402
 
-ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
-PORT = int(ARGS[0]) if ARGS else 18911
-CORRUPT_STATE = "--corrupt-state" in sys.argv[1:]
 GROUPS = 4
 PER_GROUP = 3
 UNGROUPED = 2
@@ -45,7 +42,7 @@ PHOTO_W, PHOTO_H = 2400, 1800
 COLORS = [(200, 60, 60), (60, 180, 90), (70, 110, 210), (220, 180, 50), (170, 90, 200)]
 
 
-def build(output: Path, photos: Path) -> None:
+def build(output: Path, photos: Path, corrupt_state: bool = False) -> None:
     output.mkdir(parents=True)
     photos.mkdir(parents=True)
     thumbs = thumbnails.thumbs_dir(output)
@@ -103,22 +100,24 @@ def build(output: Path, photos: Path) -> None:
     conn.commit()
     conn.close()
 
-    data = {"groups": [], "queues": {"MAYBE": [], "UNKNOWN": []},
-            "delete_paths": [], "total_delete_bytes": 0}
-    (output / "review.html").write_text(
-        review_page.render_html(data, output, review_limit=0), encoding="utf-8")
+    # Install the committed Preact build (review.html + hashed assets/* +
+    # review_assets.json), exactly as Stage 3 does for a real run.
+    review_page.install_review_ui(output)
     (output / "review_summary.json").write_text('{"views": {}}', encoding="utf-8")
-    if CORRUPT_STATE:
+    if corrupt_state:
         # A half-written file, the way a power loss used to leave one.
         (output / "review_state.json").write_text(
             '{"version": 1, "groups": {"1": {"action": "acce', encoding="utf-8")
 
 
 def main() -> None:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    port = int(args[0]) if args else 18911
+    corrupt_state = "--corrupt-state" in sys.argv[1:]
     workdir = Path(tempfile.mkdtemp(prefix="photo-dedup-album-fixture-"))
     try:
-        build(workdir / "output", workdir / "photos")
-        server, url = review_server.start_server(workdir / "output", port=PORT)
+        build(workdir / "output", workdir / "photos", corrupt_state=corrupt_state)
+        server, url = review_server.start_server(workdir / "output", port=port)
         print(url, flush=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

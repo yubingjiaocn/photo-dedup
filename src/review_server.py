@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import db, review_state, root_scope, thumbnails
+from . import db, review_assets, review_state, root_scope, thumbnails
 
 DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
@@ -50,9 +50,12 @@ _GROUP_RE = re.compile(r"^/api/group/(\d{1,18})$")
 _ACTION_RE = re.compile(r"^/api/action$")
 # Static GETs are allow-listed, not deny-listed: the output directory also holds
 # the deletion manifests, the human review state, the summary and the run log, and
-# a new file added there must not become readable by default. The page is
-# self-contained (CSS and script are inlined), so this is the whole list.
-_STATIC_ALLOWED = frozenset({"review.html", "favicon.ico"})
+# a new file added there must not become readable by default. The review UI is now
+# a compiled bundle (review.html + hashed assets/*), so the list is the entry page
+# plus exactly the assets named in ``review_assets.json`` -- read from the manifest
+# per ReviewData, never inferred from the directory listing. ``favicon.ico`` stays
+# allowed so a browser's automatic request is a clean 404-or-file, not a probe hit.
+_ALWAYS_STATIC = frozenset({"favicon.ico"})
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,11 @@ class ReviewData:
             print("[review][WARN] this output directory has no recorded photo root "
                   "(created before root identity); serving every row it contains")
         self.summary = self._read_summary()
+        # Static allow-list: the compiled UI's entry page plus exactly the hashed
+        # assets named in review_assets.json, read once at startup. Fail-closed:
+        # a missing manifest allows only review.html.
+        self.static_allowed = frozenset(
+            _ALWAYS_STATIC | review_assets.allowed_static_paths(self.output))
         self.state = review_state.ReviewState(self.output)
         # Validate fingerprints and prune stale decisions after stage2 rerun
         stale_count = self.state.validate_and_prune_stale(self._conn, self.scope)
@@ -590,13 +598,17 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
 
             The output directory is a working directory, not a web root: it holds
             the deletion manifests, the human review state, the summary and the
-            run log. Denying a handful of known names let anything new added
-            there leak by default, so this inverts the rule -- only the review
-            page itself is served statically, and everything else goes through
-            the API or not at all.
+            run log. Denying a handful of known names would let anything new added
+            there leak by default, so this inverts the rule -- only the compiled
+            review UI (``review.html`` plus the hashed ``assets/*`` chunks named
+            in ``review_assets.json``) is served statically, and everything else
+            goes through the API or not at all.
 
-            Decoded once and compared exactly, so ``/%2e%2e/x``, ``/./review.html``
-            or a backslash separator cannot smuggle a different target through.
+            The path is decoded once and matched exactly against that manifest set
+            (normalised to POSIX separators), so ``/%2e%2e/x``, ``/./review.html``,
+            a backslash separator or an ``assets/`` name not in the manifest cannot
+            smuggle a different target through. A ``..`` segment is rejected
+            outright rather than normalised away.
             """
             try:
                 decoded = unquote(raw_path, errors="strict")
@@ -604,9 +616,11 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
                 return False
             if "\x00" in decoded:
                 return False
-            parts = [part for part in decoded.replace("\\", "/").split("/")
-                     if part not in ("", ".")]
-            return len(parts) == 1 and parts[0] in _STATIC_ALLOWED
+            normalised = decoded.replace("\\", "/").lstrip("/")
+            parts = normalised.split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                return False
+            return normalised in data.static_allowed
 
         # -- endpoints ------------------------------------------------------
         def _serve_page(self, query: str) -> None:

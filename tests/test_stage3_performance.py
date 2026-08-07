@@ -1,140 +1,77 @@
-"""Stage 3 must never open an original photo: it uses only the SSD thumb cache."""
+"""Stage 3 installs the review UI without ever opening an original photo.
 
-from pathlib import Path
+The review page used to be a Python-rendered HTML string with inlined script and
+static file:// fallback tiles. It is now a committed Preact build that Stage 3
+*copies* into the output directory (``review.html`` + hashed ``assets/*`` +
+``review_assets.json``). These tests assert the surviving Stage-3 boundary --
+no image is read, the CLI plumbing is intact -- against the new install path.
+"""
 
-import pytest
 from PIL import Image
 
-from src import stage3_report, thumbnails
+from src import review_assets, review_page, stage3_report
 
 
-def _rec(index, decision="MAYBE", file_id=None):
-    return {
-        "file_id": index if file_id is None else file_id,
-        "group_id": None,
-        "path": f"/photos/{index}.jpg",
-        "basename": f"{index}.jpg",
-        "width": 4000,
-        "height": 3000,
-        "quality_score": 1.0,
-        "face_count": 0,
-        "reason": "review",
-        "decision": decision,
-        "quality_meta": {},
-    }
-
-
-def _data(maybe=(), unknown=(), groups=()):
-    return {
-        "groups": list(groups),
-        "delete_paths": [],
-        "total_delete_bytes": 0,
-        "queues": {"MAYBE": list(maybe), "UNKNOWN": list(unknown)},
-    }
-
-
-def test_render_html_never_opens_a_source_image(tmp_path, monkeypatch):
-    """Even for a huge queue, rendering must not call Image.open at all."""
+def test_installing_the_review_ui_never_opens_a_source_image(tmp_path, monkeypatch):
+    """Copying the built UI touches static files only, never an original photo."""
     def explode(*args, **kwargs):
         raise AssertionError("stage 3 must not open original photos")
 
     monkeypatch.setattr(Image, "open", explode)
-    data = _data(maybe=[_rec(i) for i in range(1500)],
-                 unknown=[_rec(i, "UNKNOWN") for i in range(1200)])
+    manifest = review_page.install_review_ui(tmp_path)
 
-    page = stage3_report.render_html(data, tmp_path, review_limit=100)
-
-    assert "/api/thumb/" in page  # paged UI fetches cached thumbs by file id
-    assert "1500" in page and "1200" in page
-
-
-def _fallback(page: str) -> str:
-    """Only the static file:// fallback block, excluding the JS template."""
-    return page.rsplit('<div class="row">', 1)[1]
-
-
-def test_static_fallback_uses_cached_thumbnail_when_present(tmp_path):
-    directory = thumbnails.thumbs_dir(tmp_path)
-    directory.mkdir(parents=True)
-    Image.new("RGB", (32, 24), "navy").save(thumbnails.thumb_path(directory, 7), "JPEG")
-
-    fallback = _fallback(stage3_report.render_html(
-        _data(maybe=[_rec(7)]), tmp_path, review_limit=5))
-
-    assert 'src="thumbs/7.jpg"' in fallback
-    assert "thumbnail unavailable" not in fallback
-
-
-def test_static_fallback_reports_missing_thumbnail_instead_of_reading_source(tmp_path):
-    fallback = _fallback(stage3_report.render_html(
-        _data(maybe=[_rec(9)]), tmp_path, review_limit=5))
-    assert "thumbnail unavailable" in fallback
-    assert "thumbs/9.jpg" not in fallback
-
-
-def test_no_thumbs_omits_the_static_fallback_entirely(tmp_path):
-    directory = thumbnails.thumbs_dir(tmp_path)
-    directory.mkdir(parents=True)
-    thumbnails.thumb_path(directory, 4).write_bytes(b"jpeg")
-    fallback = _fallback(stage3_report.render_html(
-        _data(maybe=[_rec(4)]), tmp_path, review_limit=0))
-    assert "thumbs/4.jpg" not in fallback
-
-
-def test_cached_thumb_uri_only_reports_existing_files(tmp_path):
-    assert stage3_report.cached_thumb_uri(tmp_path, 3) is None
-    assert stage3_report.cached_thumb_uri(tmp_path, None) is None
-    directory = thumbnails.thumbs_dir(tmp_path)
-    directory.mkdir(parents=True)
-    thumbnails.thumb_path(directory, 3).write_bytes(b"jpeg")
-    assert stage3_report.cached_thumb_uri(tmp_path, 3) == "thumbs/3.jpg"
-
-
-def test_render_html_declares_the_queues_the_browse_views_and_the_page_sizes(tmp_path):
-    page = stage3_report.render_html(_data(), tmp_path, review_limit=1)
-    # The group queues are the entry point; ALL/MAYBE/UNKNOWN stay as browse lists.
-    for queue in ("PENDING", "LATER", "DONE"):
-        assert f'data-queue="{queue}"' in page
-    assert 'data-view="ALL"' in page
-    assert 'data-view="MAYBE"' in page
-    assert 'data-view="UNKNOWN"' in page
-    assert "/api/original/" in page
-    assert "双栏对比 Shift+C" in page
-    assert "ArrowLeft" in page and "ArrowRight" in page
-    assert "/api/group/" in page
-    assert "/api/locate?" in page
-    assert "removeAttribute('src')" in page
-    for size in (50, 100, 200):
-        assert f'value="{size}"' in page
-
-
-def test_render_html_rejects_a_negative_fallback_limit(tmp_path):
-    with pytest.raises(ValueError, match="review_limit"):
-        stage3_report.render_html(_data(), tmp_path, review_limit=-1)
-
-
-def test_performance_panel_is_replaced_in_place(tmp_path):
     review = tmp_path / "review.html"
-    review.write_text(
-        '<h1>x</h1><div class="notice" id="perf">placeholder</div><div>rest</div>',
-        encoding="utf-8",
-    )
-    assert stage3_report.rewrite_performance_panel(review, "measured 1.5s") is True
-    text = review.read_text(encoding="utf-8")
-    assert "measured 1.5s" in text
-    assert "placeholder" not in text
-    assert "<div>rest</div>" in text
-    assert stage3_report.rewrite_performance_panel(Path(tmp_path / "missing.html"), "x") is False
+    assert review.is_file()
+    assert (tmp_path / "assets").is_dir()
+    assert (tmp_path / review_assets.MANIFEST_NAME).is_file()
+    assert manifest["entry"] == "review.html"
+    assert manifest["assets"], "expected at least one hashed asset chunk"
 
 
-def test_stage3_cli_passes_review_limit(monkeypatch):
+def test_installed_page_loads_only_its_own_hashed_assets(tmp_path):
+    """review.html references exactly the assets the manifest allow-lists."""
+    review_page.install_review_ui(tmp_path)
+    html = (tmp_path / "review.html").read_text(encoding="utf-8")
+    allowed = review_assets.allowed_static_paths(tmp_path)
+    # Every ./assets/... URL the page pulls is in the served allow-list.
+    import re
+
+    for ref in re.findall(r'\./(assets/[^"\']+)', html):
+        assert ref in allowed, f"{ref} not in the static allow-list"
+    # And the page never reaches for a working file or a source path.
+    for forbidden in ("inventory.sqlite", "review_state.json", "file://", "/photos/"):
+        assert forbidden not in html
+
+
+def test_reinstalling_replaces_stale_assets(tmp_path):
+    """A rebuild must not leave an orphaned old chunk the manifest no longer names."""
+    review_page.install_review_ui(tmp_path)
+    orphan = tmp_path / "assets" / "review-DEADBEEF.js"
+    orphan.write_text("stale", encoding="utf-8")
+    review_page.install_review_ui(tmp_path)
+    assert not orphan.exists()
+    allowed = review_assets.allowed_static_paths(tmp_path)
+    assert "assets/review-DEADBEEF.js" not in allowed
+
+
+def test_stage3_cli_passes_config_and_root(monkeypatch):
     received = {}
     monkeypatch.setattr(
         stage3_report, "run", lambda **kwargs: received.update(kwargs) or {}
     )
 
-    assert stage3_report.main(["--config", "runtime.yaml", "--review-limit", "17"]) == 0
+    assert stage3_report.main([
+        "--config", "runtime.yaml", "--root", "/photos",
+    ]) == 0
     assert received == {
-        "config_path": "runtime.yaml", "no_thumbs": False, "review_limit": 17,
-        "root_override": None,
+        "config_path": "runtime.yaml", "root_override": "/photos",
     }
+
+
+def test_missing_committed_build_fails_loudly(tmp_path, monkeypatch):
+    """A broken checkout (no committed dist) is an error, not a silent empty page."""
+    import pytest
+
+    monkeypatch.setattr(review_assets, "dist_dir", lambda: tmp_path / "does-not-exist")
+    with pytest.raises(FileNotFoundError, match="review front-end build"):
+        review_page.install_review_ui(tmp_path / "out")

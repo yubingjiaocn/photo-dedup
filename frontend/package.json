@@ -1,0 +1,27 @@
+{
+  "name": "photo-dedup-review-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Preact review workbench for the photo-dedup pipeline. Built with Vite; the compiled dist/ is committed and copied into the review output by Stage 3, so the Python runtime never needs Node.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:only": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@panzoom/panzoom": "4.6.2",
+    "openseadragon": "6.1.0",
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "happy-dom": "20.11.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

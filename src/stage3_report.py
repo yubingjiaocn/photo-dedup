@@ -36,12 +36,7 @@ from typing import Any, Dict, List, Optional
 from .config import load_config
 from . import db
 from . import root_scope
-from .review_page import (  # noqa: F401 (cached_thumb_uri re-exported for callers)
-    DEFAULT_REVIEW_LIMIT,
-    cached_thumb_uri,
-    render_html,
-    rewrite_performance_panel,
-)
+from .review_page import install_review_ui
 
 
 # --- delete-list expansion -------------------------------------------------
@@ -190,13 +185,8 @@ def build_review_indexes(conn, data: Dict[str, Any], scope: Any = None) -> Dict[
 
 def run(
     config_path: Optional[str] = None,
-    no_thumbs: bool = False,
-    review_limit: int = DEFAULT_REVIEW_LIMIT,
-    performance_panel: str = "",
     root_override: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if review_limit < 1:
-        raise ValueError("review_limit must be at least 1")
     cfg = load_config(config_path)
     # Fail closed before the database is opened/created (see stage 1). Also before
     # out_dir is created, so a refused report leaves no directory behind either.
@@ -243,15 +233,12 @@ def run(
     with open(cloud_json, "w", encoding="utf-8") as fh:
         json.dump(data["cloud_items"], fh, ensure_ascii=False, indent=2)
 
-    # review.html: paged UI; the static fallback uses only cached SSD thumbs.
+    # review.html + assets/*: copy the committed Preact build into the output and
+    # write review_assets.json (the server's static allow-list). No original photo
+    # is opened; this is a static-file copy of a build that already exists.
     review = out_dir / "review.html"
-    html_str = render_html(
-        data, out_dir,
-        review_limit=0 if no_thumbs else review_limit,
-        performance_panel=performance_panel,
-    )
-    with open(review, "w", encoding="utf-8") as fh:
-        fh.write(html_str)
+    ui_manifest = install_review_ui(out_dir)
+    print(f"[stage3] installed review UI ({len(ui_manifest['assets'])} asset(s)) -> {review}")
 
     summary_payload = {
         "schema": 1,
@@ -331,17 +318,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--root", default=None,
                     help="verify the output directory belongs to this photo root")
-    ap.add_argument(
-        "--no-thumbs", action="store_true",
-        help="omit the static fallback tiles (the paged UI is unaffected)",
-    )
-    ap.add_argument(
-        "--review-limit", type=int, default=DEFAULT_REVIEW_LIMIT,
-        help=f"static fallback tile count (default: {DEFAULT_REVIEW_LIMIT})",
-    )
     args = ap.parse_args(argv)
-    run(config_path=args.config, no_thumbs=args.no_thumbs, review_limit=args.review_limit,
-        root_override=args.root)
+    run(config_path=args.config, root_override=args.root)
     return 0
 
 
