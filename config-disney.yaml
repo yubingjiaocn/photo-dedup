@@ -1,0 +1,16 @@
+# Disney stage-evaluation profile: deliberately conservative.
+# Fixed telephoto framing/background must not collapse distinct stage actions.
+cluster:
+  burst_window_seconds: 1
+  dinov2_threshold: 0.985
+  phash_hamming_threshold: 0
+  face_pose_shift_ratio: 0.15
+  min_face_score: 0.6
+  enable_loose_similar: false
+quality:
+  weight_iqa: 0.6
+  weight_face: 0.3
+  weight_resolution: 0.1
+  resolution_ref_mp: 12.0
+decision:
+  profile: conservative

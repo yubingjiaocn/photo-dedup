@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 
 class DSU:
     """Disjoint-set union with path compression + union by size + span tracking."""
@@ -122,6 +124,40 @@ def face_pose_shift(
 
 def should_split_by_face(shift: Optional[float], ratio: float) -> bool:
     return shift is not None and shift > ratio
+
+
+def dominant_identity(faces: Sequence[Dict[str, Any]], min_score: float,
+                      min_width_px: float) -> Optional[np.ndarray]:
+    """Return the largest usable face's anonymous unit embedding."""
+    candidates = []
+    for face in faces:
+        box = face.get("bbox") or []
+        if len(box) != 4 or float(face.get("score", 0.0)) < min_score or float(box[2]) < min_width_px:
+            continue
+        raw = face.get("identity_embedding")
+        if not isinstance(raw, str):
+            continue
+        try:
+            vec = np.frombuffer(bytes.fromhex(raw), dtype=np.float16).astype(np.float32)
+        except (ValueError, TypeError):
+            continue
+        norm = float(np.linalg.norm(vec))
+        if vec.size and norm > 0 and np.all(np.isfinite(vec)):
+            candidates.append((float(box[2]) * float(box[3]), vec / norm))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def identity_compatible(faces_i: Sequence[Dict[str, Any]], faces_j: Sequence[Dict[str, Any]],
+                        min_score: float, min_width_px: float,
+                        cosine_threshold: float) -> bool:
+    """Fail closed for face-bearing pairs; scenery pairs remain applicable."""
+    detected_i = any(float(f.get("score", 0.0)) >= min_score for f in faces_i)
+    detected_j = any(float(f.get("score", 0.0)) >= min_score for f in faces_j)
+    if not detected_i and not detected_j:
+        return True
+    left = dominant_identity(faces_i, min_score, min_width_px)
+    right = dominant_identity(faces_j, min_score, min_width_px)
+    return left is not None and right is not None and float(np.dot(left, right)) >= cosine_threshold
 
 
 def layer1_sha_exact(

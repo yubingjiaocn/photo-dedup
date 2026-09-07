@@ -113,6 +113,11 @@ def layer2_phash_near(
     threshold: int,
     window_seconds: int,
     frozen_components: set[int],
+    faces: Optional[Sequence[List[Dict[str, Any]]]] = None,
+    require_face_identity: bool = False,
+    identity_cosine_threshold: float = 0.45,
+    identity_min_width_px: float = 80.0,
+    min_face_score: float = 0.6,
 ) -> List[Tuple[int, int, str]]:
     """Union files whose pHash hamming <= threshold AND within window, enforcing span.
 
@@ -162,6 +167,12 @@ def layer2_phash_near(
             )
             if shared_bands >= 2:
                 if bin(hi ^ hj).count("1") <= threshold:
+                    if require_face_identity and faces is not None and not CL.identity_compatible(
+                        faces[i], faces[j], min_face_score, identity_min_width_px,
+                        identity_cosine_threshold,
+                    ):
+                        j += 1
+                        continue
                     if dsu.union_if_span_within(i, j, window_seconds):
                         edges.append((i, j, "phash_near"))
             j += 1
@@ -200,6 +211,9 @@ def layer_window(
     edge_type: str,
     valid_embeddings: Optional[np.ndarray] = None,
     frozen_components: Optional[set[int]] = None,
+    require_face_identity: bool = False,
+    identity_cosine_threshold: float = 0.45,
+    identity_min_width_px: float = 80.0,
 ) -> List[Tuple[int, int, str]]:
     """Time-windowed similarity union with span enforcement and face split."""
     if window_seconds <= 0:
@@ -224,6 +238,12 @@ def layer_window(
             if dsu.find(i) != dsu.find(j):
                 cos = float(np.dot(units[i], units[j]))
                 if cos >= cos_threshold:
+                    if require_face_identity and not CL.identity_compatible(
+                        faces[i], faces[j], min_face_score, identity_min_width_px,
+                        identity_cosine_threshold,
+                    ):
+                        j += 1
+                        continue
                     shift = CL.face_pose_shift(
                         faces[i], rows[i]["width"], rows[i]["height"],
                         faces[j], rows[j]["width"], rows[j]["height"],
@@ -265,6 +285,11 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         threshold=int(cc.get("phash_hamming_threshold", 2)),
         window_seconds=int(cc.get("burst_window_seconds", 30)),
         frozen_components=frozen_components,
+        faces=faces,
+        require_face_identity=bool(cc.get("require_face_identity", False)),
+        identity_cosine_threshold=float(cc.get("face_identity_cosine_threshold", 0.45)),
+        identity_min_width_px=float(cc.get("face_identity_min_width_px", 80.0)),
+        min_face_score=float(cc.get("min_face_score", 0.6)),
     )
 
     # Layer 3: DINO burst (30s window, skip frozen SHA components)
@@ -277,6 +302,9 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         edge_type="burst",
         valid_embeddings=valid_embeddings,
         frozen_components=frozen_components,
+        require_face_identity=bool(cc.get("require_face_identity", False)),
+        identity_cosine_threshold=float(cc.get("face_identity_cosine_threshold", 0.45)),
+        identity_min_width_px=float(cc.get("face_identity_min_width_px", 80.0)),
     )
 
     # Layer 4: Similar scene (optional, longer window, skip frozen)
@@ -290,6 +318,9 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             edge_type="similar_scene",
             valid_embeddings=valid_embeddings,
             frozen_components=frozen_components,
+            require_face_identity=bool(cc.get("require_face_identity", False)),
+            identity_cosine_threshold=float(cc.get("face_identity_cosine_threshold", 0.45)),
+            identity_min_width_px=float(cc.get("face_identity_min_width_px", 80.0)),
         )
 
     # Label each component by its strongest edge type.

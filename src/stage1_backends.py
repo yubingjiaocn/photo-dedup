@@ -252,6 +252,7 @@ class TorchBackend(_Instrumented):
                 self.clipiqa = pyiqa.create_metric("clipiqa", device=self.device)
 
         self._face = _load_yunet(cfg)
+        self._face_identity = _load_face_identity(cfg)
 
     def _verify_processor_is_per_image_separable(self) -> None:
         """Fail loudly if per-image preprocessing would change the embedding.
@@ -414,7 +415,19 @@ class TorchBackend(_Instrumented):
         for d in dets:
             x, y, fw, fh = (float(v) / scale for v in d[:4])
             landmarks = [float(v) / scale for v in d[4:14]]
-            faces.append({"bbox": [x, y, fw, fh], "landmarks": landmarks, "score": float(d[14])})
+            face = {"bbox": [x, y, fw, fh], "landmarks": landmarks, "score": float(d[14])}
+            if self._face_identity is not None:
+                try:
+                    aligned = self._face_identity.alignCrop(bgr, d)
+                    vector = self._face_identity.feature(aligned).reshape(-1).astype(np.float32)
+                    norm = float(np.linalg.norm(vector))
+                    if norm > 0 and np.all(np.isfinite(vector)):
+                        face["identity_embedding"] = (vector / norm).astype(np.float16).tobytes().hex()
+                except Exception:
+                    # Missing/poor alignment is deliberately represented by absent
+                    # evidence; Stage 2 then rejects the merge when identity is required.
+                    pass
+            faces.append(face)
         return faces
 
 
@@ -438,6 +451,23 @@ def _load_yunet(cfg: Config):
             raise RuntimeError(f"YuNet download failed: {exc}") from exc
     score_thr = float(cfg.features.get("yunet_score_threshold", 0.6))
     return cv2.FaceDetectorYN.create(str(onnx), "", (320, 320), score_thr, 0.3, 5000)
+
+
+def _load_face_identity(cfg: Config):
+    """Load an explicitly enabled local SFace model; never downloads it."""
+    identity = cfg.features.get("face_identity", {})
+    if not isinstance(identity, dict) or identity.get("enabled") is not True:
+        return None
+    if identity.get("mode", "shadow") != "shadow":
+        raise ValueError("features.face_identity.mode must be shadow")
+    try:
+        import cv2  # noqa: WPS433
+    except Exception as exc:
+        raise RuntimeError("face identity enabled but OpenCV is unavailable") from exc
+    model = cfg.models_dir / str(identity.get("model_path", "face_recognition_sface_2021dec.onnx"))
+    if not model.is_file():
+        raise RuntimeError(f"face identity model not found: {model}")
+    return cv2.FaceRecognizerSF.create(str(model), "")
 
 
 def resolve_backend(cfg: Config, override: Optional[str] = None):

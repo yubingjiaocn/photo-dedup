@@ -84,6 +84,11 @@ _DEFAULTS: Dict[str, Any] = {
             "model_sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
             "max_faces": 10,
         },
+        "face_identity": {
+            "enabled": False,
+            "mode": "shadow",
+            "model_path": "face_recognition_sface_2021dec.onnx",
+        },
         "scene_routing": {
             "enabled": False,
             "mode": "shadow",
@@ -102,6 +107,9 @@ _DEFAULTS: Dict[str, Any] = {
         "phash_hamming_threshold": 2,
         "face_pose_shift_ratio": 0.30,
         "min_face_score": 0.6,
+        "require_face_identity": False,
+        "face_identity_cosine_threshold": 0.45,
+        "face_identity_min_width_px": 80.0,
         "enable_loose_similar": False,
         "loose_window_seconds": 300,
         "loose_dinov2_threshold": 0.96,
@@ -235,6 +243,18 @@ class Config:
                     f"Current band-prefilter algorithm only supports hamming thresholds 0-2. "
                     f"Set to 2 (default) for near-duplicate detection."
                 )
+        identity = self.features.get("face_identity", {})
+        if self.cluster.get("require_face_identity", False):
+            if not isinstance(identity, dict) or identity.get("enabled") is not True:
+                raise ValueError(
+                    "cluster.require_face_identity=true requires "
+                    "features.face_identity.enabled=true"
+                )
+        identity_threshold = float(self.cluster.get("face_identity_cosine_threshold", 0.45))
+        if not -1.0 <= identity_threshold <= 1.0:
+            raise ValueError("cluster.face_identity_cosine_threshold must be in [-1, 1]")
+        if float(self.cluster.get("face_identity_min_width_px", 80.0)) <= 0:
+            raise ValueError("cluster.face_identity_min_width_px must be > 0")
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

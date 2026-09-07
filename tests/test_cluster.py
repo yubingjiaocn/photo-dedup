@@ -99,6 +99,38 @@ def test_low_confidence_face_ignored():
     assert CL.face_pose_shift(fi, 100, 100, fj, 100, 100, 0.6) is None
 
 
+def _identity_face(values, *, width=160, score=0.95):
+    vector = np.asarray(values, dtype=np.float32)
+    vector /= np.linalg.norm(vector)
+    return {
+        "bbox": [10, 10, width, 180], "score": score,
+        "identity_embedding": vector.astype(np.float16).tobytes().hex(),
+    }
+
+
+def test_identity_gate_accepts_same_anonymous_subject():
+    assert CL.identity_compatible(
+        [_identity_face([1, 0, 0])], [_identity_face([0.99, 0.01, 0])],
+        0.6, 80, 0.45,
+    ) is True
+
+
+def test_identity_gate_rejects_different_subject():
+    assert CL.identity_compatible(
+        [_identity_face([1, 0, 0])], [_identity_face([0, 1, 0])],
+        0.6, 80, 0.45,
+    ) is False
+
+
+def test_identity_gate_fails_closed_when_face_evidence_missing_or_small():
+    assert CL.identity_compatible([_face(10, 10)], [_face(10, 10)], 0.6, 80, 0.45) is False
+    assert CL.identity_compatible(
+        [_identity_face([1, 0], width=40)], [_identity_face([1, 0], width=40)],
+        0.6, 80, 0.45,
+    ) is False
+    assert CL.identity_compatible([], [], 0.6, 80, 0.45) is True
+
+
 # --- keep selection ---------------------------------------------------------
 
 def test_select_keep_prefers_quality():

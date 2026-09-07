@@ -88,6 +88,12 @@ features:
     model_path: "face_landmarker.task"  # local under models_dir; no auto-download
     model_sha256: "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
     max_faces: 10
+  # Optional, local SFace embedding used only as a fail-closed grouping gate.
+  # It never names people and never authorizes deletion by itself.
+  face_identity:
+    enabled: false
+    mode: "shadow"
+    model_path: "face_recognition_sface_2021dec.onnx"
   scene_routing:
     enabled: false              # opt-in local-only SigLIP shadow provider
     mode: "shadow"              # only supported mode; never affects decisions
@@ -112,6 +118,9 @@ cluster:
   phash_hamming_threshold: 2     # pHash near-dup: hamming <= this (within time window). Valid: 0-2
   face_pose_shift_ratio: 0.30    # face-center move > 30% of img width => split group
   min_face_score: 0.6            # ignore YuNet faces below this confidence
+  require_face_identity: false   # when true, every face-bearing visual group must be identity-consistent
+  face_identity_cosine_threshold: 0.45
+  face_identity_min_width_px: 80
   enable_loose_similar: false    # Layer-4 similar_scene (slow, easy to over-merge). Off by default.
   loose_window_seconds: 300
   loose_dinov2_threshold: 0.96

@@ -1,0 +1,24 @@
+# JX3 convention evaluation profile: aggressive visual grouping, but fail closed
+# whenever a face-bearing pair lacks anonymous same-subject evidence.
+features:
+  face_identity:
+    enabled: true
+    mode: "shadow"
+    model_path: "face_recognition_sface_2021dec.onnx"
+cluster:
+  burst_window_seconds: 30
+  dinov2_threshold: 0.88
+  phash_hamming_threshold: 2
+  face_pose_shift_ratio: 0.45
+  min_face_score: 0.6
+  require_face_identity: true
+  face_identity_cosine_threshold: 0.45
+  face_identity_min_width_px: 80
+  enable_loose_similar: false
+quality:
+  weight_iqa: 0.55
+  weight_face: 0.35
+  weight_resolution: 0.10
+  resolution_ref_mp: 12.0
+decision:
+  profile: aggressive
