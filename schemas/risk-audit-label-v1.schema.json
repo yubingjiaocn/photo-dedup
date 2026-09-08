@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk-audit-label-v1.schema.json",
+  "title": "Anonymous risk-coverage audit labels",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "annotation_kind", "labels"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "annotation_kind": {"const": "risk_coverage_v4_audit"},
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["audit_id", "verdict", "label_status"],
+        "properties": {
+          "audit_id": {"type": "string", "pattern": "^[a-z0-9_-]+:G[0-9]+$"},
+          "verdict": {
+            "enum": ["keeper_correct", "keep_more", "keeper_wrong", "group_false_merge"]
+          },
+          "label_status": {"const": "human_reviewed"}
+        }
+      }
+    }
+  }
+}
