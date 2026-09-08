@@ -479,9 +479,11 @@ cannot appear in train/tune and held-out manifests.
 Visual groups now receive deterministic **logical phase protection inside the
 existing DB group**. This is annotation and multi-keeper behavior, not a physical
 split of `groups`/`group_members`; UI and metrics must keep showing the original
-group plus its logical phases. Time gaps, embedding changes, face-count changes,
-and available detected-subject/face-position changes create boundaries. Phase
-size alone never grants another keeper. Observed variation can propose one bounded
+group plus its logical phases. Sparse bursts use locally exceptional embedding
+change plus independent evidence, or one strong signal; a minimum-run/peak-
+suppression pass removes weak singleton phases. `phash_near` groups require
+stronger consensus than `burst` groups. Phase size alone never grants another
+keeper. Observed variation can propose one bounded
 extra keeper, selected by quality+novelty MMR with deterministic tie-breaking;
 loss of a primary boundary signal can propose at most one further uncertainty
 keeper. A group-level cap (default 3, and never every member in a non-singleton
@@ -500,15 +502,20 @@ Run a source-immutable cached-feature A/B without opening original media:
 
 ```bash
 ../photo-dedup/.venv/bin/python scripts/phase_ab.py \
+  --source-sha 732803cf8af190f0854c2c50c3310e0344e8a5d0 \
   --dataset disney /home/ubuntu/photo-dedup-eval/disney-conservative/inventory.sqlite \
   --dataset jx3 /home/ubuntu/photo-dedup-eval/jx3-identity/inventory.sqlite \
-  --output /home/ubuntu/photo-dedup-eval/phase-ab-v2
+  --output /home/ubuntu/photo-dedup-eval/phase-ab-v3/run
 ```
 
 The harness opens each DB with SQLite `mode=ro&immutable=1`, checks schema and
 `quick_check`, fingerprints it before/after, and writes standalone JSON/CSV plus
-thumbnail-path review queues. It never writes groups, inventory, photos or
-runtime policy. The bounded research record is
+thumbnail-path review queues. Primary review contains changed, non-trivial
+groups; ordinary unchanged two-frame evidence gaps are written to separate
+`*-secondary-diagnostics.json` files. It never writes groups, inventory, photos
+or runtime policy. Anonymous tune annotations can be evaluated with
+`scripts/evaluate_phase_tune.py`; annotations contain IDs and human labels only,
+never paths or image data. The bounded research record is
 [`research/CURRENT_FAILURES_RESEARCH.md`](research/CURRENT_FAILURES_RESEARCH.md);
 it covers only the three evidenced failure classes and records each adopt/reject
 choice against a minimal A/B.

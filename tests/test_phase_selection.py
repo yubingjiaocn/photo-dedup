@@ -117,6 +117,26 @@ def test_group_budget_prevents_keep_all_across_noisy_logical_phases():
     assert len(result["keepers"]) < len(members)
 
 
+def test_local_baseline_and_minimum_length_suppress_mild_singleton_cut():
+    members = [
+        member(1, 0, [1, 0, 0]),
+        member(2, 1, [.96, .28, 0]),
+        member(3, 2, [.94, .34, 0]),
+        member(4, 3, [.97, .24, 0]),
+    ]
+    phases = phase_selection.segment_phases(members, group_type="burst")
+    assert [phase.members for phase in phases] == [(0, 1, 2, 3)]
+
+
+def test_phash_near_requires_stronger_boundary_consensus_than_burst():
+    members = [
+        member(1, 0, [1, 0, 0], center=(.5, .5)),
+        member(2, 1, [.96, .28, 0], center=(.56, .5)),
+        member(3, 2, [.97, .24, 0], center=(.57, .5)),
+    ]
+    assert len(phase_selection.segment_phases(members, group_type="phash_near")) == 1
+
+
 def test_authoritative_score_flow_can_feed_decision_evidence():
     members = [member(1, 0, [1, 0], q=90), member(2, 1, [1, .001], q=60)]
     selection = phase_selection.select_phase_keepers(members, phase_selection.segment_phases(members))

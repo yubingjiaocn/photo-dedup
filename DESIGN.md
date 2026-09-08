@@ -243,8 +243,10 @@ train/tune。琳的数据必须独立标记 held_out，只允许 `final_evaluati
 对每个非 SHA-exact 视觉组，Stage 2 只使用缓存的时间、DINO embedding、
 face count、可用的显式主体位置/检测人脸位置和质量 metadata 做确定性阶段
 注解。它**不物理拆分** `groups`/`group_members`：UI 仍展示原始 DB group，
-其下解释 logical phases、各 phase keeper 与 review reason。时间间隔、embedding
-状态变化、face count 或可用检测位置变化构成边界。
+其下解释 logical phases、各 phase keeper 与 review reason。Sparse burst 不把每个
+相邻 embedding 阈值穿越直接当边界：变化需相对组内 median 足够异常并获得位置/
+face 证据支持，或本身是强信号；minimum-run/peak suppression 会删除弱 singleton。
+`phash_near` 使用比 `burst` 更严格的共识策略。
 
 每阶段至少一个 keeper；size 本身不增加预算。观察到 embedding/face-count
 variation 时最多增加一个 keeper，主边界证据缺失时再最多增加一个不确定性
@@ -260,7 +262,9 @@ score 与 margin。缺特征不会扩大 `AUTO_REMOVE`；自动移除仍只接�
 标注 schema 以事件/组/阶段为单位，严格校验 member IDs、phase disjoint/完整
 coverage、event scope、acceptable keeper 不重复且不越界。Labelled evaluation
 报告 phase recall、keeper precision、retention、risk review count/recall、group
-impurity review recall 与 phase under-segmentation。无人工标签的 real-data A/B
+impurity review recall、phase under-segmentation 与 selected/phase。Primary review
+收录所有 keeper 集合发生变化的组；普通 unchanged 组的 optional evidence gap
+进入 secondary diagnostics。无人工标签的 real-data A/B
 只诚实报告 baseline/candidate keeper、logical phase、retention 和 review load，
 不伪造 impurity/under-segmentation ground truth。Held-out 路径仅产报告，不提供
 回写阈值、策略、prompt 或 preset 的接口；琳数据仍未接触。

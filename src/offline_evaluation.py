@@ -179,6 +179,7 @@ def evaluate_predictions(
         "selected_count": float(selected_total),
         "member_count": float(member_total),
         "phase_count": float(total_phases),
+        "selected_per_phase": selected_total / total_phases if total_phases else 0.0,
     }
 
 

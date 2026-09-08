@@ -74,13 +74,15 @@ def _subject_center(member: Mapping[str, Any]) -> tuple[float, float] | None:
 def segment_phases(
     members: Sequence[Mapping[str, Any]], *, max_gap_seconds: int = 4,
     embedding_boundary: float = 0.93, position_shift: float = 0.22,
+    group_type: str = "burst", minimum_phase_members: int = 2,
 ) -> list[Phase]:
-    """Annotate logical phases inside one existing database group.
+    """Annotate robust logical phases inside one existing database group.
 
-    Missing optional non-face position is normal and does not by itself make a
-    phase uncertain. Missing time or embedding removes a primary boundary
-    signal and is therefore review-worthy, but still does not physically split
-    or rewrite the group.
+    Sparse photo bursts are not edited video. A boundary therefore needs either
+    a strong signal or locally exceptional embedding change with independent
+    support. Adjacent candidate cuts are peak-suppressed so ordinary detector
+    flicker cannot manufacture one-frame phases. Hard/strong endpoint evidence
+    may still preserve a meaningful singleton.
     """
     if not members:
         return []
@@ -89,58 +91,138 @@ def segment_phases(
         members[i].get("exif_timestamp") or 0,
         int(members[i].get("id") or i),
     ))
+    evidence: list[dict[str, Any]] = []
+    for left, right in pairwise(order):
+        a, b = members[left], members[right]
+        reasons: list[str] = []
+        uncertainty: set[str] = set()
+        ta, tb = a.get("exif_timestamp"), b.get("exif_timestamp")
+        gap = None
+        if ta is None or tb is None:
+            uncertainty.add("TIME_MISSING")
+        else:
+            gap = int(tb) - int(ta)
+            if gap > max_gap_seconds:
+                reasons.append("TIME_GAP")
+        ea, eb = _embedding(a), _embedding(b)
+        similarity = None
+        if ea is None or eb is None or ea.shape != eb.shape:
+            uncertainty.add("EMBEDDING_MISSING")
+        else:
+            similarity = float(np.dot(ea, eb))
+        ca, cb = _subject_center(a), _subject_center(b)
+        position_delta = None
+        if ca is not None and cb is not None:
+            position_delta = max(abs(ca[0] - cb[0]), abs(ca[1] - cb[1]))
+            if position_delta > position_shift:
+                reasons.append("DETECTED_SUBJECT_POSITION_CHANGE")
+        elif int(a.get("face_count") or 0) > 0 or int(b.get("face_count") or 0) > 0:
+            uncertainty.add("FACE_POSITION_MISSING")
+        face_a, face_b = int(a.get("face_count") or 0), int(b.get("face_count") or 0)
+        evidence.append({
+            "left": left, "right": right, "similarity": similarity,
+            "position_delta": position_delta, "face_delta": abs(face_a - face_b),
+            "max_face_count": max(face_a, face_b), "gap": gap,
+            "reasons": reasons, "uncertainty": uncertainty,
+        })
+
+    similarities = [float(item["similarity"]) for item in evidence
+                    if item["similarity"] is not None]
+    local_baseline = float(np.median(similarities)) if similarities else None
+    accepted: dict[int, list[str]] = {}
+    strong: set[int] = set()
+    for edge, item in enumerate(evidence):
+        similarity = item["similarity"]
+        reasons = list(item["reasons"])
+        embedding_exception = bool(
+            similarity is not None and similarity < embedding_boundary
+            and (local_baseline is None or similarity < local_baseline - 0.035)
+        )
+        strong_embedding = bool(
+            similarity is not None
+            and similarity < min(0.88, embedding_boundary - 0.05)
+        )
+        # In perceptual-near stage bursts, a sustained sub-.955 transition can
+        # still represent a real pose/tableau change even when face position is
+        # stable. It remains subject to minimum-run suppression below.
+        phash_tableau_change = bool(
+            group_type == "phash_near" and similarity is not None
+            and similarity < 0.955
+        )
+        position_change = "DETECTED_SUBJECT_POSITION_CHANGE" in reasons
+        moderate_position = bool(
+            item["position_delta"] is not None and item["position_delta"] > 0.05
+        )
+        low_face_context = item["max_face_count"] <= 3
+        face_support = item["face_delta"] >= 1 and low_face_context
+        face_strong = item["face_delta"] >= 2 and low_face_context
+        time_gap = "TIME_GAP" in reasons
+        if embedding_exception:
+            reasons.append("LOCAL_BASELINE_EMBEDDING_CHANGE")
+        consensus = embedding_exception and (position_change or face_support)
+        sparse_action_change = bool(
+            group_type == "burst" and embedding_exception
+            and similarity is not None and similarity < 0.90 and moderate_position
+        )
+        strong_single = time_gap or strong_embedding or phash_tableau_change or sparse_action_change or bool(
+            embedding_exception and face_strong
+            and similarity is not None and similarity < 0.91
+        )
+        if group_type == "phash_near":
+            accept = time_gap or strong_embedding or phash_tableau_change or bool(
+                embedding_exception and position_change
+            )
+        else:
+            accept = strong_single or consensus
+        if accept and len(members) >= 3:
+            accepted[edge] = list(dict.fromkeys(reasons))
+            if strong_single:
+                strong.add(edge)
+
+    def strength(edge: int) -> tuple[int, float]:
+        similarity = evidence[edge]["similarity"]
+        return edge in strong, 1.0 - float(similarity) if similarity is not None else 0.0
+
+    # Minimum segment length / non-maximum suppression. Remove the weaker of
+    # two cuts surrounding a singleton. Endpoint singletons survive only with
+    # strong evidence, preserving real sparse action states.
+    changed = True
+    while changed and accepted:
+        changed = False
+        boundaries = [-1, *sorted(accepted), len(order) - 1]
+        for pos in range(1, len(boundaries)):
+            if boundaries[pos] - boundaries[pos - 1] >= minimum_phase_members:
+                continue
+            left_edge = boundaries[pos - 1] if boundaries[pos - 1] >= 0 else None
+            right_edge = boundaries[pos] if boundaries[pos] < len(order) - 1 else None
+            candidates = [edge for edge in (left_edge, right_edge) if edge is not None]
+            removable = [edge for edge in candidates if edge not in strong]
+            if not removable:
+                continue
+            remove = min(removable, key=strength) if len(candidates) == 2 else removable[0]
+            del accepted[remove]
+            changed = True
+            break
+
     phases: list[Phase] = []
     current = [order[0]]
     boundary_reasons: list[str] = ["LOGICAL_PHASE_START"]
     uncertainty: set[str] = set()
-    for left, right in pairwise(order):
-        a, b = members[left], members[right]
-        hard: list[str] = []
-        pair_uncertainty: set[str] = set()
-        ta, tb = a.get("exif_timestamp"), b.get("exif_timestamp")
-        if ta is None or tb is None:
-            pair_uncertainty.add("TIME_MISSING")
-        elif int(tb) - int(ta) > max_gap_seconds:
-            hard.append("TIME_GAP")
-        ea, eb = _embedding(a), _embedding(b)
-        pair_similarity = None
-        if ea is None or eb is None or ea.shape != eb.shape:
-            pair_uncertainty.add("EMBEDDING_MISSING")
-        else:
-            pair_similarity = float(np.dot(ea, eb))
-            if pair_similarity < embedding_boundary:
-                hard.append("EMBEDDING_CHANGE")
-        ca, cb = _subject_center(a), _subject_center(b)
-        if ca is not None and cb is not None:
-            if max(abs(ca[0] - cb[0]), abs(ca[1] - cb[1])) > position_shift:
-                hard.append("DETECTED_SUBJECT_POSITION_CHANGE")
-        elif int(a.get("face_count") or 0) > 0 or int(b.get("face_count") or 0) > 0:
-            # A face-related position signal was expected but unavailable.
-            pair_uncertainty.add("FACE_POSITION_MISSING")
-        face_a, face_b = int(a.get("face_count") or 0), int(b.get("face_count") or 0)
-        # Face detector count flicker is common. Treat it as a boundary only when
-        # the embedding also moved materially; count alone is supporting evidence.
-        if face_a != face_b and pair_similarity is not None and pair_similarity < 0.985:
-            hard.append("FACE_COUNT_CHANGE_WITH_VISUAL_CHANGE")
-        # A two-frame group cannot express a stable change point; splitting it
-        # would mechanically keep both. Leave it as one reviewable phase.
-        if hard and len(members) >= 3:
-            phases.append(Phase(
-                len(phases), tuple(current), tuple(boundary_reasons),
-                bool(uncertainty), tuple(sorted(uncertainty)),
-            ))
+    for edge, item in enumerate(evidence):
+        right = item["right"]
+        pair_uncertainty = set(item["uncertainty"])
+        if edge in accepted:
+            phases.append(Phase(len(phases), tuple(current), tuple(boundary_reasons),
+                                bool(uncertainty), tuple(sorted(uncertainty))))
             current = [right]
-            boundary_reasons = hard
-            uncertainty = set(pair_uncertainty)
+            boundary_reasons = accepted[edge]
+            uncertainty = pair_uncertainty
         else:
             current.append(right)
             uncertainty.update(pair_uncertainty)
-    phases.append(Phase(
-        len(phases), tuple(current), tuple(boundary_reasons),
-        bool(uncertainty), tuple(sorted(uncertainty)),
-    ))
+    phases.append(Phase(len(phases), tuple(current), tuple(boundary_reasons),
+                        bool(uncertainty), tuple(sorted(uncertainty))))
     return phases
-
 
 def _bounded(value: Any) -> float | None:
     try:

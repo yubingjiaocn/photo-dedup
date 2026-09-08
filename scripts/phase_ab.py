@@ -75,7 +75,9 @@ def _groups(conn: sqlite3.Connection) -> list[tuple[sqlite3.Row, list[dict[str, 
     return output
 
 
-def run(name: str, source: Path, output: Path) -> dict[str, Any]:
+def run(
+    name: str, source: Path, output: Path, *, source_sha: str | None = None,
+) -> dict[str, Any]:
     before = fingerprint(source)
     conn = open_readonly(source)
     rows: list[dict[str, Any]] = []
@@ -99,7 +101,7 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
                               "keepers": list(candidate), "review_required": False}]
             review_required = False
         else:
-            phases = PS.segment_phases(members)
+            phases = PS.segment_phases(members, group_type=group_type)
             selected = PS.select_phase_keepers(members, phases)
             candidate = set(selected["keepers"])
             phase_records = selected["phases"]
@@ -120,10 +122,17 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
         if review_required:
             summary["evidence_review_groups"] += 1
             summary["evidence_review_members"] += len(members)
-        review_group = changed or review_required
-        if review_group:
+        # Every changed keeper set is primary user decision work, including a
+        # two-frame replacement.  Unchanged optional-evidence gaps remain
+        # available as secondary diagnostics without flooding the main queue.
+        primary_review = changed
+        secondary_review = review_required and not changed
+        if primary_review:
             summary["ab_review_groups"] += 1
             summary["ab_review_members"] += len(members)
+        if secondary_review:
+            summary["secondary_review_groups"] += 1
+            summary["secondary_review_members"] += len(members)
         thumb_root = source.parent / "thumbs"
         rows.append({
             "dataset": name, "group_id": int(group["id"]), "group_type": group_type,
@@ -136,8 +145,9 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
                 "keeper_ids": [int(members[i]["id"]) for i in item["keepers"]],
                 "reason_codes": item.get("reason_codes", []),
             } for item in phase_records],
-            "changed": changed, "review_required": review_group,
-            "review_reason": "CANDIDATE_CHANGED" if changed else ("EVIDENCE_GAP" if review_required else ""),
+            "changed": changed, "review_required": primary_review,
+            "review_tier": "primary" if primary_review else ("secondary" if secondary_review else "none"),
+            "review_reason": "CANDIDATE_CHANGED_HIGH_IMPACT" if primary_review else ("EVIDENCE_GAP_DIAGNOSTIC" if secondary_review else ""),
             "thumbnail_paths": [str(thumb_root / f"{item['id']}.jpg") for item in members],
         })
     conn.close()
@@ -146,7 +156,8 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
         raise RuntimeError("source inventory changed during read-only A/B")
     member_count = summary["members"]
     result = {
-        "schema_version": 2, "dataset": name, "source_inventory": str(source),
+        "schema_version": 3, "dataset": name, "source_inventory": str(source),
+        "source_sha": source_sha,
         "source_fingerprint_before": before, "source_fingerprint_after": after,
         "sqlite_mode": "ro+immutable", "opened_original_media": False,
         "physical_group_split": False,
@@ -167,6 +178,10 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
             "evidence_review_member_rate": summary["evidence_review_members"] / member_count if member_count else 0.0,
             "ab_review_group_rate": summary["ab_review_groups"] / summary["groups"] if summary["groups"] else 0.0,
             "ab_review_member_rate": summary["ab_review_members"] / member_count if member_count else 0.0,
+            "primary_review_groups": summary["ab_review_groups"],
+            "primary_review_members": summary["ab_review_members"],
+            "secondary_review_groups": summary["secondary_review_groups"],
+            "secondary_review_members": summary["secondary_review_members"],
         },
         "groups": rows,
     }
@@ -180,9 +195,14 @@ def run(name: str, source: Path, output: Path) -> dict[str, Any]:
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row[key] for key in writer.fieldnames})
-    review = [row for row in rows if row["review_required"]]
+    review = [row for row in rows if row["review_tier"] == "primary"]
+    secondary = [row for row in rows if row["review_tier"] == "secondary"]
     (output / f"{name}-review-queue.json").write_text(
         json.dumps({"dataset": name, "count": len(review), "groups": review}, indent=2),
+        encoding="utf-8",
+    )
+    (output / f"{name}-secondary-diagnostics.json").write_text(
+        json.dumps({"dataset": name, "count": len(secondary), "groups": secondary}, indent=2),
         encoding="utf-8",
     )
     cards = []
@@ -216,10 +236,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", action="append", nargs=2, metavar=("NAME", "INVENTORY"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-sha")
     args = parser.parse_args()
-    reports = [run(name, Path(path).resolve(), args.output.resolve()) for name, path in args.dataset]
+    reports = [run(name, Path(path).resolve(), args.output.resolve(), source_sha=args.source_sha)
+               for name, path in args.dataset]
     aggregate = {
-        "schema_version": 2, "datasets": [item["dataset"] for item in reports],
+        "schema_version": 3, "source_sha": args.source_sha,
+        "datasets": [item["dataset"] for item in reports],
         "reports": {item["dataset"]: item["metrics"] for item in reports},
         "constraints": {"source_read_only": True, "original_media_opened": False,
                         "lin_held_out_touched": False, "writeback": False},

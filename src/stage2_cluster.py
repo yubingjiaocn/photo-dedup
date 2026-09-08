@@ -359,6 +359,7 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
                 max_gap_seconds=int(cc.get("phase_max_gap_seconds", 4)),
                 embedding_boundary=float(cc.get("phase_embedding_boundary", 0.93)),
                 position_shift=float(cc.get("phase_position_shift", 0.22)),
+                group_type=gtype,
             )
             phase_result = PS.select_phase_keepers(
                 members, phases,
