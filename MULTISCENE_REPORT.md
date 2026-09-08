@@ -52,6 +52,22 @@ Sampler evidence: `/home/ubuntu/photo-dedup-eval/multiscene-smoke/inventory.json
 - `git diff --check`: passed.
 - Full-set source counts matched prior inventories; all reports show **0 files to delete / 0 cloud items to trash**.
 
+## v1 evaluation protocol (framework only)
+
+- Dataset manifests are versioned and split by whole event. Existing Willy data
+  is development-only (`train`/`tune`); Lin data must carry a distinct
+  `dataset_id` and `held_out` split.
+- Held-out manifests fail closed for training, threshold search, prompt
+  selection, and preset selection. Final evaluation is report-only and cannot
+  write policy/config or gain delete/trash authority.
+- Non-exact visual groups now have deterministic cached-feature phase
+  segmentation and at least one keeper per phase. Large/uncertain phases retain
+  more; evidence includes quality, face clarity, exposure, subject
+  completeness/occlusion proxies, and embedding diversity.
+- Offline annotation/metrics compare baseline and candidate at phase level.
+  Checked-in validation is synthetic. **No Lin labels or real held-out results
+  were read or claimed for this framework change.**
+
 ## Known limits
 
 1. This is a conservative shadow-mode prototype, not a learned universal aesthetic model and not permission to delete.

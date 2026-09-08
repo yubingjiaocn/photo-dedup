@@ -113,6 +113,12 @@ _DEFAULTS: Dict[str, Any] = {
         "enable_loose_similar": False,
         "loose_window_seconds": 300,
         "loose_dinov2_threshold": 0.96,
+        "phase_max_gap_seconds": 4,
+        "phase_embedding_boundary": 0.93,
+        "phase_position_shift": 0.22,
+        "keepers_per_phase": 1,
+        "large_phase_size": 6,
+        "keeper_diversity_similarity": 0.965,
     },
     "quality": {
         "weight_iqa": 0.6,
@@ -255,6 +261,16 @@ class Config:
             raise ValueError("cluster.face_identity_cosine_threshold must be in [-1, 1]")
         if float(self.cluster.get("face_identity_min_width_px", 80.0)) <= 0:
             raise ValueError("cluster.face_identity_min_width_px must be > 0")
+        if int(self.cluster.get("phase_max_gap_seconds", 4)) <= 0:
+            raise ValueError("cluster.phase_max_gap_seconds must be > 0")
+        for key in ("phase_embedding_boundary", "phase_position_shift", "keeper_diversity_similarity"):
+            value = float(self.cluster.get(key))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"cluster.{key} must be in [0, 1]")
+        if int(self.cluster.get("keepers_per_phase", 1)) < 1:
+            raise ValueError("cluster.keepers_per_phase must be >= 1")
+        if int(self.cluster.get("large_phase_size", 6)) < 2:
+            raise ValueError("cluster.large_phase_size must be >= 2")
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

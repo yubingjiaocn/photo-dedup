@@ -226,6 +226,36 @@ execute:
   dry_run: true  # 首次 true，看清单再改 false
 ```
 
+## v1 多场景 shadow-mode 协议
+
+### 数据切分与防泄漏
+
+`dataset manifest schema_version=1` 只保存稳定的 `dataset_id`、`split`
+（`train|tune|held_out`）、`owner_scope` 与事件 ID。切分单位是完整事件，
+不是照片或组；任一事件跨 split 会 fail closed。Willy 现有数据只进入
+train/tune。琳的数据必须独立标记 held_out，只允许 `final_evaluation`
+读取标签并生成报告；训练、阈值搜索、prompt/preset 选择均在读取标签前
+拒绝 held_out。最终报告明确 `policy_writeback_allowed=false` 且
+`delete_trash_authority=none`。
+
+### 动作阶段与多 keeper
+
+对每个非 SHA-exact 视觉组，Stage 2 只使用缓存的时间、DINO embedding、
+face count、face/subject 归一化位置和质量 metadata 做确定性切段。时间间隔、
+embedding 状态变化、face count 或主体位置变化构成阶段边界。每阶段至少一个
+keeper；大阶段及证据缺失会增加 keeper 并要求人工审阅。排序证据包括 IQA、
+人脸清晰、曝光、主体完整度、遮挡 proxy，并以 greedy novelty 补充多样性。
+阶段、keeper、reason codes 和逐帧 evidence 写入 `groups.decision_json`。
+缺特征只会更保守，不会扩大 `AUTO_REMOVE`；自动移除仍只接受
+`BYTE_IDENTICAL`。
+
+### 离线标注与指标
+
+标注 schema 以事件/组/阶段为单位，记录每阶段可接受 keeper 集合。
+Baseline/candidate 报告 phase recall、keeper precision 与每阶段选择数。
+Held-out 路径仅产报告，不提供回写阈值、策略、prompt 或 preset 的接口。
+当前提交只含 fixture/合成标签，不代表已完成琳的真实数据测试。
+
 ## 风险 & 回滚
 
 1. **DINOv2 阈值调错误合**：保留 SQLite，重跑 stage2 即可，不用重跑 stage1

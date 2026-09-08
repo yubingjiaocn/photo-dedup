@@ -124,6 +124,13 @@ cluster:
   enable_loose_similar: false    # Layer-4 similar_scene (slow, easy to over-merge). Off by default.
   loose_window_seconds: 300
   loose_dinov2_threshold: 0.96
+  # Deterministic action-phase segmentation and shadow-only multi-keeper policy.
+  phase_max_gap_seconds: 4
+  phase_embedding_boundary: 0.93
+  phase_position_shift: 0.22
+  keepers_per_phase: 1
+  large_phase_size: 6
+  keeper_diversity_similarity: 0.965
 
 quality:
   weight_iqa: 0.6

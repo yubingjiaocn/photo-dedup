@@ -139,7 +139,9 @@ def test_mini_pipeline(tmp_path):
     stats = s2.run(config_path=cfg_path)
     assert stats["groups"] == 1, f"expected exactly 1 group, got {stats}"
     assert stats["to_delete"] == 0
-    assert stats["maybe"] == 2
+    # The stub fixture has no reliable subject-position/completeness metadata.
+    # v1 fails safe by retaining extra phase keepers instead of compressing it.
+    assert stats["maybe"] == 0
 
     # Verify the single group is the BURST group (all members at 12:00:xx).
     conn = db.open_db(tmp_path / "inventory.sqlite")
@@ -148,14 +150,14 @@ def test_mini_pipeline(tmp_path):
     members = db.group_members(conn, groups[0]["id"])
     assert len(members) == 3
     assert all(m["basename"].startswith("IMG_20260101_1200") for m in members)
-    assert sum(1 for m in members if m["is_keep"]) == 1
+    assert sum(1 for m in members if m["is_keep"]) == 3
     conn.close()
 
     # Stage 3: report + delete lists
     rep = s3.run(config_path=cfg_path)
     assert rep["groups"] == 1
     assert rep["delete_files"] == 0
-    assert rep["maybe"] == 2
+    assert rep["maybe"] == 0
 
     out = tmp_path / "output"
     assert (out / "review.html").exists()

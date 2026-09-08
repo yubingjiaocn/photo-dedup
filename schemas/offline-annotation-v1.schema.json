@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yubingjiaocn/photo-dedup/schemas/offline-annotation-v1.schema.json",
+  "title": "Photo Dedup Offline Keeper Annotation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "group_id", "phase_ids", "acceptable_keepers"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "minLength": 1},
+    "group_id": {"type": "string", "minLength": 1},
+    "phase_ids": {"type": "object", "minProperties": 1},
+    "acceptable_keepers": {"type": "object", "minProperties": 1}
+  }
+}

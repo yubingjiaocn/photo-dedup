@@ -57,6 +57,7 @@ from . import root_scope
 from . import quality as Q
 from . import decision as D
 from . import cluster_layers as CL
+from . import phase_selection as PS
 
 PRIORITY = {"sha_exact": 4, "phash_near": 3, "burst": 2, "similar_scene": 1}
 
@@ -351,6 +352,22 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
         keep_local, scores = select_keep(members, cfg)
         keep_file_id = int(rows[member_idx[keep_local]]["id"])
         gtype = comp_type.get(root, "burst")
+        phase_result = None
+        if gtype != "sha_exact":
+            phases = PS.segment_phases(
+                members,
+                max_gap_seconds=int(cc.get("phase_max_gap_seconds", 4)),
+                embedding_boundary=float(cc.get("phase_embedding_boundary", 0.93)),
+                position_shift=float(cc.get("phase_position_shift", 0.22)),
+            )
+            phase_result = PS.select_phase_keepers(
+                members, phases,
+                keepers_per_phase=int(cc.get("keepers_per_phase", 1)),
+                large_phase_size=int(cc.get("large_phase_size", 6)),
+                diversity_similarity=float(cc.get("keeper_diversity_similarity", 0.965)),
+            )
+            keep_local = phase_result["keepers"][0]
+            keep_file_id = int(rows[member_idx[keep_local]]["id"])
 
         # Validate time-span constraint for visual groups
         # CRITICAL: visual groups (non-SHA) must have complete timestamps for all members
@@ -406,11 +423,25 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             group_trusted=group_trusted,
             safe_duplicates=safe_duplicates,
         )
+        if phase_result is not None:
+            for extra_keeper in phase_result["keepers"]:
+                if extra_keeper == keep_local:
+                    continue
+                result["members"][extra_keeper] = {
+                    "decision": "KEEP", "confidence": 1.0,
+                    "reason": "PHASE_KEEPER",
+                    "evidence": {
+                        "utility_score": float(scores[extra_keeper]),
+                        "pair_margin": float(scores[keep_local] - scores[extra_keeper]),
+                        "phase_selection": True,
+                    },
+                }
+            result["state"] = "REVIEW_REQUIRED"
         member_tuples = []
         for local, gi in enumerate(member_idx):
             fid = int(rows[gi]["id"])
-            is_keep = local == keep_local
             record = result["members"][local]
+            is_keep = record["decision"] == "KEEP"
             reason = record["reason"]
             member_tuples.append((fid, is_keep, reason))
             decision_counts[record["decision"]] += 1
@@ -421,7 +452,8 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             confidence=min(r["confidence"] for r in result["members"].values()),
             policy_version=D.POLICY_VERSION,
             decision_json=json.dumps({"profile": profile, "group_purity": purity,
-                                      "group_trusted": group_trusted}),
+                                      "group_trusted": group_trusted,
+                                      "phase_selection": phase_result}),
         )
         db.update_member_decisions(conn, gid, [
             {"file_id": int(rows[gi]["id"]), **result["members"][local],

@@ -9,6 +9,10 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_db.py \
   tests/test_motion_photo.py \
   tests/test_cluster.py \
+  tests/test_dataset_contract.py \
+  tests/test_phase_selection.py \
+  tests/test_offline_evaluation.py \
+  tests/test_event_policy.py \
   tests/test_p0_policy.py \
   tests/test_safety_e2e.py \
   tests/test_root_scope.py \

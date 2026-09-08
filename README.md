@@ -456,6 +456,37 @@ yourself.
    python -m src.rebuild_review --root "E:\Photos" --output "C:\photo-review" --config my-thresholds.yaml
    ```
 
+### Leakage-safe multi-scene shadow evaluation
+
+Offline evaluation uses the versioned contract in `src/dataset_contract.py`.
+A manifest contains only `dataset_id`, `split`, `owner_scope`, and event IDs;
+it contains no source paths or labels. Splits are event-level: the same event
+cannot appear in train/tune and held-out manifests.
+
+- Willy's existing datasets are development data and must be marked `train` or
+  `tune`.
+- Lin's datasets must be marked `held_out`. Threshold search, training, prompt
+  selection, and preset selection reject held-out manifests before reading
+  labels. Held-out labels may be used only by `final_evaluation`, which returns
+  a report-only contract with policy/config write-back and delete/trash
+  authority disabled.
+- `src/offline_evaluation.py` validates phase-level keeper annotations and
+  compares baseline/candidate phase recall, keeper precision, and selected
+  keepers per phase. It does not mutate runtime policy.
+
+Visual groups now receive a deterministic cached-feature phase pass. Time gaps,
+embedding changes, face-count changes, and face/subject-position changes create
+phase boundaries. Every phase has at least one keeper; large phases and missing
+features add keepers. Ranking combines IQA, face clarity, exposure, subject
+completeness/occlusion proxies, then greedily adds visual diversity. The result
+is stored in `groups.decision_json` with reason codes/evidence. Missing evidence
+sets review-required and increases retention; it never grants removal authority.
+`AUTO_REMOVE` remains byte-identical-only.
+
+The checked-in tests use synthetic metadata only; no real held-out labels or
+source images are included. Real held-out evaluation remains a separate final
+step and must not feed results back into thresholds, prompts, or presets.
+
 ### Offline scene/SigLIP shadow calibration (read-only)
 
 After Stage 1 has accumulated `quality_meta.routing` records, create an
