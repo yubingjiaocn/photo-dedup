@@ -513,6 +513,11 @@ runtime policy. The bounded research record is
 it covers only the three evidenced failure classes and records each adopt/reject
 choice against a minimal A/B.
 
+The broader community/license/build-vs-reuse review is in
+[`docs/COMMUNITY_REUSE_REVIEW.md`](docs/COMMUNITY_REUSE_REVIEW.md); the concise
+bad-example-driven research loop is in
+[`research/CURRENT_FAILURES_RESEARCH.md`](research/CURRENT_FAILURES_RESEARCH.md).
+
 The checked-in tests use synthetic metadata only; no real held-out labels or
 source images are included. Real held-out evaluation remains a separate final
 step and must not feed results back into thresholds, prompts, or presets.
