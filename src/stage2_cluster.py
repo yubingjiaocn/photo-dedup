@@ -363,9 +363,13 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             phase_result = PS.select_phase_keepers(
                 members, phases,
                 keepers_per_phase=int(cc.get("keepers_per_phase", 1)),
-                large_phase_size=int(cc.get("large_phase_size", 6)),
+                max_group_keepers=int(cc.get("max_group_keepers", 3)),
                 diversity_similarity=float(cc.get("keeper_diversity_similarity", 0.965)),
+                mmr_quality_weight=float(cc.get("keeper_mmr_quality_weight", 0.7)),
             )
+            # Logical-phase utility is the single authority for keeper choice,
+            # decision margins, and persisted evidence in visual groups.
+            scores = phase_result["utility_scores"]
             keep_local = phase_result["keepers"][0]
             keep_file_id = int(rows[member_idx[keep_local]]["id"])
 
@@ -429,11 +433,12 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
                     continue
                 result["members"][extra_keeper] = {
                     "decision": "KEEP", "confidence": 1.0,
-                    "reason": "PHASE_KEEPER",
+                    "reason": "LOGICAL_PHASE_KEEPER",
                     "evidence": {
                         "utility_score": float(scores[extra_keeper]),
                         "pair_margin": float(scores[keep_local] - scores[extra_keeper]),
-                        "phase_selection": True,
+                        "logical_phase_protection": True,
+                        "physical_group_split": False,
                     },
                 }
             result["state"] = "REVIEW_REQUIRED"

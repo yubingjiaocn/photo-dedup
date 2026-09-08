@@ -12,6 +12,7 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_dataset_contract.py \
   tests/test_phase_selection.py \
   tests/test_offline_evaluation.py \
+  tests/test_phase_ab.py \
   tests/test_event_policy.py \
   tests/test_p0_policy.py \
   tests/test_safety_e2e.py \

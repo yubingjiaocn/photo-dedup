@@ -470,18 +470,48 @@ cannot appear in train/tune and held-out manifests.
   labels. Held-out labels may be used only by `final_evaluation`, which returns
   a report-only contract with policy/config write-back and delete/trash
   authority disabled.
-- `src/offline_evaluation.py` validates phase-level keeper annotations and
-  compares baseline/candidate phase recall, keeper precision, and selected
-  keepers per phase. It does not mutate runtime policy.
+- `src/offline_evaluation.py` strictly validates member IDs, exact disjoint phase
+  coverage, event scope, acceptable-keeper bounds, and prediction consistency.
+  Its labelled metrics include group impurity review recall, phase
+  under-segmentation, risk review count/recall, keeper precision and retention.
+  It does not mutate runtime policy.
 
-Visual groups now receive a deterministic cached-feature phase pass. Time gaps,
-embedding changes, face-count changes, and face/subject-position changes create
-phase boundaries. Every phase has at least one keeper; large phases and missing
-features add keepers. Ranking combines IQA, face clarity, exposure, subject
-completeness/occlusion proxies, then greedily adds visual diversity. The result
-is stored in `groups.decision_json` with reason codes/evidence. Missing evidence
-sets review-required and increases retention; it never grants removal authority.
-`AUTO_REMOVE` remains byte-identical-only.
+Visual groups now receive deterministic **logical phase protection inside the
+existing DB group**. This is annotation and multi-keeper behavior, not a physical
+split of `groups`/`group_members`; UI and metrics must keep showing the original
+group plus its logical phases. Time gaps, embedding changes, face-count changes,
+and available detected-subject/face-position changes create boundaries. Phase
+size alone never grants another keeper. Observed variation can propose one bounded
+extra keeper, selected by quality+novelty MMR with deterministic tie-breaking;
+loss of a primary boundary signal can propose at most one further uncertainty
+keeper. A group-level cap (default 3, and never every member in a non-singleton
+group) reranks all proposals by the same MMR objective. Logical phases beyond the
+cap remain explicit review annotations rather than silently becoming keep-all.
+
+Production Stage 1 normally has `quality_score`, `face_quality`, exposure,
+routing and eye-detector records. It usually does **not** have generic
+`subject_center`, `subject_completeness`, or `occlusion`; these are never called
+working proxies. Utility uses only present evidence and renormalises its declared
+weights. Optional omissions stay visible and create measurable review work, but
+do not cause keep-all. The same authoritative utility map drives keeper choice,
+decision evidence and pair margins. `AUTO_REMOVE` remains byte-identical-only.
+
+Run a source-immutable cached-feature A/B without opening original media:
+
+```bash
+../photo-dedup/.venv/bin/python scripts/phase_ab.py \
+  --dataset disney /home/ubuntu/photo-dedup-eval/disney-conservative/inventory.sqlite \
+  --dataset jx3 /home/ubuntu/photo-dedup-eval/jx3-identity/inventory.sqlite \
+  --output /home/ubuntu/photo-dedup-eval/phase-ab-v2
+```
+
+The harness opens each DB with SQLite `mode=ro&immutable=1`, checks schema and
+`quick_check`, fingerprints it before/after, and writes standalone JSON/CSV plus
+thumbnail-path review queues. It never writes groups, inventory, photos or
+runtime policy. The bounded research record is
+[`research/CURRENT_FAILURES_RESEARCH.md`](research/CURRENT_FAILURES_RESEARCH.md);
+it covers only the three evidenced failure classes and records each adopt/reject
+choice against a minimal A/B.
 
 The checked-in tests use synthetic metadata only; no real held-out labels or
 source images are included. Real held-out evaluation remains a separate final

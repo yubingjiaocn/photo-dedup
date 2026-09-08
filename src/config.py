@@ -117,8 +117,9 @@ _DEFAULTS: Dict[str, Any] = {
         "phase_embedding_boundary": 0.93,
         "phase_position_shift": 0.22,
         "keepers_per_phase": 1,
-        "large_phase_size": 6,
+        "max_group_keepers": 3,
         "keeper_diversity_similarity": 0.965,
+        "keeper_mmr_quality_weight": 0.7,
     },
     "quality": {
         "weight_iqa": 0.6,
@@ -263,14 +264,15 @@ class Config:
             raise ValueError("cluster.face_identity_min_width_px must be > 0")
         if int(self.cluster.get("phase_max_gap_seconds", 4)) <= 0:
             raise ValueError("cluster.phase_max_gap_seconds must be > 0")
-        for key in ("phase_embedding_boundary", "phase_position_shift", "keeper_diversity_similarity"):
+        for key in ("phase_embedding_boundary", "phase_position_shift", "keeper_diversity_similarity",
+                    "keeper_mmr_quality_weight"):
             value = float(self.cluster.get(key))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"cluster.{key} must be in [0, 1]")
         if int(self.cluster.get("keepers_per_phase", 1)) < 1:
             raise ValueError("cluster.keepers_per_phase must be >= 1")
-        if int(self.cluster.get("large_phase_size", 6)) < 2:
-            raise ValueError("cluster.large_phase_size must be >= 2")
+        if int(self.cluster.get("max_group_keepers", 3)) < 1:
+            raise ValueError("cluster.max_group_keepers must be >= 1")
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

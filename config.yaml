@@ -129,8 +129,9 @@ cluster:
   phase_embedding_boundary: 0.93
   phase_position_shift: 0.22
   keepers_per_phase: 1
-  large_phase_size: 6
+  max_group_keepers: 3  # cap only; size never creates a keeper
   keeper_diversity_similarity: 0.965
+  keeper_mmr_quality_weight: 0.70  # train/tune only; held-out must never select this value
 
 quality:
   weight_iqa: 0.6
