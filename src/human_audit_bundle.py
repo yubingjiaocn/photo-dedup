@@ -1,0 +1,170 @@
+"""Local-only cached-thumbnail export and CLI for human audit bundles."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+
+from PIL import Image
+
+from .human_audit import (
+    canonical, development_scope, load_json, make_plan, read_labels, report, seal,
+    validate_bundle,
+)
+
+
+def safe_root(path):
+    path = Path(path).absolute()
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError("cache/output symlink forbidden")
+    if not path.is_dir():
+        raise ValueError("cache root must be an existing explicit directory")
+    return path.resolve()
+
+
+def cached_thumbnail(root, member):
+    """Only numeric JPEG cache entries; never consult source paths or DBs."""
+    path = root / f"{member}.jpg"
+    if path.is_symlink():
+        raise ValueError("thumbnail symlink forbidden")
+    if not path.exists():
+        return None
+    if not path.is_file() or path.stat().st_size > 2_000_000:
+        raise ValueError("invalid/oversized cached thumbnail")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags), "rb") as handle:
+        data = handle.read(2_000_001)
+    if len(data) > 2_000_000:
+        raise ValueError("oversized cached thumbnail")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format != "JPEG" or max(image.size) > 2048:
+                raise ValueError("expected bounded JPEG thumbnail")
+            image.load()
+            # Re-encode pixels only: EXIF/comments and embedded data never leave cache.
+            clean = io.BytesIO()
+            image.convert("RGB").save(clean, "JPEG", quality=88)
+            return clean.getvalue()
+    except OSError:
+        return None
+
+
+def export_bundle(*, groups_path, audit_path, scopes_path, provenance_path,
+                  cache_roots, output, seed, fixture_path=None):
+    scopes = development_scope(load_json(scopes_path))
+    # Validate authorization and roots before any group input or media reads.
+    if set(cache_roots) != set(scopes):
+        raise ValueError("exactly one explicit cache root per authorized dataset required")
+    roots = {key: safe_root(value) for key, value in cache_roots.items()}
+    output = Path(output).absolute()
+    if any(p.is_symlink() for p in (output, *output.parents)):
+        raise ValueError("output symlink forbidden")
+    if output.exists():
+        raise ValueError("output must be a new directory; bundles are immutable")
+    for root in roots.values():
+        if output == root or root in output.parents or output in root.parents:
+            raise ValueError("output must be separate from thumbnail caches")
+    plan = make_plan(load_json(groups_path)["groups"], load_json(audit_path), scopes,
+                     load_json(provenance_path), seed,
+                     load_json(fixture_path) if fixture_path else None)
+    media = {}
+    for task in plan["tasks"]:
+        task["media"] = []
+        for member, alias in zip(task["member_ids"], task["aliases"], strict=True):
+            data = cached_thumbnail(roots[task["dataset"]], member)
+            name = f'thumbs/{task["task_id"]}-{alias}.jpg'
+            if data is not None:
+                media[name] = data
+            task["media"].append({"alias": alias, "file": name if data is not None else None,
+                                  "sha256": hashlib.sha256(data).hexdigest() if data is not None else None})
+        task["media_complete"] = all(m["file"] is not None for m in task["media"])
+    public = {"schema_version": 1, "bundle_id": "0" * 64, "tasks": [
+        {"task_id": t["task_id"], "media_complete": t["media_complete"],
+         "members": [{"alias": m["alias"], "file": m["file"]} for m in t["media"]]}
+        for t in plan["tasks"]]}
+    template = Path(__file__).with_name("human_audit_ui.html").read_text(encoding="utf-8")
+    page = template.replace("__TASK_DATA__", canonical(public).replace("<", "\\u003c"))
+    plan["reviewer_content_sha256"] = hashlib.sha256(page.encode()).hexdigest()
+    bundle = seal(plan)
+    page = page.replace('"bundle_id":"' + "0" * 64 + '"',
+                        '"bundle_id":"' + bundle["bundle_id"] + '"')
+    # All validation and cache reads finish before publishing anything.
+    output.mkdir(parents=True, exist_ok=False)
+    reviewer = output / "reviewer"
+    (reviewer / "thumbs").mkdir(parents=True)
+    for name, data in media.items():
+        (reviewer / name).write_bytes(data)
+    (reviewer / "index.html").write_text(page, encoding="utf-8")
+    (output / "manifest.json").write_text(canonical(bundle) + "\n", encoding="utf-8")
+    (output / "empty-labels.jsonl").write_text("", encoding="utf-8")
+    return bundle
+
+
+def verify_media(bundle, directory):
+    """Report replay rejects changed/missing cache exports, not just stale labels."""
+    validate_bundle(bundle)
+    directory = safe_root(directory)
+    page_path = directory / "index.html"
+    if page_path.is_symlink():
+        raise ValueError("reviewer page symlink forbidden")
+    page = page_path.read_text(encoding="utf-8")
+    marker = '"bundle_id":"' + bundle["bundle_id"] + '"'
+    if page.count(marker) != 1:
+        raise ValueError("reviewer bundle marker mismatch")
+    normalized = page.replace(marker, '"bundle_id":"' + "0" * 64 + '"')
+    if hashlib.sha256(normalized.encode()).hexdigest() != bundle["reviewer_content_sha256"]:
+        raise ValueError("reviewer page fingerprint mismatch")
+    for task in bundle["tasks"]:
+        for media in task["media"]:
+            if media["file"] is None:
+                continue
+            expected = f'thumbs/{task["task_id"]}-{media["alias"]}.jpg'
+            if media["file"] != expected:
+                raise ValueError("invalid media reference")
+            path = directory / expected
+            if any(p.is_symlink() for p in (path, path.parent)):
+                raise ValueError("exported media symlink forbidden")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != media["sha256"]:
+                raise ValueError("exported media fingerprint mismatch")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    build = commands.add_parser("export")
+    for flag in ("groups", "audit", "scopes", "provenance", "output", "seed"):
+        build.add_argument(f"--{flag}", required=True)
+    build.add_argument("--cache", nargs=2, action="append", required=True, metavar=("DATASET", "THUMBS"))
+    build.add_argument("--fixture")
+    check = commands.add_parser("report")
+    check.add_argument("--bundle", required=True)
+    check.add_argument("--labels", required=True)
+    check.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "export":
+            if len(dict(args.cache)) != len(args.cache):
+                raise ValueError("duplicate cache dataset")
+            bundle = export_bundle(groups_path=args.groups, audit_path=args.audit,
+                                   scopes_path=args.scopes, provenance_path=args.provenance,
+                                   cache_roots=dict(args.cache), output=args.output, seed=args.seed,
+                                   fixture_path=args.fixture)
+            print(f'Created {len(bundle["tasks"])} pending tasks; bundle {bundle["bundle_id"]}')
+        else:
+            path = Path(args.bundle)
+            bundle = validate_bundle(load_json(path / "manifest.json"))
+            verify_media(bundle, path / "reviewer")
+            value = report(bundle, read_labels(args.labels))
+            # Exclusive creation: never overwrite labels, inputs, or earlier reports.
+            with Path(args.output).open("x", encoding="utf-8") as handle:
+                handle.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+            print(f'{value["status"]}: risk={value["weighted_error_rate"]}, upper95={value["upper_95"]}')
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        parser.error(str(exc))
+
+
+if __name__ == "__main__":
+    main()

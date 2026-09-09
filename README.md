@@ -741,6 +741,17 @@ research/                   # runtime data only: SigLIP prompt bank (config poin
 tests/                      # pytest suite (`python -m pytest tests/`)
 ```
 
+### Blinded human phase/group audit
+
+Use the independent [offline human audit workflow](docs/HUMAN_AUDIT.md) to freeze
+v4 probability samples, annotate narrative phases and acceptable keepers without
+seeing model recommendations, export/replay versioned JSONL, and produce a
+population-weighted selective-risk report. It reads only explicitly authorized
+development metadata and numeric cached thumbnails; never originals or held-out
+data. Missing/uncertain labels block population risk estimates. Disney G10 has a
+pending, fingerprint-pinned narrative review fixture, not a fabricated verdict.
+There is no pipeline/review-state writeback or deletion authority.
+
 ### Developer test gates
 
 Use `scripts/test-fast.sh` while iterating or before a local commit. It keeps the

@@ -1,0 +1,16 @@
+{
+  "disney": {
+    "schema_version": 1,
+    "dataset_id": "disney",
+    "owner_scope": "willy",
+    "split": "tune",
+    "events": ["willy-disney-2026-09-06"]
+  },
+  "jx3": {
+    "schema_version": 1,
+    "dataset_id": "jx3",
+    "owner_scope": "willy",
+    "split": "tune",
+    "events": ["willy-jx3-2026-08-29"]
+  }
+}

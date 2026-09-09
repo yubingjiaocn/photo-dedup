@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>盲化阶段标注</title>
+<style>
+body{font:16px system-ui;background:#16191e;color:#eee;margin:24px;line-height:1.6}main{max-width:1200px;margin:auto}button,input,select{font:inherit;padding:8px;margin:4px}button{cursor:pointer}section{border:1px solid #657080;padding:16px;margin:20px 0}.strip{display:flex;flex-wrap:wrap;gap:16px}figure{margin:0;max-width:320px}img{width:300px;height:230px;object-fit:contain;background:#000}label{display:block}.warning{color:#ffd285}#status{white-space:pre-wrap}input[type=number]{width:80px}textarea{width:90%;height:60px}button:disabled{opacity:.5}nav{position:sticky;top:0;background:#16191e;padding:8px;z-index:1}
+</style></head><body><main>
+<h1>盲化阶段标注</h1>
+<p>仅看缓存缩略图，不读取原图、不改推荐、不删除。成员按冻结的时间顺序排列；相同叙事/动作阶段填相同编号。为每个阶段至少选择一张可接受的保留照片；不要强求只选一张。</p>
+<p class="warning">看不清表情或无法确定阶段时选“不确定/无法判断”，不要猜。没有默认判断。仅本地下载记录，不自动保存；离开前导出，下次导入继续。请勿在审阅完成前查看分析者 manifest。</p>
+<label>审阅者代号（不要填真实姓名）<input id="annotator" maxlength="80" autocomplete="off"></label>
+<label><input type="checkbox" id="attest">我确认这些判断来自本人视觉审阅，不是模型输出或自动生成标签。</label>
+<nav><button id="export">导出已记录 JSONL</button><label>导入记录以重放/继续 <input id="import" type="file" accept=".jsonl"></label><div id="status" role="status"></div></nav>
+<div id="tasks"></div>
+<script>
+'use strict';
+const DATA=__TASK_DATA__;
+const labels=new Map();
+const sections=new Map();
+let unsaved=false;
+const drafts=new Set();
+window.addEventListener('beforeunload',event=>{if(unsaved||drafts.size){event.preventDefault();event.returnValue='';}});
+const $=id=>document.getElementById(id);
+const keys=['schema_version','bundle_id','task_id','status','annotator','human_attested','phases','group_impure','note'].sort();
+// Label JSON has integer version only. Reject duplicates before they can be
+// laundered by JSON.parse/re-export; use the same strict raw-input rules as CLI.
+function parseStrict(text){
+ let i=0,depth=0;
+ const ws=()=>{while(i<text.length&&/[\x20\t\r\n]/.test(text[i]))i++;};
+ function string(){const start=i++;while(i<text.length){if(text[i]==='\\'){i+=2;continue;}if(text[i++]==='"')return JSON.parse(text.slice(start,i));}throw Error('JSON 字符串未结束');}
+ function value(){ws();if(++depth>100)throw Error('JSON 嵌套过深');let result;
+  if(text[i]==='{'){i++;result=Object.create(null);const seen=new Set();ws();if(text[i]!=='}'){while(true){ws();if(text[i]!== '"')throw Error('JSON 键无效');const key=string();if(seen.has(key))throw Error('重复 JSON 字段');seen.add(key);ws();if(text[i++]!==':')throw Error('JSON 缺少冒号');result[key]=value();ws();if(text[i]!==',')break;i++;}}if(text[i++]!=='}')throw Error('JSON 对象无效');}
+  else if(text[i]==='['){i++;result=[];ws();if(text[i]!==']'){while(true){result.push(value());ws();if(text[i]!==',')break;i++;}}if(text[i++]!==']')throw Error('JSON 数组无效');}
+  else if(text[i]==='"')result=string();
+  else{const match=/^(true|false|null|-?(?:0|[1-9][0-9]*))/.exec(text.slice(i));if(!match)throw Error('JSON 值无效');i+=match[0].length;result=JSON.parse(match[0]);if(typeof result==='number'&&!Number.isSafeInteger(result))throw Error('JSON 整数无效');}
+  depth--;return result;
+ }
+ const result=value();ws();if(i!==text.length)throw Error('JSON 尾部或数字格式无效');return result;
+}
+function validate(x){
+ if(!x||Array.isArray(x)||JSON.stringify(Object.keys(x).sort())!==JSON.stringify(keys))throw Error('字段不匹配');
+ if(x.schema_version!==1||x.bundle_id!==DATA.bundle_id)throw Error('不是本次冻结任务的记录');
+ const task=DATA.tasks.find(t=>t.task_id===x.task_id);if(!task)throw Error('未知任务');
+ if(typeof x.annotator!=='string'||!x.annotator.trim()||x.annotator.length>80||typeof x.human_attested!=='boolean'||typeof x.note!=='string'||x.note.length>2000)throw Error('审阅来源无效');
+ if(!['reviewed','uncertain','unassessable'].includes(x.status))throw Error('状态无效');
+ if(x.status!=='reviewed'){if(!Array.isArray(x.phases)||x.phases.length||x.group_impure!==null)throw Error('未确定记录不能带判断');return x;}
+ if(!x.human_attested||!task.media_complete||typeof x.group_impure!=='boolean'||!Array.isArray(x.phases)||!x.phases.length)throw Error('缺少人工确认、图片或阶段');
+ const seen=new Set(), allowed=new Set(task.members.map(m=>m.alias));
+ for(const p of x.phases){
+  if(!p||JSON.stringify(Object.keys(p).sort())!==JSON.stringify(['acceptable_keepers','members']))throw Error('阶段字段无效');
+  for(const a of [p.members,p.acceptable_keepers])if(!Array.isArray(a)||!a.length||a.some(m=>typeof m!=='string')||new Set(a).size!==a.length)throw Error('阶段成员无效');
+  for(const m of p.members){if(!allowed.has(m)||seen.has(m))throw Error('阶段成员重复或越界');seen.add(m);}
+  if(p.acceptable_keepers.some(m=>!p.members.includes(m)))throw Error('保留照片不在阶段内');
+ }
+ if(seen.size!==allowed.size)throw Error('必须覆盖所有成员');return x;
+}
+function message(s){$('status').textContent=s;}
+function render(){
+ DATA.tasks.forEach((task,index)=>{
+  const section=document.createElement('section');sections.set(task.task_id,section);
+  const title=document.createElement('h2');title.textContent=`任务 ${index+1} / ${DATA.tasks.length}`;section.append(title);
+  const strip=document.createElement('div');strip.className='strip';section.append(strip);
+  task.members.forEach(m=>{
+   const figure=document.createElement('figure');
+   if(m.file){const img=document.createElement('img');img.src=m.file;img.alt=m.alias;img.onerror=()=>{section.dataset.broken='true';message('图片加载失败，该任务只能标为不确定/无法判断');};figure.append(img);}
+   else{const missing=document.createElement('p');missing.textContent='缩略图不可用';figure.append(missing);}
+   const caption=document.createElement('figcaption');caption.textContent=m.alias;figure.append(caption);
+   const label=document.createElement('label');label.textContent='阶段编号 ';const input=document.createElement('input');input.type='number';input.min='1';input.max=String(task.members.length);input.dataset.phase=m.alias;input.setAttribute('aria-label',`${m.alias} 阶段编号`);label.append(input);figure.append(label);
+   const keeperLabel=document.createElement('label');const keeper=document.createElement('input');keeper.type='checkbox';keeper.dataset.keeper=m.alias;keeperLabel.append(keeper,document.createTextNode('可接受的保留照片'));figure.append(keeperLabel);strip.append(figure);
+  });
+  const select=document.createElement('select');select.dataset.impure='';select.setAttribute('aria-label','组内叙事是否属于同一事件片段');
+  [['','组内叙事是否属于同一事件片段？'],['false','是：可作为同一片段，内部可有多个阶段'],['true','否：混入了不应合组的内容']].forEach(([v,t])=>{const o=document.createElement('option');o.value=v;o.textContent=t;select.append(o);});section.append(select);
+  const note=document.createElement('textarea');note.maxLength=2000;note.placeholder='可选：简短视觉观察，不写姓名或路径';section.append(note);
+  [['reviewed','记录完整判断'],['uncertain','不确定'],['unassessable','无法判断']].forEach(([status,text])=>{
+   const button=document.createElement('button');button.textContent=text;button.disabled=status==='reviewed'&&!task.media_complete;
+   button.onclick=()=>{try{
+    let phases=[],impure=null;
+    if(status==='reviewed'){
+     if(section.dataset.broken)throw Error('图片未全部加载，不能记录完整判断');
+     const groups=new Map();
+     for(const m of task.members){const raw=section.querySelector(`[data-phase="${m.alias}"]`).value;const n=Number(raw);if(!raw||!Number.isInteger(n)||n<1||n>task.members.length)throw Error('请填写每张照片的阶段编号');if(!groups.has(n))groups.set(n,{members:[],acceptable_keepers:[]});const p=groups.get(n);p.members.push(m.alias);if(section.querySelector(`[data-keeper="${m.alias}"]`).checked)p.acceptable_keepers.push(m.alias);}
+     phases=Array.from(groups.entries()).sort((a,b)=>a[0]-b[0]).map(x=>x[1]);if(select.value==='')throw Error('请明确回答组内叙事问题');impure=select.value==='true';
+    }
+    const x=validate({schema_version:1,bundle_id:DATA.bundle_id,task_id:task.task_id,status,annotator:$('annotator').value.trim(),human_attested:$('attest').checked,phases,group_impure:impure,note:note.value});
+    labels.set(task.task_id,x);drafts.delete(task.task_id);unsaved=true;section.querySelector('.saved').textContent=`已记录：${text}（导出后持久保存）`;message(`已记录 ${labels.size}/${DATA.tasks.length}；请导出保存。`);
+   }catch(e){message(e.message);}};section.append(button);
+  });
+  const saved=document.createElement('p');saved.className='saved';saved.textContent='尚未记录';section.append(saved);
+  const clear=document.createElement('button');clear.textContent='撤销此任务记录';clear.onclick=()=>{labels.delete(task.task_id);drafts.add(task.task_id);unsaved=true;saved.textContent='尚未记录';message(`已记录 ${labels.size}/${DATA.tasks.length}；请重新导出。`);};section.append(clear);
+  section.addEventListener('input',()=>{labels.delete(task.task_id);drafts.add(task.task_id);unsaved=true;saved.textContent='内容已变更，请重新记录判断';message('修改后的任务尚未记录，不会导出旧判断。');});
+  $('tasks').append(section);
+ });
+}
+$('export').onclick=()=>{try{
+ const rows=Array.from(labels.values()).map(validate);const blob=new Blob([rows.map(x=>JSON.stringify(x)).join('\n')+(rows.length?'\n':'')],{type:'application/x-ndjson'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`audit-${DATA.bundle_id.slice(0,12)}.jsonl`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);unsaved=false;message(`已导出 ${rows.length} 条记录；另有 ${drafts.size} 个未记录草稿未导出。未标注任务不会被当作正确。`);
+}catch(e){message(e.message);}};
+$('import').onchange=async event=>{try{
+ const file=event.target.files[0];if(!file)return;if(file.size>5_000_000)throw Error('记录文件过大');
+ const next=new Map();for(const line of (await file.text()).split(/\r?\n/).filter(s=>s.trim())){const x=validate(parseStrict(line));if(next.has(x.task_id))throw Error('重复任务');next.set(x.task_id,x);}
+ // Validate everything before replacing any state; import is a snapshot, not merge.
+ if((unsaved||drafts.size)&&!window.confirm('导入将替换未导出的记录和未记录草稿。确定放弃这些改动？'))return;
+ labels.clear();for(const [key,x] of next)labels.set(key,x);unsaved=false;drafts.clear();
+ for(const task of DATA.tasks){const section=sections.get(task.task_id),x=labels.get(task.task_id);section.querySelectorAll('[data-phase]').forEach(i=>i.value='');section.querySelectorAll('[data-keeper]').forEach(i=>i.checked=false);section.querySelector('select').value='';section.querySelector('textarea').value=x?x.note:'';section.querySelector('.saved').textContent=x?`已导入：${x.status}`:'尚未记录';if(x&&x.status==='reviewed'){x.phases.forEach((p,i)=>{p.members.forEach(m=>section.querySelector(`[data-phase="${m}"]`).value=String(i+1));p.acceptable_keepers.forEach(m=>section.querySelector(`[data-keeper="${m}"]`).checked=true);});section.querySelector('select').value=String(x.group_impure);}}
+ message(`已重放 ${labels.size} 条记录；新判断需重新填写审阅者及确认。`);
+}catch(e){message(`导入拒绝：${e.message}`);}finally{event.target.value='';}};
+render();
+</script></main></body></html>
