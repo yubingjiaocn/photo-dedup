@@ -11,6 +11,8 @@ RUFF="${RUFF:-.venv/bin/ruff}"
   tests/test_cluster.py \
   tests/test_dataset_contract.py \
   tests/test_phase_selection.py \
+  tests/test_keeper_score_policy.py \
+  tests/test_guarded_common_score.py \
   tests/test_phase_coverage.py \
   tests/test_offline_evaluation.py \
   tests/test_risk_coverage.py \

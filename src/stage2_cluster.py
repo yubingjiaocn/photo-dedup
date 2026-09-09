@@ -367,6 +367,8 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
                 max_group_keepers=int(cc.get("max_group_keepers", 3)),
                 diversity_similarity=float(cc.get("keeper_diversity_similarity", 0.965)),
                 mmr_quality_weight=float(cc.get("keeper_mmr_quality_weight", 0.7)),
+                score_policy=cc.get("keeper_score_policy", "per_member"),
+                score_change_margin=cc.get("keeper_score_change_margin", 0.06),
             )
             # Logical-phase utility is the single authority for keeper choice,
             # decision margins, and persisted evidence in visual groups.

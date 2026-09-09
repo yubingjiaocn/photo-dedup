@@ -120,6 +120,8 @@ _DEFAULTS: Dict[str, Any] = {
         "max_group_keepers": 3,
         "keeper_diversity_similarity": 0.965,
         "keeper_mmr_quality_weight": 0.7,
+        "keeper_score_policy": "per_member",
+        "keeper_score_change_margin": 0.06,
     },
     "quality": {
         "weight_iqa": 0.6,
@@ -262,6 +264,12 @@ class Config:
             raise ValueError("cluster.face_identity_cosine_threshold must be in [-1, 1]")
         if float(self.cluster.get("face_identity_min_width_px", 80.0)) <= 0:
             raise ValueError("cluster.face_identity_min_width_px must be > 0")
+        score_policy = self.cluster.get("keeper_score_policy", "per_member")
+        if not isinstance(score_policy, str) or score_policy not in {"per_member", "common_evidence", "guarded_common"}:
+            raise ValueError("cluster.keeper_score_policy must be per_member, common_evidence or guarded_common")
+        margin = self.cluster.get("keeper_score_change_margin", 0.06)
+        if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not 0 <= margin <= 1:
+            raise ValueError("cluster.keeper_score_change_margin must be a finite number in [0, 1]")
         if int(self.cluster.get("phase_max_gap_seconds", 4)) <= 0:
             raise ValueError("cluster.phase_max_gap_seconds must be > 0")
         for key in ("phase_embedding_boundary", "phase_position_shift", "keeper_diversity_similarity",

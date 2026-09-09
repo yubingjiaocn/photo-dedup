@@ -235,6 +235,12 @@ def _bounded(value: Any) -> float | None:
     return max(0.0, min(1.0, number))
 
 
+_UTILITY_WEIGHTS = {
+    "quality": 0.40, "face_clarity": 0.25, "exposure": 0.15,
+    "subject_completeness": 0.12, "occlusion_inverse": 0.08,
+}
+
+
 def _score(member: Mapping[str, Any]) -> tuple[float, dict[str, float | None], list[str]]:
     """Return one authoritative, availability-normalised utility score.
 
@@ -265,10 +271,7 @@ def _score(member: Mapping[str, Any]) -> tuple[float, dict[str, float | None], l
         "subject_completeness": completeness,
         "occlusion_inverse": None if occlusion is None else 1.0 - occlusion,
     }
-    weights = {
-        "quality": 0.40, "face_clarity": 0.25, "exposure": 0.15,
-        "subject_completeness": 0.12, "occlusion_inverse": 0.08,
-    }
+    weights = _UTILITY_WEIGHTS
     available = {key: value for key, value in evidence.items() if value is not None}
     denominator = sum(weights[key] for key in available)
     total = (sum(weights[key] * value for key, value in available.items()) / denominator
@@ -277,9 +280,69 @@ def _score(member: Mapping[str, Any]) -> tuple[float, dict[str, float | None], l
     return total, evidence, missing
 
 
-def utility_scores(members: Sequence[Mapping[str, Any]]) -> dict[int, float]:
-    """Expose the exact score map used by selection and decision evidence."""
-    return {idx: _score(member)[0] for idx, member in enumerate(members)}
+def _score_group(
+    members: Sequence[Mapping[str, Any]], score_policy: str,
+    score_change_margin: float = 0.06,
+) -> tuple[dict[int, float], dict[str, Any]]:
+    if not isinstance(score_policy, str) or score_policy not in {
+        "per_member", "common_evidence", "guarded_common",
+    }:
+        raise ValueError("score_policy must be per_member, common_evidence or guarded_common")
+    if (isinstance(score_change_margin, bool)
+            or not isinstance(score_change_margin, (int, float))
+            or not math.isfinite(score_change_margin) or not 0 <= score_change_margin <= 1):
+        raise ValueError("score_change_margin must be a finite number in [0, 1]")
+    scored = [_score(member) for member in members]
+    legacy = {idx: item[0] for idx, item in enumerate(scored)}
+    shared = [key for key in _UTILITY_WEIGHTS
+              if scored and all(item[1][key] is not None for item in scored)]
+    excluded = [key for key in _UTILITY_WEIGHTS if key not in shared
+                and any(item[1][key] is not None for item in scored)]
+    context = {
+        "policy": score_policy, "shared_components": shared,
+        "excluded_noncommon_components": excluded,
+        "effective_policy": "per_member", "comparison_only": True,
+        "required_primary_gain": score_change_margin, "primary_gain": None,
+        "fallback": None if shared or not scored else "NO_SHARED_COMPONENTS_LEGACY_UNCHANGED",
+        "semantics": "shared_observed_components_not_subject_or_face_truth",
+    }
+    if score_policy == "per_member" or not shared:
+        return legacy, context
+    denominator = sum(_UTILITY_WEIGHTS[key] for key in shared)
+    scores = {idx: sum(_UTILITY_WEIGHTS[key] * item[1][key] for key in shared) / denominator
+              for idx, item in enumerate(scored)}
+    if score_policy == "guarded_common":
+        def rank(idx: int, values: Mapping[int, float]) -> tuple[float, int, int]:
+            return (values[idx], int(members[idx].get("size_bytes") or 0),
+                    -int(members[idx].get("id") or idx))
+        old_anchor = max(legacy, key=lambda idx: rank(idx, legacy))
+        new_anchor = max(scores, key=lambda idx: rank(idx, scores))
+        gain = scores[new_anchor] - scores[old_anchor]
+        context.update({"primary_gain": gain, "primary_before_member_index": old_anchor,
+                        "primary_after_member_index": new_anchor})
+        if old_anchor == new_anchor or gain < score_change_margin:
+            context["fallback"] = ("NO_PRIMARY_RANK_CHANGE" if old_anchor == new_anchor
+                                   else "INSUFFICIENT_PRIMARY_GAIN")
+            return legacy, context
+    context.update({"effective_policy": "common_evidence", "comparison_only": False})
+    return scores, context
+
+
+def utility_scores(
+    members: Sequence[Mapping[str, Any]], *, score_policy: str = "per_member",
+    score_change_margin: float = 0.06,
+) -> dict[int, float]:
+    """Expose actual scores; common_evidence compares only shared observations.
+
+    Missing face/optional detections are neither a reward nor a quality penalty.
+    A group with no shared observations explicitly retains the legacy ranking.
+    guarded_common changes the scoring basis only when the best primary
+    candidate changes with at least score_change_margin observed utility gain.
+    Shared/excluded context fields describe that comparison; effective_policy
+    identifies the score map actually used. No subject identity, frontality or
+    completeness is inferred by either policy.
+    """
+    return _score_group(members, score_policy, score_change_margin)[0]
 
 
 def _phase_variation(
@@ -314,6 +377,7 @@ def select_phase_keepers(
     keepers_per_phase: int = 1, max_group_keepers: int = 3,
     diversity_similarity: float = 0.965, mmr_quality_weight: float = 0.7,
     phase_requirements: Mapping[str, Any] | None = None,
+    score_policy: str = "per_member", score_change_margin: float = 0.06,
 ) -> dict[str, Any]:
     """Protect logical phases with variation-aware budget and deterministic MMR.
 
@@ -333,7 +397,7 @@ def select_phase_keepers(
         raise ValueError("mmr_quality_weight must be in [0, 1]")
     selections: list[dict[str, Any]] = []
     all_keepers: list[int] = []
-    scores = utility_scores(members)
+    scores, scoring_context = _score_group(members, score_policy, score_change_margin)
     for phase in phases:
         target = max(1, keepers_per_phase)
         reasons = ["LOGICAL_PHASE_MINIMUM_KEEPER"]
@@ -485,16 +549,20 @@ def select_phase_keepers(
     if phase_requirements is not None:
         diagnostics.append(diagnose_phase_coverage(member_ids, keeper_ids, group_budget, phase_requirements))
     coverage_reasons = diagnostic_review_reasons(diagnostics)
+    scoring_review = (score_policy == "guarded_common"
+                      and scoring_context["effective_policy"] == "common_evidence")
+    selection_reasons = [*coverage_reasons, *(["KEEPER_SCORE_COMPARABILITY_CHANGE"] if scoring_review else [])]
     return {
+        **({"scoring_context": scoring_context} if score_policy != "per_member" else {}),
         "keepers": unique_keepers,
         "phase_coverage_diagnostics": diagnostics,
-        "reason_codes": coverage_reasons,
+        "reason_codes": selection_reasons,
         "mandatory_review": bool(coverage_reasons),
         "utility_scores": scores,
         "phases": selections,
         "group_keeper_budget": group_budget,
         "budget_limited": budget_limited,
-        "review_required": bool(coverage_reasons) or any(item["review_required"] for item in selections),
+        "review_required": scoring_review or bool(coverage_reasons) or any(item["review_required"] for item in selections),
         "review_phase_count": sum(item["review_required"] for item in selections),
         "semantics": "logical_phase_protection_within_existing_db_group",
         "physical_group_split": False,
