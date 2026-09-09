@@ -11,7 +11,8 @@ from pathlib import Path
 from .dataset_contract import validate_manifest, validate_split_contract
 from .risk_coverage import stratified_audit_sample
 
-VERSION = 1
+VERSION = 1  # Frozen sampling/bundle format; label and report semantics are versioned separately.
+LABEL_VERSION = 2
 LABEL_KEYS = {"schema_version", "bundle_id", "task_id", "status", "annotator",
               "human_attested", "phases", "group_impure", "note"}
 
@@ -196,8 +197,12 @@ def validate_labels(bundle, labels):
     for label in labels:
         if not isinstance(label, dict) or set(label) != LABEL_KEYS:
             raise ValueError("invalid label fields")
-        if (type(label["schema_version"]) is not int or label["schema_version"] != VERSION
-                or label["bundle_id"] != bundle["bundle_id"]):
+        version = label["schema_version"]
+        valid_ids = [bundle["bundle_id"]]
+        if version == 1 and bundle.get("label_schema_version", 1) == 2:
+            valid_ids = [bundle["legacy_bundle_id"]] if bundle.get("legacy_bundle_id") else []
+        if (type(version) is not int or version not in {1, LABEL_VERSION}
+                or label["bundle_id"] not in valid_ids):
             raise ValueError("stale label bundle/version")
         key = label["task_id"]
         if not isinstance(key, str) or key not in tasks or key in seen:
@@ -225,10 +230,18 @@ def validate_labels(bundle, labels):
                 raise ValueError("phases required")
             members_seen = set()
             for phase in phases:
-                if not isinstance(phase, dict) or set(phase) != {"members", "acceptable_keepers"}:
+                if not isinstance(phase, dict):
                     raise ValueError("invalid phase fields")
-                members, keepers = phase["members"], phase["acceptable_keepers"]
-                for values in (members, keepers):
+                keeper_status = phase.get("keeper_status") if version == 2 else "assessed"
+                if keeper_status not in {"assessed", "quality_abstain"}:
+                    raise ValueError("explicit keeper_status required")
+                fields = {"members", "acceptable_keepers"} if version == 1 else {"members", "keeper_status"}
+                if version == 2 and keeper_status == "assessed":
+                    fields.add("acceptable_keepers")
+                if set(phase) != fields:
+                    raise ValueError("invalid phase fields")
+                members, keepers = phase["members"], phase.get("acceptable_keepers", [])
+                for values in ([members, keepers] if keeper_status == "assessed" else [members]):
                     if (not isinstance(values, list) or not values
                             or any(not isinstance(v, str) for v in values)
                             or len(set(values)) != len(values)):
@@ -244,8 +257,11 @@ def validate_labels(bundle, labels):
 
 
 def read_labels(path):
-    # Reuse the strict JSON decoder, including duplicate-key and NaN rejection.
-    text = Path(path).read_text(encoding="utf-8")
+    return parse_labels(Path(path).read_text(encoding="utf-8"))
+
+
+def parse_labels(text):
+    # Shared by file replay and byte-preserving migration snapshots.
     def pairs(items):
         result = {}
         for key, value in items:
@@ -259,41 +275,90 @@ def read_labels(path):
             for line in text.splitlines() if line.strip()]
 
 
+def labels_v2(bundle, labels):
+    """Explicit structural conversion; v1 reviewed means assessed, regardless of notes."""
+    parsed = validate_labels(bundle, labels)
+    result = copy.deepcopy(list(parsed.values()))
+    for label in result:
+        if label["schema_version"] == 1:
+            for phase in label["phases"]:
+                phase["keeper_status"] = "assessed"
+        label.update(schema_version=LABEL_VERSION, bundle_id=bundle["bundle_id"])
+    validate_labels(bundle, result)
+    return result
+
+
 def report(bundle, labels):
     parsed = validate_labels(bundle, labels)
     details = []
     for task in bundle["tasks"]:
         label = parsed.get(task["task_id"])
         status = label["status"] if label else "pending"
-        error = phase_miss = keeper_bad = None
+        error = phase_miss = keeper_bad = coverage_error = quality_error = None
+        assessed_count = abstain_count = quality_phase_errors = 0
         if status == "reviewed":
             aliases = dict(zip(task["member_ids"], task["aliases"], strict=True))
             chosen = {aliases[item] for item in task["candidate_keeper_ids"]}
-            phase_miss = any(not chosen.intersection(p["acceptable_keepers"]) for p in label["phases"])
-            acceptable = {m for p in label["phases"] for m in p["acceptable_keepers"]}
-            keeper_bad = bool(chosen - acceptable)
-            error = bool(label["group_impure"] or phase_miss or keeper_bad)
+            phases = label["phases"]
+            coverage_error = any(not chosen.intersection(p["members"]) for p in phases)
+            assessed = [p for p in phases if p.get("keeper_status", "assessed") == "assessed"]
+            assessed_count, abstain_count = len(assessed), len(phases) - len(assessed)
+            # Quality concerns selected candidates, not whether a phase was covered.
+            quality_phase_errors = sum(bool(chosen.intersection(p["members"]) -
+                                            set(p["acceptable_keepers"])) for p in assessed)
+            if not abstain_count:
+                quality_error = keeper_bad = bool(quality_phase_errors)
+                # Preserve the v1 acceptable-coverage + bad-keeper union exactly.
+                phase_miss = any(not chosen.intersection(p["acceptable_keepers"]) for p in phases)
+                error = bool(label["group_impure"] or phase_miss or keeper_bad)
         details.append({"task_id": task["task_id"], "audit_id": task["audit_id"],
                         "kind": task["kind"], "stratum": task["stratum"], "status": status,
-                        "error": error, "phase_miss": phase_miss, "keeper_bad": keeper_bad})
+                        "error": error, "phase_miss": phase_miss, "keeper_bad": keeper_bad,
+                        "phase_coverage_error": coverage_error, "keeper_quality_error": quality_error,
+                        "phase_coverage_eligible": coverage_error is not None,
+                        "keeper_quality_eligible": quality_error is not None,
+                        "joint_eligible": error is not None,
+                        "quality_assessed_phase_count": assessed_count,
+                        "quality_abstain_phase_count": abstain_count,
+                        "quality_assessed_phase_errors": quality_phase_errors})
     strata = []
     active = sum(s["population"] > s["sample"] for s in bundle["strata"])
     for s in bundle["strata"]:
         subset = [d for d in details if d["kind"] == "probability" and d["stratum"] == s["stratum"]]
-        reviewed = [d for d in subset if d["status"] == "reviewed"]
+        eligible = [d for d in subset if d["joint_eligible"]]
+        covered = [d for d in subset if d["phase_coverage_eligible"]]
         n, population = s["sample"], s["population"]
-        errors = sum(d["error"] for d in reviewed)
-        complete = len(reviewed) == n and n > 0
+        errors = sum(d["error"] for d in eligible)
+        complete = len(eligible) == n and n > 0
         rate = errors / n if complete else None
-        # Hoeffding for bounded SRS without replacement is conservative without
-        # a finite-population correction. Bonferroni makes strata simultaneous.
+        # Conservative SRSWOR Hoeffding + Bonferroni; census strata are exact.
         upper = (rate if n == population else min(1., rate + math.sqrt(math.log(active / .05) / (2*n)))) if complete else None
-        strata.append({**s, "reviewed": len(reviewed), "errors": errors,
+        strata.append({**s, "reviewed": sum(d["status"] == "reviewed" for d in subset),
+                       "joint_eligible_count": len(eligible), "errors": errors,
+                       "phase_coverage_eligible_count": len(covered),
+                       "phase_coverage_error_rate": sum(d["phase_coverage_error"] for d in covered) / n
+                       if len(covered) == n and n > 0 else None,
                        "error_rate": rate, "upper_95": upper})
     complete = bool(strata) and all(s["error_rate"] is not None for s in strata)
+    phase_complete = bool(strata) and all(s["phase_coverage_error_rate"] is not None for s in strata)
     total = bundle["silent_population"]
+
+    def evidence_counts(kind):
+        subset = [d for d in details if d["kind"] == kind]
+        result = {"task_count": len(subset)}
+        for metric in ("phase_coverage", "keeper_quality"):
+            eligible = [d for d in subset if d[f"{metric}_eligible"]]
+            result[f"{metric}_eligible_count"] = len(eligible)
+            result[f"{metric}_error_count"] = sum(d[f"{metric}_error"] for d in eligible)
+        result.update(joint_eligible_count=sum(d["joint_eligible"] for d in subset),
+                      quality_abstain_group_count=sum(d["quality_abstain_phase_count"] > 0 for d in subset),
+                      quality_abstain_phase_count=sum(d["quality_abstain_phase_count"] for d in subset),
+                      quality_assessed_phase_count=sum(d["quality_assessed_phase_count"] for d in subset),
+                      quality_assessed_phase_errors=sum(d["quality_assessed_phase_errors"] for d in subset))
+        return result
+
     return {
-        "schema_version": VERSION, "bundle_id": bundle["bundle_id"],
+        "schema_version": LABEL_VERSION, "bundle_id": bundle["bundle_id"],
         "labels_fingerprint": digest(sorted(labels, key=lambda x: x["task_id"])),
         "authority": "annotation_only", "deletion_authority": "none",
         "estimand": "frozen_development_silent_group_error_rate",
@@ -303,10 +368,20 @@ def report(bundle, labels):
         "purposive_count": sum(d["kind"] == "purposive" for d in details),
         "weighted_error_rate": sum(s["population"] * s["error_rate"] for s in strata) / total if complete else None,
         "upper_95": sum(s["population"] * s["upper_95"] for s in strata) / total if complete else None,
+        "evidence_counts": {kind: evidence_counts(kind) for kind in ("probability", "purposive")},
+        "phase_only": {
+            "descriptive_only": True, "safety_validated": False,
+            "complete_probability_phase_labels": phase_complete,
+            "weighted_phase_coverage_error_rate": sum(s["population"] * s["phase_coverage_error_rate"] for s in strata) / total if phase_complete else None,
+            "upper_95": None,
+        },
         "bound_method": "population_weighted_bonferroni_hoeffding_srswor_census_exact",
         "safety_validated": False, "strata": strata, "tasks": details,
         "limitations": ["Human attestations are not proof of reviewer identity or correctness.",
                         "Development events only; not future-event or held-out generalization.",
                         "No policy fitting on these labels before reporting this frozen audit.",
-                        "No deletion or pipeline writeback; incomplete/uncertain labels block estimation."],
+                        "No deletion or pipeline writeback; incomplete/uncertain/quality-abstain labels block joint estimation.",
+                        "Phase coverage uses membership only; phase-only results are descriptive, not safety certification.",
+                        "Quality abstention is neither success nor error. Mixed groups have only assessed-phase quality counts.",
+                        "Legacy v1 reviewed retains fully assessed semantics; notes never infer abstention."],
     }

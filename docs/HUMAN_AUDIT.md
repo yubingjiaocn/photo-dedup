@@ -1,37 +1,92 @@
-# Blinded phase/group human audit (v1)
+# Blinded phase/group human audit (v2)
 
-This is an offline annotation product, not a deletion interface. It freezes the
-v4 probability sample, collects independent human phase/keeper judgments, then
-compares them with the frozen candidate. It does not run inference, read a DB,
-open originals, change the review workbench state, or write policy/manifests.
-`AUTO_REMOVE` remains `BYTE_IDENTICAL` only.
+This standalone offline reviewer collects human evidence, not deletion decisions.
+It reads only explicit development metadata and verified cached JPEGs. It does
+not read originals, DBs, embeddings or held-out data; run inference; change the
+operational workbench; or write back policy. `AUTO_REMOVE` stays `BYTE_IDENTICAL`
+only. Reviewer data has no candidate keepers, model scores/phases, dataset paths,
+strata, or purposive-case hints. Human annotation and model-provisional packets
+remain separate. An attestation records provenance, not proof of human identity.
 
-## Why a separate export
+## Human workflow
 
-The existing Preact workbench is an operational decision overlay: accept the AI
-keeper, select a photo, defer, undo. It is not a probability-labeling instrument.
-The v4 `review-prototype.html` and contact sheets expose candidate keepers, scores,
-reasons and expected-value ordering. Its four-button labels cannot express a
-complete human phase partition. `offline_evaluation.py` validates phase labels
-but does not provide a blind collection/replay workflow or survey-risk report.
+1. Enter a pseudonymous reviewer code; attest that reviewed judgments are human.
+2. Give every member a phase number: equal numbers mean the same action/narrative
+   phase. Answer the separate false-merge question. No judgment is preselected.
+3. For **each phase**, explicitly choose:
+   - **质量已判断** (`assessed`): select one or more acceptable keeper members.
+   - **质量无法判断** (`quality_abstain`): the phase is distinguishable, but image
+     quality/expression/sharpness cannot be judged. No acceptable keeper is
+     required or stored. Different phases may have different quality statuses.
+4. **保存阶段判断与备注** saves the complete partition, per-phase quality status,
+   group impurity and note. If even the partition cannot be judged, use
+   **保存为不确定（含备注）** or **保存为无法审阅（含备注）** instead. Both save
+   the note, but intentionally store no phase/quality/impurity judgments. Never
+   force `reviewed` just to keep a note.
+5. Saved feedback explicitly confirms the note and export/recovery availability.
+   The page attempts a bundle-scoped `localStorage` backup of **saved records**;
+   it reports storage failure without pretending persistence succeeded. Reload
+   restores that snapshot when available. Browser storage can be cleared, blocked,
+   quota-limited or scoped differently between local-file/host/port URLs: **export
+   JSONL before leaving and confirm that the download exists**.
+6. Editing invalidates the task's saved record. Unsaved form edits are drafts,
+   are not exported or automatically restored, and trigger a leave warning even
+   after other saved records were exported. Click any appropriate save button
+   to retain the note. Undo removes the saved record but leaves an unsaved form.
+7. Import validates the entire file before replacing state. It is snapshot
+   replacement, not append/merge, and asks before discarding unexported records
+   or drafts. Import restores notes, phases and quality controls. A new judgment
+   requires the reviewer code and human attestation again. There is no
+   multi-reviewer adjudication or automatic note interpretation.
 
-This slice therefore uses a separate static reviewer bundle and JSONL snapshot,
-leaving both existing interfaces and deletion authority untouched. No model
-score or existing provisional tune label is imported as human truth.
+### Image viewer
 
-## Freeze and export
+Click a thumbnail or focus its button and press Enter/Space. The modal supports
+previous/next buttons and Left/Right keys within the same group; Escape closes
+and returns focus to the opener. **适屏** fits the cached image to the viewport;
+**原像素（缓存 1:1）** displays its intrinsic pixels. The UI states dimensions
+and **“放大不增加细节”**. Neither mode is an original-image endpoint.
 
-Use explicit development dataset manifests and explicit **thumbnail cache**
-roots. Scope validation precedes reading group inputs or images. Only owner
-`willy` or `synthetic`, split `train`/`tune`, is accepted. Held-out, other owners,
-unknown datasets and mismatched manifests fail closed. This is a trusted local
-operator contract, not a mechanism for recognizing mislabeled private files.
-Never point `--cache` at originals; it reads only `<integer-id>.jpg`, rejects
-symlinks, oversized/non-JPEG cache entries, and has no original-image fallback.
-Missing/corrupt thumbnails make a task unassessable. JPEGs are re-encoded from
-pixels so EXIF, comments and appended data do not enter the reviewer bundle.
+The r3 release reuses only r2's verified 320×240 thumbnail bytes. No larger
+trusted derivative has been supplied to this migration; none is discovered,
+generated, interpolated into evidence or read from originals. The generic fresh
+exporter can accept a bounded JPEG from an explicitly supplied trusted thumbnail
+cache root (maximum dimension 2048), but cannot recognize a mislabeled original
+cache. Operators must never point it at originals. Any future larger derivative
+requires an explicit trusted source and a new sealed bundle.
 
-Example for the existing immutable v4 artifacts (no pipeline rerun):
+## Strict label schema and v1 compatibility
+
+Label/report semantics are version 2; the frozen sampling/bundle envelope remains
+version 1. Each label has exactly `schema_version`, `bundle_id`, `task_id`,
+`status`, `annotator`, `human_attested`, `phases`, `group_impure`, `note`.
+The following is a **synthetic schema example**, not a real annotation:
+
+```json
+{"schema_version":2,"bundle_id":"<hash>","task_id":"<opaque id>","status":"reviewed","annotator":"reviewer-01","human_attested":true,"phases":[{"members":["M1","M2"],"keeper_status":"assessed","acceptable_keepers":["M1"]},{"members":["M3"],"keeper_status":"quality_abstain"}],"group_impure":false,"note":"Action is clear; M3 expression is not assessable."}
+```
+
+- `reviewed` requires complete disjoint membership coverage and explicit boolean
+  impurity/human attestation. Assessed phases require a nonempty unique keeper
+  subset. An abstaining phase has **exactly** `members` and `keeper_status`;
+  `acceptable_keepers` is forbidden (including an empty list).
+- `uncertain` / `unassessable` require `phases: []`, `group_impure: null` and
+  preserve `note`. Missing task rows are pending, not successful judgments.
+- Duplicate JSON keys/tasks/members/keepers, unknown fields, non-integer version
+  tokens (including `2.0`), NaN, incomplete partitions and scope mismatches fail.
+  Browser and analyst CLI enforce the same label contract.
+- Old v1 phase objects have only `members` and `acceptable_keepers`. A v1
+  `reviewed` record retains **fully assessed** semantics, even if its note says
+  the image is unclear. Imports show it as an editable old v1 label; software
+  never guesses abstention, changes phase granularity or rewrites the note.
+- Export always emits strict v2. Converting v1 adds `keeper_status: assessed`
+  and binds to the current bundle, preserving all human content and statistical
+  meaning. Only a human's explicit re-edit can replace it with quality abstention.
+
+## Freeze/export and verified r2 → r3 migration
+
+Fresh export uses the existing frozen v4 metadata and explicitly authorized cache
+roots; source data is immutable:
 
 ```bash
 python -m src.human_audit_bundle export \
@@ -42,175 +97,113 @@ python -m src.human_audit_bundle export \
   --cache disney /home/ubuntu/photo-dedup-eval/disney-conservative/thumbs \
   --cache jx3 /home/ubuntu/photo-dedup-eval/jx3-identity/thumbs \
   --fixture fixtures/disney-g10-narrative-review-v1.json \
-  --seed human-phase-audit-v1 \
-  --output /home/ubuntu/photo-dedup-eval/human-audit-v1-20260909-r2
+  --seed human-phase-audit-v1 --output /path/to/new-bundle
 ```
 
-Output must not exist and must be separate from cache roots. No input is modified.
-The output contains:
+Only owner `willy`/`synthetic`, split `train`/`tune` is authorized. Scope checks
+precede data reads. Cache paths are explicit numeric JPEGs; symlinks, oversized
+images and invalid scope fail closed; absent/corrupt thumbnails block reviewed
+labels. Fresh exports re-encode pixels to remove metadata, never fall back to
+originals, and require an output separate from caches that does not already exist.
 
-- `reviewer/index.html` + `reviewer/thumbs/`: the **only** files needed by the
-  human reviewer. Open `index.html` directly in a local browser. No server,
-  network requests, authentication or original-photo endpoint is involved.
-- `manifest.json`: private analyst metadata, source DB hashes inherited from
-  v4 provenance, frozen candidate/member mapping, sampling strata, media hashes
-  and bundle fingerprint. **Do not give this to a blinded reviewer** or serve
-  the parent directory. Hashes detect accidental mutation; they are not signatures.
-- `empty-labels.jsonl`: an empty snapshot, never a generated human conclusion.
+For r3, **do not re-export/resample**: reuse the verified r2 bundle instead:
 
-Same inputs, seed and cache pixels in the same Pillow/JPEG environment produce
-the same bundle and display order. A change of input, candidate, membership,
-cache image or presentation seed produces a new bundle ID; old labels cannot be
-silently reused. Codec changes may also change media bytes/identity. Member order
-is inherited from the v4 timestamp-ordered export; anonymous labels M1, M2, …
-retain that order for narrative review. Group presentation order is hashed and
-reproducible, not sorted by risk. The reviewer payload has no scores, candidate
-keepers, model phases, reasons, dataset/source paths, strata or G10 hint.
-
-The sampler is replayed against the entire pre-audit silent population:
-**72 SAFE_SILENT + 30 DIAGNOSTIC_SAMPLE = 102 groups**, not just the 72 remaining
-silent groups. IDs, counts, strata, weights, inclusion probabilities and pending
-status must agree exactly with the replayed sample. No resampling after labels.
-The report targets this frozen operating point, not the primary queue.
-
-## Human workflow and replay
-
-1. Use a reviewer who has not seen this run's candidate predictions. Enter a
-   pseudonymous reviewer code and explicitly attest that judgments are human.
-2. Give every member a phase number. Equal numbers mean the same narrative or
-   action phase. Select at least one **acceptable** keeper per phase (several
-   are allowed), then answer whether unrelated content has been falsely merged.
-   No phase, keeper or impurity answer is preselected.
-3. Click **记录完整判断**. If thumbnails cannot resolve expression/action/quality,
-   choose **不确定** or **无法判断**. Those records have no phases or correctness
-   conclusion and cannot count as safety evidence.
-4. Export JSONL before leaving. Nothing writes to the source or pipeline state.
-   Reload starts blank; import the downloaded JSONL to restore the snapshot and
-   controls. Import validates the whole snapshot before replacing any state.
-   Editing a recorded task invalidates its saved judgment until recorded again.
-   Undo removes that task's record; a subsequent export reflects the removal.
-5. Keep exported snapshots separately (version them by filename); do not append
-   duplicate rows or merge reviewer files blindly. This v1 has one judgment per
-   task, not an adjudication/multi-reviewer system. Both browser import and analyst CLI reject duplicate JSON keys, non-integer
-   version tokens, NaN and invalid schema/partitions. Snapshot replacement asks
-   before discarding unexported labels or drafts; exporting recorded labels does
-   not dismiss the loss warning for unrecorded form edits.
-
-A JSONL row has exactly these keys:
-
-```json
-{"schema_version":1,"bundle_id":"<frozen bundle hash>","task_id":"<opaque task id>","status":"reviewed","annotator":"reviewer-01","human_attested":true,"phases":[{"members":["M1","M2"],"acceptable_keepers":["M1"]}],"group_impure":false,"note":"optional visual observation"}
+```bash
+python -m src.human_audit_bundle upgrade \
+  --bundle /home/ubuntu/photo-dedup-eval/human-audit-v1-20260909-r2 \
+  --labels /home/ubuntu/photo-dedup-eval/human-audit-v1-20260909-r2/willy-partial-15.jsonl \
+  --output /home/ubuntu/photo-dedup-eval/human-audit-v2-20260909-r3
 ```
 
-The example is schema documentation, **not a label for any real task**. Status
-`uncertain`/`unassessable` requires `phases: []`, `group_impure: null`. Missing rows
-are pending. Exact membership partition, keeper subsets, explicit booleans,
-bundle/task scope, duplicate tasks and unknown fields are validated. A human
-attestation records provenance; software cannot prove that a human really looked.
+Upgrade verifies the old manifest, sealed HTML and media first. It preserves
+sampling strata/weights, source identity, task IDs/order, blind member mapping,
+candidates and **exact cached media bytes**. It creates a newly sealed UI with
+initial editable v1 labels, a sealed `legacy_bundle_id` and source-label hash.
+Only v1 labels from that exact source ID are importable; v2 labels
+must use the new ID. Fresh v2 bundles without legacy lineage reject v1 imports.
+There is no arbitrary stale-bundle bypass. The old bundle
+and input labels are not modified. An already-migrated bundle is not an upgrade
+source. Output must be a new separate directory.
 
-Replay to a new report file:
+Outputs:
+- `reviewer/index.html`, `reviewer/thumbs/`: the only reviewer-facing files. The
+  sealed page embeds the imported human labels, not analyst metadata. Open it
+  locally, or serve **only this subdirectory**, bound to localhost.
+- `manifest.json`: private analyst mapping/provenance and fingerprints; do not
+  expose or serve the bundle parent directory.
+- `imported-v1-labels.jsonl`: byte-preserved source snapshot.
+- `labels-v2.jsonl`: explicit structural conversion of that snapshot, not re-labeling.
+- `imported-report.json`: replay of original label semantics, not a fresh review.
+- `empty-labels.jsonl`: empty snapshot, never manufactured human ground truth.
+
+The UI fingerprint normalizes only the single main bundle-ID marker, avoiding a
+circular hash. Embedded initial labels retain the source ID and are covered by
+the page hash. Replay rejects modified media, initial notes, HTML mapping or
+manifest. Hashes detect mutation; they are not signatures against an attacker
+who can replace the entire trusted bundle and recompute every hash.
+
+## Reporting: separate coverage, quality and legacy joint risk
 
 ```bash
 python -m src.human_audit_bundle report \
-  --bundle /home/ubuntu/photo-dedup-eval/human-audit-v1-20260909-r2 \
-  --labels /path/to/downloaded-audit.jsonl \
-  --output /path/to/new-audit-report.json
+  --bundle /home/ubuntu/photo-dedup-eval/human-audit-v2-20260909-r3 \
+  --labels /path/to/downloaded-v2.jsonl --output /path/to/new-report.json
 ```
 
-The CLI checks bundle, reviewer HTML (including member-to-image mapping), and
-exported thumbnail fingerprints before reporting. The HTML fingerprint normalizes
-only its single bundle-ID marker, avoiding a circular hash dependency.
-Changed/missing exported media or stale labels fail, rather than quietly
-changing the evidence. A report output already present is never overwritten.
+Reports never overwrite an existing output. Compare frozen candidate aliases to
+human evidence only after annotation:
 
-## Group error and statistical contract
+| Field | Meaning / eligibility |
+|---|---|
+| `phase_coverage_error` | Any human phase contains no selected candidate **member**, regardless of quality. Eligible for every complete reviewed partition, including quality abstention. |
+| `keeper_quality_error` | Any selected candidate is unacceptable in its phase. Group-level value only if **every** phase is quality-assessed; otherwise null. Coverage omission is not itself a quality error. |
+| `quality_assessed_phase_count/errors` | Descriptive phase-level counts on assessed phases only, including assessed phases of mixed groups. An assessed phase with no selected candidate has no bad selection; its omission is counted in coverage instead. |
+| `quality_abstain_phase_count` | Explicit quality abstentions: excluded, never counted as pass or error. |
+| `phase_miss`, `keeper_bad`, `error` | Legacy acceptable-phase-coverage, bad-keeper and false-merge union. All null if any phase quality abstains, even when another error is known. With full assessment, old v1 semantics are unchanged. |
 
-For each reviewed group, compare frozen candidate keeper aliases to the human
-partition only **after** annotation:
+`evidence_counts` separately lists probability and purposive coverage/quality
+eligible/error counts, joint eligible count, assessed-phase and abstention
+counts. `strata.reviewed` is not synonymous with `joint_eligible_count`.
 
-- error if the human marked a false merge;
-- error if any human phase has no acceptable candidate keeper;
-- error if any selected candidate keeper is not acceptable in its human phase.
+The estimand remains the frozen **102-group development silent population**
+(72 SAFE_SILENT + 30 DIAGNOSTIC_SAMPLE), excluding primary review. Replay fixes
+the 30 probability draws and stratum allocation; no post-label resampling.
+Disney G10 is one additional purposive narrative recheck, pinned to members
+430/431/432/433 and the source fingerprint, not a supplied expected conclusion.
+Its result never enters probability prevalence or confidence bounds.
 
-No judgment about the model's phase count is required from the blinded human.
-The report includes `phase_miss`, `keeper_bad` and the union group-error flag.
+The old joint weighted error and upper bound require all drawn probability
+labels fully assessed and every nonempty stratum sampled. Missing, uncertain,
+unassessable or any probability keeper abstention keeps overall values **null**.
+Do not drop abstentions, substitute model labels or selectively label until a
+desired bound appears. A purposive abstention does not invalidate the separate
+probability estimand. Complete stratum summaries may still be reported.
 
-For stratum h, N_h is the frozen silent population and n_h is the drawn sample.
-The v4 sampler fixes allocation by stratum sizes and takes simple random draws
-without replacement within each stratum. It stores inclusion n_h/N_h and weight
-N_h/n_h. The seed must have been fixed without inspecting labels; replay alone
-cannot prove this protocol was followed.
+For stratum h, weighted risk is Σ(N_h/N)·errors_h/n_h. Census bounds are exact;
+otherwise U_h=min(1, errors_h/n_h + sqrt(log(H/0.05)/(2n_h))), where H is the
+number of non-census strata. Weight U_h by N_h/N for the simultaneous 95% bound.
+This conservative SRS-without-replacement Hoeffding + Bonferroni bound omits a
+finite-population correction and is not pooled Wilson/binomial inference.
 
-Only when **all drawn probability samples are reviewed and assessable**, and
-every nonempty population stratum has n_h > 0, report:
+If all probability phase partitions are available, `phase_only` can separately
+show a weighted **descriptive** phase-coverage error rate, including quality
+abstentions. It has no confidence bound and **is not safety certification**.
+All reports say `safety_validated: false`; no threshold or deletion authority is
+created. Correlated human mistakes, low-resolution evidence, prior exposure and
+development-event generalization limits remain. Labels flagged by the user as
+forced legacy judgments require human revision before substantive conclusions.
 
-- weighted error estimate: sum_h (N_h/N) × (errors_h/n_h);
-- one-sided simultaneous 95% upper bound: sum_h (N_h/N) × U_h;
-- census stratum: U_h = errors_h/N_h exactly;
-- non-census stratum: U_h = min(1, errors_h/n_h +
-  sqrt(log(H/0.05)/(2 n_h))), where H is the number of non-census strata.
-
-Hoeffding's bounded-sample bound is conservative for sampling without replacement;
-Bonferroni allocates 0.05/H across non-census strata. No independence across
-strata is needed for that union bound. We deliberately omit a finite-population
-correction; sparse strata can make the bound very loose. This is not pooled
-Wilson/binomial inference and not a claim of calibrated model probabilities.
-Partial reports show observed counts and any complete stratum summaries, but
-**overall risk and bound stay null** on missing/uncertain/unassessable samples or
-zero-selection strata. Do not drop missing tasks, substitute model labels or
-selectively audit until a desired bound is reached.
-
-The estimand is this frozen **development-event silent group** population, not
-photo-level errors, future events or held-out generalization. Human uncertainty,
-prior model exposure and correlated annotation mistakes remain external validity
-limits. The report always says `safety_validated: false`: no accepted safety
-threshold or deletion authority is created here. Fit a new policy only after
-recording this report, and validate it on a separately frozen evaluation design.
-
-## Disney G10: recorded review request, not ground truth
-
-`fixtures/disney-g10-narrative-review-v1.json` pins G10 membership
-430/431/432/433 and the v4 Disney source DB fingerprint. It records **pending**
-`narrative_recheck`, no expected phase count, keeper or verdict. Changed membership
-or source identity rejects the fixture. In the current v4 operating point G10 is
-primary, so it adds one purposive task hidden among the 30 probability tasks.
-Its eventual human result is reported separately and excluded from prevalence
-and confidence bounds. If a future frozen probability design genuinely samples
-that same task, it appears once and retains its actual probability provenance.
-The local fixture does not complete the previously requested visual review.
-
-## Separate provisional AI experiment
-
-`python scripts/prepare_model_audit.py --bundle <bundle-dir> --output <new-dir>`
-prepares G10 plus one probability-sample task from each of three deterministically
-chosen strata. It reads only verified exported thumbnails. `blind-input/` contains
-anonymous cases in randomized order; `analyst-unblind.json` stays separate until
-blind model judgments are frozen. The script performs **no inference** and makes
-no visual conclusion. The packet is `model_provisional`,
-`human_annotation: false`, `selective_risk_eligible: false`; human label validation
-rejects it. These purposive AI samples cannot estimate population safety.
-
-Under a no-network-exfiltration constraint, only an already available local
-vision model with networking disabled may consume the images. Sending cached
-pixels to a remote Astra/API still constitutes an upload even though the originals
-stay on disk. If no local model is available, retain the prepared packet with a
-concrete blocker instead of fabricating visual findings. Record model/version,
-prompt/settings, packet ID and blind output before revealing the candidate
-mapping; then document discrepancies and research hypotheses separately from
-human judgments. This optional experiment never blocks the annotation product.
-
-## Verification
+## Reproducible checks
 
 ```bash
-python -m pytest -q tests/test_human_audit.py
-python scripts/verification/human_audit_browser.py  # Playwright + installed Chrome
+.venv/bin/python -m pytest -q tests/test_human_audit.py tests/test_risk_coverage.py
 bash scripts/test-fast.sh
 bash scripts/test-full.sh
+# Use an environment with Playwright, pytest, Pillow and numpy already installed:
+python scripts/verification/human_audit_browser.py
 ```
 
-The browser harness uses only generated synthetic cache images and synthetic
-labels. It checks blank defaults, phase entry, download → report, reload/import,
-edit invalidation, atomic stale-import rejection and local-only asset requests.
-Focused tests cover determinism, source/sample/label tampering, pending fixture,
-held-out preflight, missing media, symlinks, weighted/census results and
-incomplete-sample abstention. No real human labels are synthesized by a gate.
+The Chrome test creates synthetic caches and labels only. It covers seeded v1
+editing, v2 conversion, uncertain/unassessable notes, mixed phase quality,
+export/import/local recovery, strict malformed inputs, atomic rejection, draft
+warnings, failed storage, lightbox keyboard/focus/zoom, and reviewer-only requests.

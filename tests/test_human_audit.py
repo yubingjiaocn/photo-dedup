@@ -1,5 +1,6 @@
 """Synthetic human records only; never label real photos in tests."""
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -41,11 +42,17 @@ def bundle():
 
 
 def label(b, task, *, error=False, status="reviewed"):
-    return {"schema_version": 1, "bundle_id": b["bundle_id"], "task_id": task["task_id"],
+    value = {"schema_version": 1, "bundle_id": b["bundle_id"], "task_id": task["task_id"],
             "status": status, "annotator": "synthetic-reviewer", "human_attested": True,
             "phases": [{"members": ["M1", "M2"], "acceptable_keepers": ["M2" if error else "M1"]}]
             if status == "reviewed" else [],
             "group_impure": False if status == "reviewed" else None, "note": "SYNTHETIC TEST ONLY"}
+
+    if b.get("label_schema_version") == 2:
+        value["schema_version"] = 2
+        for phase in value["phases"]:
+            phase["keeper_status"] = "assessed"
+    return value
 
 
 def files(tmp_path):
@@ -62,6 +69,29 @@ def files(tmp_path):
         for member in row["member_ids"]:
             Image.new("RGB", (32, 24), (member, 30, 10)).save(cache / f"{member}.jpg")
     return {**paths, "cache_roots": {"demo": cache}, "output": tmp_path / "bundle", "seed": "blind-seed"}
+
+
+def legacy_bundle_files(args):
+    """Synthetic v1 envelope/media fixture, independent of repository history.
+
+    Source HTML is just a sealed blind data payload; upgrade replaces presentation.
+    """
+    import hashlib
+    b = export_bundle(**args)
+    plan = {k: v for k, v in b.items() if k not in {"bundle_id", "label_schema_version"}}
+    public = {"schema_version": 1, "bundle_id": "0" * 64, "tasks": [
+        {"task_id": t["task_id"], "media_complete": t["media_complete"],
+         "members": [{"alias": m["alias"], "file": m["file"]} for m in t["media"]]}
+        for t in b["tasks"]]}
+    page = "<script>const DATA=" + canonical(public) + ";</script>"
+    plan["reviewer_content_sha256"] = hashlib.sha256(page.encode()).hexdigest()
+    old = seal(plan)
+    page = page.replace('"bundle_id":"' + "0" * 64 + '"',
+                        '"bundle_id":"' + old["bundle_id"] + '"')
+    (args["output"] / "reviewer/index.html").write_text(page)
+    (args["output"] / "manifest.json").write_text(canonical(old))
+    verify_media(old, args["output"] / "reviewer")
+    return old
 
 
 def test_deterministic_plan_and_sampling_replay():
@@ -320,3 +350,252 @@ def test_ui_javascript_syntax(tmp_path):
     path = tmp_path / "ui.js"
     path.write_text(js)
     subprocess.run(["node", "--check", str(path)], check=True, capture_output=True)
+
+
+def partial_label(b, task):
+    value = label(b, task)
+    value.update(schema_version=2, phases=[
+        {"members": ["M1"], "keeper_status": "assessed", "acceptable_keepers": ["M1"]},
+        {"members": ["M2"], "keeper_status": "quality_abstain"},
+    ])
+    return value
+
+
+@pytest.mark.parametrize("status", ["uncertain", "unassessable"])
+def test_v2_abstention_notes_roundtrip(tmp_path, status):
+    from src.human_audit import labels_v2
+    b = bundle()
+    value = label(b, b["tasks"][0], status=status)
+    value.update(schema_version=2, note="看不清表情，但备注必须保存\n第二行")
+    path = tmp_path / "notes.jsonl"
+    path.write_text(canonical(value) + "\n")
+    assert read_labels(path) == labels_v2(b, [value]) == [value]
+    detail = report(b, [value])["tasks"][0]
+    assert detail["phase_coverage_error"] is None
+    assert detail["keeper_quality_error"] is None
+    assert detail["error"] is None
+
+
+def test_partial_phase_labels_count_coverage_but_not_joint_or_group_quality():
+    b = bundle()
+    values = [partial_label(b, t) for t in b["tasks"]]
+    r = report(b, values)
+    assert r["weighted_error_rate"] is r["upper_95"] is None
+    assert r["phase_only"]["weighted_phase_coverage_error_rate"] == 1
+    assert r["phase_only"]["descriptive_only"]
+    assert not r["phase_only"]["safety_validated"]
+    counts = r["evidence_counts"]["probability"]
+    assert counts["phase_coverage_eligible_count"] == counts["phase_coverage_error_count"] == 4
+    assert counts["keeper_quality_eligible_count"] == counts["keeper_quality_error_count"] == 0
+    assert counts["joint_eligible_count"] == 0
+    assert counts["quality_abstain_group_count"] == counts["quality_assessed_phase_count"] == 4
+    assert counts["quality_assessed_phase_errors"] == 0
+    for d in r["tasks"]:
+        assert d["phase_coverage_error"] is True
+        assert d["error"] is d["keeper_bad"] is d["phase_miss"] is d["keeper_quality_error"] is None
+
+
+def test_quality_abstain_all_phases_neither_pass_nor_error():
+    b = bundle()
+    value = partial_label(b, b["tasks"][0])
+    value["phases"] = [{"members": ["M1", "M2"], "keeper_status": "quality_abstain"}]
+    detail = report(b, [value])["tasks"][0]
+    assert detail["phase_coverage_error"] is False
+    assert detail["quality_assessed_phase_count"] == 0
+    assert detail["keeper_quality_error"] is detail["error"] is None
+    # Even a known false merge must not manufacture a joint label under abstention.
+    value["group_impure"] = True
+    assert report(b, [value])["tasks"][0]["error"] is None
+
+
+def test_v1_fully_assessed_semantics_preserved_without_note_inference():
+    from src.human_audit import labels_v2
+    b = bundle()
+    value = label(b, b["tasks"][0], error=True)
+    value["note"] = "缩略图看不清，无法判断 keeper"
+    old = report(b, [value])["tasks"][0]
+    assert old["phase_miss"] and old["keeper_bad"] and old["error"]
+    assert old["phase_coverage_error"] is False
+    assert old["keeper_quality_error"] is True
+    converted = labels_v2(b, [value])
+    assert converted[0]["phases"][0]["keeper_status"] == "assessed"
+    assert converted[0]["note"] == value["note"]
+    assert report(b, converted)["tasks"] == report(b, [value])["tasks"]
+    assert "keeper_status" not in value["phases"][0]  # No input mutation.
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda x: x["phases"][1].update(acceptable_keepers=[]),
+    lambda x: x["phases"][1].update(acceptable_keepers=["M2"]),
+    lambda x: x["phases"][1].update(keeper_status="uncertain"),
+    lambda x: x["phases"][0].update(acceptable_keepers=[]),
+    lambda x: x["phases"][0].update(acceptable_keepers=["M1", "M1"]),
+    lambda x: x["phases"][0].update(acceptable_keepers=["M2"]),
+    lambda x: x["phases"][1].update(members=["M1"]),
+    lambda x: x["phases"].pop(),
+    lambda x: x["phases"][1].update(extra=True),
+    lambda x: x.update(schema_version=2.0),
+    lambda x: x.update(schema_version=True),
+    lambda x: x.update(extra="unknown"),
+])
+def test_strict_v2_partition_and_quality_schema(mutation):
+    b = bundle()
+    value = partial_label(b, b["tasks"][0])
+    mutation(value)
+    with pytest.raises(ValueError):
+        validate_labels(b, [value])
+
+
+def test_one_probability_abstain_blocks_overall_but_purposive_does_not():
+    b = bundle()
+    values = [label(b, t) if t["kind"] == "probability" else partial_label(b, t) for t in b["tasks"]]
+    assert report(b, values)["weighted_error_rate"] == 0
+    t = next(t for t in b["tasks"] if t["kind"] == "probability")
+    values = [partial_label(b, t) if x["task_id"] == t["task_id"] else x for x in values]
+    r = report(b, values)
+    assert r["weighted_error_rate"] is r["upper_95"] is None
+    assert r["phase_only"]["weighted_phase_coverage_error_rate"] is not None
+    assert r["evidence_counts"]["probability"]["keeper_quality_eligible_count"] == 3
+
+
+def test_upgrade_preserves_design_media_labels_and_seals_initial_records(tmp_path):
+    from src.human_audit import labels_v2
+    from src.human_audit_bundle import upgrade_bundle
+    args = files(tmp_path)
+    old = legacy_bundle_files(args)
+    values = [label(old, old["tasks"][0]), label(old, old["tasks"][1], status="uncertain")]
+    values[0]["note"] = "看不清清晰度，但保持旧 reviewed 原义"
+    path = tmp_path / "legacy.jsonl"
+    original = "\n".join(canonical(x) for x in values) + "\n"
+    path.write_text(original)
+    output = tmp_path / "r3"
+    new = upgrade_bundle(args["output"], path, output)
+    assert old["bundle_id"] != new["bundle_id"]
+    assert new["legacy_bundle_id"] == old["bundle_id"]
+    for key in ("tasks", "source_identity", "source_sha256", "seed", "strata", "sampling_seed", "silent_population"):
+        assert new[key] == old[key]
+    for task in old["tasks"]:
+        for m in task["media"]:
+            assert (output / "reviewer" / m["file"]).read_bytes() == (args["output"] / "reviewer" / m["file"]).read_bytes()
+    assert (output / "imported-v1-labels.jsonl").read_text() == path.read_text() == original
+    page = (output / "reviewer/index.html").read_text()
+    public = json.loads(page.split("const DATA=", 1)[1].split(";\n", 1)[0])
+    assert public["initial_labels"] == values
+    assert not any(k in page for k in ("candidate_keeper", "demo:G", "narrative_recheck"))
+    assert report(new, values)["task_status_counts"] == {"reviewed": 1, "uncertain": 1, "pending": 3}
+    assert read_labels(output / "labels-v2.jsonl") == labels_v2(new, values)
+    verify_media(new, output / "reviewer")
+    with pytest.raises(ValueError, match="immutable"):
+        upgrade_bundle(args["output"], path, output)
+    bad = copy.deepcopy(values[0])
+    bad["bundle_id"] = "unrelated"
+    with pytest.raises(ValueError, match="stale"):
+        validate_labels(new, [bad])
+    bad = labels_v2(new, values)[0]
+    bad["bundle_id"] = old["bundle_id"]
+    with pytest.raises(ValueError, match="stale"):
+        validate_labels(new, [bad])
+    (output / "reviewer/index.html").write_text(page.replace(values[0]["note"], "tampered"))
+    with pytest.raises(ValueError, match="fingerprint"):
+        verify_media(new, output / "reviewer")
+
+
+def test_upgrade_tampered_source_fails_before_output(tmp_path):
+    from src.human_audit_bundle import upgrade_bundle
+    args = files(tmp_path)
+    old = legacy_bundle_files(args)
+    path = tmp_path / "legacy.jsonl"
+    path.write_text(canonical(label(old, old["tasks"][0])))
+    media = args["output"] / "reviewer" / old["tasks"][0]["media"][0]["file"]
+    media.write_bytes(b"tamper")
+    with pytest.raises(ValueError, match="fingerprint"):
+        upgrade_bundle(args["output"], path, tmp_path / "r3")
+    assert not (tmp_path / "r3").exists()
+
+
+def test_upgrade_snapshots_labels_once_and_rejects_symlink_inputs(tmp_path, monkeypatch):
+    from src.human_audit_bundle import upgrade_bundle
+    args = files(tmp_path)
+    old = legacy_bundle_files(args)
+    path = tmp_path / "legacy.jsonl"
+    raw = (canonical(label(old, old["tasks"][0])) + "\n").encode()
+    path.write_bytes(raw)
+    real_read = Path.read_bytes
+    reads = []
+    def count_read(p):
+        if p == path:
+            reads.append(p)
+            assert len(reads) == 1, "migration must use the same validated byte snapshot"
+        return real_read(p)
+    monkeypatch.setattr(Path, "read_bytes", count_read)
+    upgrade_bundle(args["output"], path, tmp_path / "r3")
+    assert len(reads) == 1
+    assert (tmp_path / "r3/imported-v1-labels.jsonl").read_bytes() == raw
+    link = tmp_path / "label-link"
+    link.symlink_to(path)
+    with pytest.raises(ValueError, match="symlink"):
+        upgrade_bundle(args["output"], link, tmp_path / "bad-label-link")
+    manifest = args["output"] / "manifest.json"
+    data = manifest.read_bytes()
+    manifest.unlink()
+    other = tmp_path / "manifest-copy"
+    other.write_bytes(data)
+    manifest.symlink_to(other)
+    with pytest.raises(ValueError, match="symlink"):
+        upgrade_bundle(args["output"], path, tmp_path / "bad-manifest-link")
+
+
+def test_v1_requires_sealed_legacy_lineage_on_v2_bundles(tmp_path):
+    from src.human_audit_bundle import upgrade_bundle
+    args = files(tmp_path)
+    b = export_bundle(**args)
+    fabricated = label(b, b["tasks"][0])
+    fabricated["schema_version"] = 1
+    for phase in fabricated["phases"]:
+        del phase["keeper_status"]
+    with pytest.raises(ValueError, match="stale"):
+        validate_labels(b, [fabricated])
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    with pytest.raises(ValueError, match="original v1"):
+        upgrade_bundle(args["output"], empty, tmp_path / "not-v1")
+    old = legacy_bundle_files({**args, "output": tmp_path / "old"})
+    legacy = label(old, old["tasks"][0])
+    path = tmp_path / "legacy.jsonl"
+    path.write_text(canonical(legacy))
+    new = upgrade_bundle(tmp_path / "old", path, tmp_path / "r3")
+    assert validate_labels(new, [legacy])
+    legacy["bundle_id"] = new["bundle_id"]
+    with pytest.raises(ValueError, match="stale"):
+        validate_labels(new, [legacy])
+
+
+def test_mixed_quality_exposes_assessed_phase_errors_without_joint_verdict():
+    b = bundle()
+    task = b["tasks"][0]
+    task["member_ids"].append(999)
+    task["aliases"].append("M3")
+    b = seal({k: v for k, v in b.items() if k != "bundle_id"})
+    value = label(b, task)
+    value.update(schema_version=2, phases=[
+        {"members": ["M1", "M2"], "keeper_status": "assessed", "acceptable_keepers": ["M2"]},
+        {"members": ["M3"], "keeper_status": "quality_abstain"},
+    ])
+    d = report(b, [value])["tasks"][0]
+    assert d["quality_assessed_phase_count"] == d["quality_assessed_phase_errors"] == 1
+    assert d["quality_abstain_phase_count"] == 1
+    assert d["phase_coverage_error"] is True
+    assert d["keeper_quality_error"] is d["keeper_bad"] is d["error"] is None
+
+
+def test_upgrade_cli_never_rereads_source_for_completion_message(tmp_path, monkeypatch, capsys):
+    args = files(tmp_path)
+    old = legacy_bundle_files(args)
+    path = tmp_path / "legacy.jsonl"
+    path.write_text(canonical(label(old, old["tasks"][0])))
+    monkeypatch.setattr("src.human_audit_bundle.read_labels",
+                        lambda *a: pytest.fail("CLI must not reread source after publication"))
+    output = tmp_path / "r3"
+    main(["upgrade", "--bundle", str(args["output"]), "--labels", str(path), "--output", str(output)])
+    assert "5 tasks with editable legacy records" in capsys.readouterr().out
+    assert (output / "imported-v1-labels.jsonl").read_bytes() == path.read_bytes()
