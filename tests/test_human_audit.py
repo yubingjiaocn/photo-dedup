@@ -599,3 +599,150 @@ def test_upgrade_cli_never_rereads_source_for_completion_message(tmp_path, monke
     main(["upgrade", "--bundle", str(args["output"]), "--labels", str(path), "--output", str(output)])
     assert "5 tasks with editable legacy records" in capsys.readouterr().out
     assert (output / "imported-v1-labels.jsonl").read_bytes() == path.read_bytes()
+
+
+@pytest.mark.parametrize("note,rule,needs", [
+    ("缩略图我啥都看不清，没法确认留哪张", "quality_abstain_explicit", False),
+    ("两张一模一样，我没法判断，要看清晰度", "quality_abstain_explicit", False),
+    ("这段动作很快，缩略图看不清", "quality_abstain_explicit", False),
+    ("M2 构图更完整", "assessed_explicit", False),
+    ("M2 主体完整", "assessed_explicit", False),
+    ("M2 的水柱把主体挡住了", "assessed_explicit", False),
+    ("其他姿势相同，正脸优先", "assessed_explicit", False),
+    ("M1 更水平，M2 歪了？", "needs_review_question", True),
+    ("阶段无法判断", "needs_review_phase_uncertain", True),
+    ("缩略图看不清，但主体完整", "needs_review_conflicting_quality", True),
+    ("三个动作属于三个阶段", "needs_review_no_explicit_quality_rule", True),
+    ("M1-M2 基本完全一样", "needs_review_no_explicit_quality_rule", True),
+])
+def test_authorized_note_rules_are_conservative_and_deterministic(note, rule, needs):
+    from src.human_audit_migration import note_rule
+    b = bundle()
+    value = label(b, b["tasks"][0])
+    value["note"] = note
+    assert note_rule(value)[:2] == (rule, needs)
+    assert note_rule(value) == note_rule(copy.deepcopy(value))
+
+
+def note_migration_files(tmp_path):
+    from src.human_audit_bundle import upgrade_bundle
+    args = files(tmp_path)
+    old = legacy_bundle_files(args)
+    notes = ["缩略图看不清，动作一样", "M1 构图更完整", "M1 主体完整？", "阶段不确定", "三个阶段不同"]
+    values = [label(old, t) for t in old["tasks"]]
+    for value, note in zip(values, notes, strict=True):
+        value["note"] = note
+    source = tmp_path / "legacy.jsonl"
+    source.write_bytes(("\r\n".join(canonical(x) for x in values) + "\r\n").encode())
+    output = tmp_path / "note-migration"
+    new = upgrade_bundle(args["output"], source, output, note_authorization="synthetic-explicit-authorization")
+    return old, values, source, output, new
+
+
+def test_authorized_migration_preserves_notes_partitions_attestation_and_audit_hashes(tmp_path):
+    import hashlib
+    from src.human_audit_migration import CURRENT_BUNDLE, bind_migration_manifest
+    old, original, source, output, new = note_migration_files(tmp_path)
+    rows = read_labels(output / "labels-v2.jsonl")
+    manifest = load_json(output / "migration-manifest.json")
+    assert manifest["counts"] == {"input": 5, "automatic": 2, "needs_review": 3, "quality_abstain": 1, "assessed": 1}
+    assert digest(bind_migration_manifest(manifest, CURRENT_BUNDLE)) == new["note_migration"]["manifest_sha256"]
+    assert (output / "imported-v1-labels.jsonl").read_bytes() == source.read_bytes()
+    assert new["tasks"] == old["tasks"]
+    for before, after, record, raw in zip(original, rows, manifest["records"], source.read_bytes().splitlines(), strict=True):
+        assert before["note"] == after["note"] == record["note"]
+        assert before["human_attested"] == after["human_attested"] is True
+        assert [p["members"] for p in before["phases"]] == [p["members"] for p in after["phases"]]
+        assert after["provenance"]["kind"] == record["provenance"] == "authorized_note_migration"
+        assert after["provenance"]["human_attestation_scope"] == "original_visual_observation"
+        assert record["source_row_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert record["v2_result"] == after
+    assert rows[0]["phases"] == [{"members": ["M1", "M2"], "keeper_status": "quality_abstain"}]
+    assert rows[1]["phases"][0]["acceptable_keepers"] == original[1]["phases"][0]["acceptable_keepers"]
+    r = report(new, rows)
+    assert r["note_migration_counts"] == {"automatic": 2, "needs_review": 3, "human_reassessment": 0, "unmarked_labels": 0}
+    assert r["task_status_counts"] == {"reviewed": 2, "needs_review": 3}
+    for task in r["tasks"][2:]:
+        assert task["phase_coverage_error"] is task["keeper_quality_error"] is task["error"] is None
+        assert not task["phase_coverage_eligible"] and not task["joint_eligible"]
+    assert r["weighted_error_rate"] is None
+    verify_media(new, output / "reviewer")
+
+
+def test_migration_manifest_and_provenance_tampering_rejected(tmp_path):
+    _, _, _, output, new = note_migration_files(tmp_path)
+    rows = read_labels(output / "labels-v2.jsonl")
+    mutations = [lambda x: x.update(note="changed"),
+                 lambda x: x["provenance"].update(needs_review=False),
+                 lambda x: x["provenance"].update(extra=True),
+                 lambda x: x["provenance"].update(human_attestation_scope="new_human_review")]
+    for mutate in mutations:
+        row = copy.deepcopy(rows[2])
+        mutate(row)
+        with pytest.raises(ValueError, match="migration"):
+            validate_labels(new, [row])
+    # Removing metadata alone cannot promote a draft to evidence. A manual save
+    # must explicitly assert a fresh confirmation for this migration lineage.
+    confirmed = copy.deepcopy(rows[2])
+    del confirmed["provenance"]
+    with pytest.raises(ValueError, match="provenance"):
+        validate_labels(new, [confirmed])
+    confirmed["provenance"] = {"kind": "human_reassessment", "migration_id": new["note_migration"]["migration_id"],
+                               "confirmed": True, "human_attestation_scope": "current_judgment"}
+    assert report(new, [confirmed])["tasks"][2]["status"] == "reviewed"
+    path = output / "migration-manifest.json"
+    manifest = load_json(path)
+    manifest["records"][0]["note"] = "tampered"
+    path.write_text(canonical(manifest))
+    with pytest.raises(ValueError, match="migration manifest fingerprint"):
+        verify_media(new, output / "reviewer")
+
+
+def test_note_migration_requires_authorization_and_has_no_implicit_upgrade(tmp_path):
+    from src.human_audit_bundle import upgrade_bundle
+    from src.human_audit_migration import authorized_note_migration
+    old, original, source, output, new = note_migration_files(tmp_path)
+    with pytest.raises(ValueError, match="authorization"):
+        authorized_note_migration(old, source.read_bytes(), "")
+    normal = upgrade_bundle(tmp_path / "bundle", source, tmp_path / "plain-upgrade")
+    assert "note_migration" not in normal
+    assert all(p["keeper_status"] == "assessed" for x in read_labels(tmp_path / "plain-upgrade/labels-v2.jsonl") for p in x["phases"])
+    # Re-run against a new output: rule output and seal are deterministic.
+    again = upgrade_bundle(tmp_path / "bundle", source, tmp_path / "note-again",
+                           note_authorization="synthetic-explicit-authorization")
+    assert again == new
+    assert (tmp_path / "note-again/migration-manifest.json").read_bytes() == (output / "migration-manifest.json").read_bytes()
+    assert original[0]["schema_version"] == 1
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda x: x["provenance"].update(confirmed=False),
+    lambda x: x["provenance"].update(confirmed=1),
+    lambda x: x["provenance"].update(migration_id="wrong"),
+    lambda x: x["provenance"].update(extra=True),
+    lambda x: x.update(human_attested=False),
+])
+def test_manual_reassessment_requires_explicit_strict_confirmation(tmp_path, mutation):
+    _, original, _, output, b = note_migration_files(tmp_path)
+    row = read_labels(output / "labels-v2.jsonl")[2]
+    row["provenance"] = {"kind": "human_reassessment", "migration_id": b["note_migration"]["migration_id"],
+                         "confirmed": True, "human_attestation_scope": "current_judgment"}
+    mutation(row)
+    with pytest.raises(ValueError):
+        validate_labels(b, [row])
+    with pytest.raises(ValueError, match="provenance"):
+        validate_labels(b, [original[2]])
+
+
+@pytest.mark.parametrize("mode", ["changed", "missing", "symlink"])
+def test_preserved_source_artifact_is_integrity_checked(tmp_path, mode):
+    _, _, source, output, b = note_migration_files(tmp_path)
+    copy = output / "imported-v1-labels.jsonl"
+    if mode == "changed":
+        copy.write_bytes(b"changed\n")
+    else:
+        copy.unlink()
+        if mode == "symlink":
+            copy.symlink_to(source)
+    with pytest.raises(ValueError, match="original v1 label artifact"):
+        verify_media(b, output / "reviewer")

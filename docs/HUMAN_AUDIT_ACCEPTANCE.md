@@ -1,4 +1,8 @@
-# Human audit v2 acceptance — 2026-09-09
+# Human audit v2 base acceptance — 2026-09-09
+
+This page records the immutable base r3 release. For the subsequently authorized
+note-converted variant and its provenance/review rules, see
+[HUMAN_AUDIT_NOTE_MIGRATION.md](HUMAN_AUDIT_NOTE_MIGRATION.md).
 
 ## Delivered product
 

@@ -12,6 +12,7 @@ body{font:16px system-ui;background:#16191e;color:#eee;margin:24px;line-height:1
 <label>审阅者代号（不要填真实姓名）<input id="annotator" maxlength="80" autocomplete="off"></label>
 <label><input type="checkbox" id="attest">我确认这些判断来自本人视觉审阅，不是模型输出或自动生成标签。</label>
 <nav><button id="export">导出已保存记录与备注（JSONL v2）</button><label>导入 v1/v2 记录以恢复/继续 <input id="import" type="file" accept=".jsonl"></label><div id="status" role="status" aria-live="polite"></div></nav>
+<p id="migration-notice" class="warning" hidden></p>
 <div id="tasks"></div>
 <dialog id="lightbox" aria-label="缓存大图审阅"><button id="close-image">关闭（Esc）</button><button id="previous-image">上一张（←）</button><button id="next-image">下一张（→）</button><button id="fit-image">适屏</button><button id="native-image">原像素（缓存 1:1）</button><p id="lightbox-status"></p><p class="warning">放大不增加细节；仅显示已验证缓存，不读取或生成原图。</p><div id="image-viewport" class="fit"><img id="large-image" alt=""></div></dialog>
 <script>
@@ -38,11 +39,17 @@ function parseStrict(text){
  }
  const result=value();ws();if(i!==text.length)throw Error('JSON 尾部或数字格式无效');return result;
 }
+function ordered(x){return Array.isArray(x)?x.map(ordered):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,ordered(x[k])])):x;}
+function initialRows(){return (DATA.initial_labels||[]).map(x=>({...x,bundle_id:x.bundle_id==='@current'?DATA.bundle_id:x.bundle_id}));}
 function validate(x){
- if(!x||Array.isArray(x)||JSON.stringify(Object.keys(x).sort())!==JSON.stringify(keys))throw Error('字段不匹配');
+ const expectedKeys=x&&x.schema_version===2&&Object.hasOwn(x,'provenance')?[...keys,'provenance'].sort():keys;
+ if(!x||Array.isArray(x)||JSON.stringify(Object.keys(x).sort())!==JSON.stringify(expectedKeys))throw Error('字段不匹配');
  const allowedBundle=x.schema_version===1?!!DATA.legacy_bundle_id&&x.bundle_id===DATA.legacy_bundle_id:x.bundle_id===DATA.bundle_id;
  if(![1,2].includes(x.schema_version)||!allowedBundle)throw Error('不是本次冻结任务的记录');
  const task=DATA.tasks.find(t=>t.task_id===x.task_id);if(!task)throw Error('未知任务');
+ const expected=(DATA.migration_records||{})[x.task_id];
+ if(expected){if(x.schema_version!==2||!Object.hasOwn(x,'provenance'))throw Error('迁移任务必须保留来源或本次人工重新确认标记');const manual={kind:'human_reassessment',migration_id:expected.provenance.migration_id,confirmed:true,human_attestation_scope:'current_judgment'},actual=Object.fromEntries(Object.entries(x).filter(([k])=>k!=='bundle_id'));if(JSON.stringify(ordered(x.provenance))!==JSON.stringify(ordered(manual))&&JSON.stringify(ordered(actual))!==JSON.stringify(ordered(expected)))throw Error('授权迁移记录被改变或来源不匹配；请本人确认后重新保存');}
+ else if(Object.hasOwn(x,'provenance'))throw Error('授权迁移来源不匹配');
  if(typeof x.annotator!=='string'||!x.annotator.trim()||x.annotator.length>80||typeof x.human_attested!=='boolean'||typeof x.note!=='string'||x.note.length>2000)throw Error('审阅来源无效');
  if(!['reviewed','uncertain','unassessable'].includes(x.status))throw Error('状态无效');
  if(x.status!=='reviewed'){if(!Array.isArray(x.phases)||x.phases.length||x.group_impure!==null)throw Error('未确定记录不能带判断');return x;}
@@ -79,7 +86,7 @@ function refreshQuality(task){
  if(!panel.children.length)panel.textContent='填写阶段编号后，在这里分别选择各阶段的质量判断状态。';
 }
 const statusNames={reviewed:'阶段判断',uncertain:'不确定',unassessable:'无法审阅'};
-function savedText(x){if(!x)return '尚未记录';const legacy=x.schema_version===1?'旧 v1 标签：质量按已判断保留，未按备注猜测；可重新编辑。 ':'';const partial=x.phases.some(p=>p.keeper_status==='quality_abstain');return `${legacy}已保存：${statusNames[x.status]}${partial?'（含质量弃权）':''}；备注已保存，可导出/恢复。`;}
+function savedText(x){if(!x)return '尚未记录';if(x.provenance&&x.provenance.needs_review)return '备注授权迁移：需人工复核。原阶段/keeper 仅作为可编辑草稿，暂不计入任何统计；备注原样保存，人工确认仅针对原视觉观察。';const migrated=x.provenance?(x.provenance.kind==='authorized_note_migration'?'按授权备注迁移（非本人新操作；确认仅针对原视觉观察）。 ':'本人已重新保存（含本次确认标记）。 '):'';const legacy=x.schema_version===1?'旧 v1 标签：质量按已判断保留，未按备注猜测；可重新编辑。 ':'';const partial=x.phases.some(p=>p.keeper_status==='quality_abstain');return `${migrated}${legacy}已保存：${statusNames[x.status]}${partial?'（含质量弃权）':''}；备注已保存，可导出/恢复。`;}
 function restoreControls(){
  for(const task of DATA.tasks){const section=sections.get(task.task_id),x=labels.get(task.task_id),choices=qualityChoices.get(task.task_id);choices.clear();section.querySelectorAll('[data-phase]').forEach(i=>i.value='');section.querySelectorAll('[data-keeper]').forEach(i=>{i.checked=false;i.disabled=false;});section.querySelector('[data-impure]').value='';section.querySelector('textarea').value=x?x.note:'';section.querySelector('.saved').textContent=savedText(x);
   if(x&&x.status==='reviewed'){x.phases.forEach((p,i)=>{p.members.forEach(m=>section.querySelector(`[data-phase="${m}"]`).value=String(i+1));(p.acceptable_keepers||[]).forEach(m=>section.querySelector(`[data-keeper="${m}"]`).checked=true);choices.set(signature(p.members),p.keeper_status||'assessed');});section.querySelector('[data-impure]').value=String(x.group_impure);}refreshQuality(task);
@@ -122,7 +129,8 @@ function render(){
      phases=groups.map(([n,members])=>{const keeper_status=section.querySelector(`[data-quality="${n}"]`).value;if(!keeper_status)throw Error('请选择每个阶段的质量判断状态');return keeper_status==='quality_abstain'?{members,keeper_status}:{members,keeper_status,acceptable_keepers:members.filter(m=>section.querySelector(`[data-keeper="${m}"]`).checked)};});
      if(select.value==='')throw Error('请明确回答组内叙事问题');impure=select.value==='true';
     }
-    const x=validate({schema_version:2,bundle_id:DATA.bundle_id,task_id:task.task_id,status,annotator:$('annotator').value.trim(),human_attested:$('attest').checked,phases,group_impure:impure,note:note.value});
+    const revision=(DATA.migration_records||{})[task.task_id];const provenance=revision?{provenance:{kind:'human_reassessment',migration_id:revision.provenance.migration_id,confirmed:true,human_attestation_scope:'current_judgment'}}:{};
+    const x=validate({schema_version:2,bundle_id:DATA.bundle_id,task_id:task.task_id,status,annotator:$('annotator').value.trim(),human_attested:$('attest').checked,phases,group_impure:impure,note:note.value,...provenance});
     labels.set(task.task_id,x);drafts.delete(task.task_id);unsaved=true;section.querySelector('.saved').textContent=savedText(x);message(`已保存 ${labels.size}/${DATA.tasks.length} 条（含备注，可导出/恢复）。${backup()}`);
    }catch(e){message(e.message);}};section.append(button);
   });
@@ -142,9 +150,10 @@ $('import').onchange=async event=>{try{
  labels.clear();for(const [key,x] of next)labels.set(key,x);unsaved=false;drafts.clear();restoreControls();message(`已重放 ${labels.size} 条记录及备注；新判断需填写审阅者及确认。${backup()}`);
 }catch(e){message(`导入拒绝：${e.message}`);}finally{event.target.value='';}};
 render();
+if(Object.keys(DATA.migration_records||{}).length){$('migration-notice').hidden=false;$('migration-notice').textContent='这些记录按明确授权的备注规则迁移，不是新的人工作业。原 human attestation 仅对应原视觉观察；需复核记录不作为阶段/质量证据。重新保存判断需本人确认。';}
 try{
- let rows=DATA.initial_labels||[],source='随包导入';
- try{const stored=localStorage.getItem(storageKey);if(stored!==null){rows=parseStrict(stored);if(!Array.isArray(rows))throw Error('本机记录不是数组');source='本机恢复';}}catch(e){message(`本机恢复失败：${e.message}；请从 JSONL 导入。`);rows=DATA.initial_labels||[];source='随包导入（本机备份不可用）';}
- for(const [key,x] of snapshot(rows))labels.set(key,x);restoreControls();message(`${source} ${labels.size} 条可编辑记录及备注；其余 pending。新判断需填写审阅者并确认。`);
+ let rows=initialRows(),source='随包导入';
+ try{const stored=localStorage.getItem(storageKey);if(stored!==null){rows=parseStrict(stored);if(!Array.isArray(rows))throw Error('本机记录不是数组');source='本机恢复';}}catch(e){message(`本机恢复失败：${e.message}；请从 JSONL 导入。`);rows=initialRows();source='随包导入（本机备份不可用）';}
+ for(const [key,x] of snapshot(rows))labels.set(key,x);restoreControls();const migrated=[...labels.values()].filter(x=>x.provenance&&x.provenance.kind==='authorized_note_migration'),needs=migrated.filter(x=>x.provenance.needs_review).length;message(`${source} ${labels.size} 条可编辑记录及备注；其余 pending。授权自动迁移 ${migrated.length-needs} 条，需复核 ${needs} 条。新判断需填写审阅者并确认。`);
 }catch(e){message(`恢复拒绝：${e.message}；请导入已保存 JSONL。`);}
 </script></main></body></html>

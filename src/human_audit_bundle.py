@@ -12,8 +12,11 @@ from pathlib import Path
 from PIL import Image
 
 from .human_audit import (
-    canonical, development_scope, labels_v2, load_json, make_plan, parse_labels, read_labels, report, seal,
+    canonical, development_scope, digest, labels_v2, load_json, make_plan, parse_labels, read_labels, report, seal,
     validate_bundle, validate_labels,
+)
+from .human_audit_migration import (
+    CURRENT_BUNDLE, authorized_note_migration, bind_migration_manifest,
 )
 
 
@@ -90,7 +93,8 @@ def publish_bundle(plan, media, output, initial_labels=None):
     plan["label_schema_version"] = 2
     public = {"schema_version": 2, "bundle_id": "0" * 64,
               "legacy_bundle_id": plan.get("legacy_bundle_id"),
-              "initial_labels": initial_labels or [], "tasks": [
+              "initial_labels": initial_labels or [],
+              "migration_records": plan.get("note_migration", {}).get("records", {}), "tasks": [
         {"task_id": t["task_id"], "media_complete": t["media_complete"],
          "members": [{"alias": m["alias"], "file": m["file"]} for m in t["media"]]}
         for t in plan["tasks"]]}
@@ -126,6 +130,24 @@ def verify_media(bundle, directory):
     normalized = page.replace(marker, '"bundle_id":"' + "0" * 64 + '"')
     if hashlib.sha256(normalized.encode()).hexdigest() != bundle["reviewer_content_sha256"]:
         raise ValueError("reviewer page fingerprint mismatch")
+    if "legacy_labels_sha256" in bundle:
+        source_copy = directory.parent / "imported-v1-labels.jsonl"
+        if source_copy.is_symlink() or not source_copy.is_file():
+            raise ValueError("original v1 label artifact missing or symlink")
+        if hashlib.sha256(source_copy.read_bytes()).hexdigest() != bundle["legacy_labels_sha256"]:
+            raise ValueError("original v1 label artifact fingerprint mismatch")
+    if "note_migration" in bundle:
+        migration_path = directory.parent / "migration-manifest.json"
+        if migration_path.is_symlink():
+            raise ValueError("migration manifest symlink forbidden")
+        manifest = load_json(migration_path)
+        if (manifest["source_jsonl_sha256"] != bundle["legacy_labels_sha256"]
+                or manifest["target_bundle_id"] != bundle["bundle_id"]
+                or any(r["v2_result"]["bundle_id"] != bundle["bundle_id"] for r in manifest["records"])):
+            raise ValueError("migration manifest bundle mismatch")
+        normalized_manifest = bind_migration_manifest(manifest, CURRENT_BUNDLE)
+        if digest(normalized_manifest) != bundle["note_migration"]["manifest_sha256"]:
+            raise ValueError("migration manifest fingerprint mismatch")
     for task in bundle["tasks"]:
         for media in task["media"]:
             if media["file"] is None:
@@ -140,11 +162,11 @@ def verify_media(bundle, directory):
                 raise ValueError("exported media fingerprint mismatch")
 
 
-def upgrade_bundle(source, labels_path, output):
+def upgrade_bundle(source, labels_path, output, *, note_authorization=None):
     """Re-present verified v1 bytes and labels; never resample or open source caches.
 
     A sealed lineage ID authorizes v1 imports only from this exact source bundle.
-    V2 exports always bind to the new bundle. No note interpretation is performed.
+    V2 exports bind to the new bundle. Note rules require explicit authorization.
     """
     source = safe_root(source)
     output = Path(output).absolute()
@@ -168,6 +190,10 @@ def upgrade_bundle(source, labels_path, output):
     del plan["bundle_id"]
     plan["legacy_bundle_id"] = old["bundle_id"]
     plan["legacy_labels_sha256"] = hashlib.sha256(labels_bytes).hexdigest()
+    initial_labels, migration_manifest = labels, None
+    if note_authorization is not None:
+        initial_labels, migration_manifest, plan["note_migration"] = authorized_note_migration(
+            old, labels_bytes, note_authorization)
     media = {}
     for task in plan["tasks"]:
         for item in task["media"]:
@@ -177,8 +203,12 @@ def upgrade_bundle(source, labels_path, output):
                 if hashlib.sha256(data).hexdigest() != item["sha256"]:
                     raise ValueError("exported media fingerprint mismatch")
                 media[item["file"]] = data
-    new = publish_bundle(plan, media, output, initial_labels=labels)
+    new = publish_bundle(plan, media, output, initial_labels=initial_labels)
     (output / "imported-v1-labels.jsonl").write_bytes(labels_bytes)
+    if migration_manifest is not None:
+        bound_manifest = bind_migration_manifest(migration_manifest, new["bundle_id"])
+        (output / "migration-manifest.json").write_text(canonical(bound_manifest) + "\n", encoding="utf-8")
+        labels = [r["v2_result"] for r in bound_manifest["records"]]
     converted = labels_v2(new, labels)
     (output / "labels-v2.jsonl").write_text("".join(canonical(x) + "\n" for x in converted), encoding="utf-8")
     (output / "imported-report.json").write_text(canonical(report(new, labels)) + "\n", encoding="utf-8")
@@ -201,6 +231,9 @@ def main(argv=None):
     upgrade = commands.add_parser("upgrade")
     for flag in ("bundle", "labels", "output"):
         upgrade.add_argument(f"--{flag}", required=True)
+    migrate = commands.add_parser("migrate-notes", help="explicitly authorized deterministic v1 note migration")
+    for flag in ("bundle", "labels", "output", "authorization-id"):
+        migrate.add_argument(f"--{flag}", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "export":
@@ -211,8 +244,11 @@ def main(argv=None):
                                    cache_roots=dict(args.cache), output=args.output, seed=args.seed,
                                    fixture_path=args.fixture)
             print(f'Created {len(bundle["tasks"])} pending tasks; bundle {bundle["bundle_id"]}')
-        elif args.command == "upgrade":
-            bundle = upgrade_bundle(args.bundle, args.labels, args.output)
+        elif args.command in {"upgrade", "migrate-notes"}:
+            authorization = args.authorization_id if args.command == "migrate-notes" else None
+            bundle = upgrade_bundle(args.bundle, args.labels, args.output, note_authorization=authorization)
+            if "note_migration" in bundle:
+                print(f'Authorized note migration: {canonical(bundle["note_migration"]["counts"])}')
             print(f'Created v2 reviewer: {len(bundle["tasks"])} tasks with editable legacy records; bundle {bundle["bundle_id"]}')
         else:
             path = Path(args.bundle)

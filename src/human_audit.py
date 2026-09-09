@@ -195,7 +195,10 @@ def validate_labels(bundle, labels):
     seen = set()
     result = {}
     for label in labels:
-        if not isinstance(label, dict) or set(label) != LABEL_KEYS:
+        if not isinstance(label, dict):
+            raise ValueError("invalid label fields")
+        expected_keys = LABEL_KEYS | ({"provenance"} if label.get("schema_version") == 2 and "provenance" in label else set())
+        if set(label) != expected_keys:
             raise ValueError("invalid label fields")
         version = label["schema_version"]
         valid_ids = [bundle["bundle_id"]]
@@ -208,6 +211,20 @@ def validate_labels(bundle, labels):
         if not isinstance(key, str) or key not in tasks or key in seen:
             raise ValueError("unknown/duplicate label task")
         seen.add(key)
+        migration = bundle.get("note_migration", {})
+        expected = migration.get("records", {}).get(key)
+        if expected is not None:
+            if version != 2 or "provenance" not in label:
+                raise ValueError("migrated task requires migration provenance or explicit human reassessment")
+            provenance = label["provenance"]
+            manual = {"kind": "human_reassessment", "migration_id": migration["migration_id"],
+                      "confirmed": True, "human_attestation_scope": "current_judgment"}
+            if canonical(provenance) != canonical(manual):
+                actual = {k: v for k, v in label.items() if k != "bundle_id"}
+                if canonical(actual) != canonical(expected):
+                    raise ValueError("unbound/modified authorized note migration record")
+        elif "provenance" in label:
+            raise ValueError("unbound authorized note migration record")
         if (not isinstance(label["annotator"], str) or not label["annotator"].strip()
                 or len(label["annotator"]) > 80 or type(label["human_attested"]) is not bool
                 or not isinstance(label["note"], str) or len(label["note"]) > 2000):
@@ -293,7 +310,11 @@ def report(bundle, labels):
     details = []
     for task in bundle["tasks"]:
         label = parsed.get(task["task_id"])
-        status = label["status"] if label else "pending"
+        provenance = label.get("provenance") if label else None
+        migrated = bool(provenance and provenance["kind"] == "authorized_note_migration")
+        reassessed = bool(provenance and provenance["kind"] == "human_reassessment")
+        needs_review = bool(migrated and provenance["needs_review"])
+        status = "needs_review" if needs_review else label["status"] if label else "pending"
         error = phase_miss = keeper_bad = coverage_error = quality_error = None
         assessed_count = abstain_count = quality_phase_errors = 0
         if status == "reviewed":
@@ -313,6 +334,8 @@ def report(bundle, labels):
                 error = bool(label["group_impure"] or phase_miss or keeper_bad)
         details.append({"task_id": task["task_id"], "audit_id": task["audit_id"],
                         "kind": task["kind"], "stratum": task["stratum"], "status": status,
+                        "authorized_note_migration": migrated,
+                        "human_reassessment": reassessed, "needs_review": needs_review,
                         "error": error, "phase_miss": phase_miss, "keeper_bad": keeper_bad,
                         "phase_coverage_error": coverage_error, "keeper_quality_error": quality_error,
                         "phase_coverage_eligible": coverage_error is not None,
@@ -369,6 +392,13 @@ def report(bundle, labels):
         "weighted_error_rate": sum(s["population"] * s["error_rate"] for s in strata) / total if complete else None,
         "upper_95": sum(s["population"] * s["upper_95"] for s in strata) / total if complete else None,
         "evidence_counts": {kind: evidence_counts(kind) for kind in ("probability", "purposive")},
+        "note_migration_counts": {
+            "automatic": sum(d["authorized_note_migration"] and not d["needs_review"] for d in details),
+            "needs_review": sum(d["needs_review"] for d in details),
+            "human_reassessment": sum(d["human_reassessment"] for d in details),
+            "unmarked_labels": sum(d["status"] != "pending" and not d["authorized_note_migration"]
+                                   and not d["human_reassessment"] for d in details),
+        },
         "phase_only": {
             "descriptive_only": True, "safety_validated": False,
             "complete_probability_phase_labels": phase_complete,
@@ -383,5 +413,7 @@ def report(bundle, labels):
                         "No deletion or pipeline writeback; incomplete/uncertain/quality-abstain labels block joint estimation.",
                         "Phase coverage uses membership only; phase-only results are descriptive, not safety certification.",
                         "Quality abstention is neither success nor error. Mixed groups have only assessed-phase quality counts.",
-                        "Legacy v1 reviewed retains fully assessed semantics; notes never infer abstention."],
+                        "Legacy v1 reviewed retains fully assessed semantics unless an explicit authorized note migration is bound to this bundle.",
+                        "Authorized note migration is not a new human review; attestation covers only original visual observations.",
+                        "Needs-review migrated records preserve drafts but provide no phase, quality or joint evidence."],
     }

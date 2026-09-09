@@ -17,7 +17,7 @@ from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from src.human_audit import canonical, read_labels, report  # noqa: E402
 from src.human_audit_bundle import upgrade_bundle  # noqa: E402
-from tests.test_human_audit import files, label, legacy_bundle_files  # noqa: E402
+from tests.test_human_audit import files, label, legacy_bundle_files, note_migration_files  # noqa: E402
 
 
 def download_labels(page, path):
@@ -25,6 +25,57 @@ def download_labels(page, path):
         page.locator("#export").click()
     download.value.save_as(path)
     return read_labels(path)
+
+
+def check_note_migration(browser, root):
+    root.mkdir()
+    _, _, _, output, bundle = note_migration_files(root)
+    page = browser.new_page(accept_downloads=True)
+    errors, requests = [], []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("request", lambda request: requests.append(request.url))
+    page.goto((output / "reviewer/index.html").as_uri())
+    expect(page.locator("#migration-notice")).to_be_visible()
+    expect(page.locator("#status")).to_contain_text("授权自动迁移 2 条，需复核 3 条")
+    expect(page.locator("section").first.locator("[data-quality]")).to_have_value("quality_abstain")
+    expect(page.locator("section").nth(2).locator(".saved")).to_contain_text("需人工复核")
+    path = root / "exported.jsonl"
+    rows = download_labels(page, path)
+    assert rows == read_labels(output / "labels-v2.jsonl")
+    assert all(x["provenance"]["human_attestation_scope"] == "original_visual_observation" for x in rows)
+    assert report(bundle, rows)["note_migration_counts"]["needs_review"] == 3
+    page.locator("#import").set_input_files(path)
+    expect(page.locator("#status")).to_contain_text("已重放 5 条")
+    page.reload()
+    expect(page.locator("#status")).to_contain_text("本机恢复 5 条")
+    assert download_labels(page, root / "restored.jsonl") == rows
+    bad = json.loads(canonical(rows[2]))
+    bad["provenance"]["needs_review"] = False
+    rejected = root / "bad-provenance.jsonl"
+    rejected.write_text(canonical(bad))
+    page.locator("#import").set_input_files(rejected)
+    expect(page.locator("#status")).to_contain_text("导入拒绝")
+    stripped = json.loads(canonical(rows[2]))
+    del stripped["provenance"]
+    rejected.write_text(canonical(stripped))
+    page.locator("#import").set_input_files(rejected)
+    expect(page.locator("#status")).to_contain_text("导入拒绝")
+    # Same controls become a new human judgment only after explicit confirmation.
+    section = page.locator("section").nth(2)
+    section.locator('[data-save="reviewed"]').click()
+    expect(page.locator("#status")).to_contain_text("审阅来源无效")
+    page.locator("#annotator").fill("synthetic-confirming-human")
+    page.locator("#attest").check()
+    section.locator('[data-save="reviewed"]').click()
+    expect(section.locator(".saved")).not_to_contain_text("需人工复核")
+    confirmed = download_labels(page, root / "confirmed.jsonl")
+    changed = next(x for x in confirmed if x["task_id"] == rows[2]["task_id"])
+    assert changed["provenance"]["kind"] == "human_reassessment"
+    assert changed["provenance"]["confirmed"] is True and changed["note"] == rows[2]["note"]
+    assert report(bundle, confirmed)["note_migration_counts"] == {"automatic": 2, "needs_review": 2, "human_reassessment": 1, "unmarked_labels": 0}
+    assert not errors, errors
+    assert all(url.startswith(output.as_uri() + "/reviewer/") for url in requests)
+    page.close()
 
 
 def main():
@@ -186,8 +237,10 @@ def main():
             assert not errors, errors
             assert requests and all(request.startswith(output.as_uri() + "/reviewer/") for request in requests), requests
             assert all("manifest" not in request for request in requests)
+            check_note_migration(browser, root / "authorized-notes")
             browser.close()
-        print("PASS: synthetic v1 migration -> editable v2 -> note/partial export -> local/file restore -> strict rejection -> lightbox keyboard/zoom -> storage failure/draft warnings; local assets only")
+        print("PASS: authorized note migration provenance/needs-review/export/import/recovery/explicit human confirmation; "
+              "PASS: synthetic v1 migration -> editable v2 -> note/partial export -> local/file restore -> strict rejection -> lightbox keyboard/zoom -> storage failure/draft warnings; local assets only")
 
 
 if __name__ == "__main__":
