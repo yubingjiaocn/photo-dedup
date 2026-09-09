@@ -16,6 +16,7 @@ import numpy as np
 
 from . import cluster_layers as CL
 from . import quality as Q
+from .phase_coverage import diagnose_phase_coverage, diagnostic_review_reasons, keeper_budget
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,7 @@ def select_phase_keepers(
     members: Sequence[Mapping[str, Any]], phases: Sequence[Phase], *,
     keepers_per_phase: int = 1, max_group_keepers: int = 3,
     diversity_similarity: float = 0.965, mmr_quality_weight: float = 0.7,
+    phase_requirements: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Protect logical phases with variation-aware budget and deterministic MMR.
 
@@ -426,9 +428,7 @@ def select_phase_keepers(
     # member or every detector transition. Bound group retention to at most
     # three representatives (and never all members for a non-singleton group).
     # This preserves multi-stage narratives without recreating keep-all.
-    group_budget = min(max_group_keepers, max(1, 1 + int(math.log2(max(1, len(members))))))
-    if len(members) > 1:
-        group_budget = min(group_budget, len(members) - 1)
+    group_budget = keeper_budget(len(members), max_group_keepers)
     if len(unique_keepers) > group_budget:
         pool = list(unique_keepers)
         bounded: list[int] = []
@@ -463,13 +463,38 @@ def select_phase_keepers(
         budget_limited = True
     else:
         budget_limited = False
+    # Diagnose after selection: external phase evidence cannot steer keepers.
+    # Metadata-only callers need no stable IDs. Use an explicit index namespace
+    # for the entire partition if any IDs are missing; never mix namespaces.
+    stable_ids = all(member.get("id") is not None for member in members)
+    if phase_requirements is not None and not stable_ids:
+        raise ValueError("external phase requirements require stable member IDs")
+    member_ids = ([int(member["id"]) for member in members] if stable_ids else
+                  list(range(len(members))))
+    keeper_ids = [member_ids[idx] for idx in unique_keepers]
+    shadow_requirements = {
+        "source": "shadow", "evidence_ref": "phase_selection.supplied_logical_phases",
+        "member_id_space": "file_id" if stable_ids else "member_index",
+        "confidence": "uncalibrated", "phases": [
+            {"phase_id": str(phase.phase_id),
+             "member_ids": [member_ids[idx] for idx in phase.members],
+             "boundary_reasons": list(phase.boundary_reasons),
+             "uncertainty_reasons": list(phase.uncertainty_reasons)} for phase in phases],
+    }
+    diagnostics = [diagnose_phase_coverage(member_ids, keeper_ids, group_budget, shadow_requirements)]
+    if phase_requirements is not None:
+        diagnostics.append(diagnose_phase_coverage(member_ids, keeper_ids, group_budget, phase_requirements))
+    coverage_reasons = diagnostic_review_reasons(diagnostics)
     return {
         "keepers": unique_keepers,
+        "phase_coverage_diagnostics": diagnostics,
+        "reason_codes": coverage_reasons,
+        "mandatory_review": bool(coverage_reasons),
         "utility_scores": scores,
         "phases": selections,
         "group_keeper_budget": group_budget,
         "budget_limited": budget_limited,
-        "review_required": any(item["review_required"] for item in selections),
+        "review_required": bool(coverage_reasons) or any(item["review_required"] for item in selections),
         "review_phase_count": sum(item["review_required"] for item in selections),
         "semantics": "logical_phase_protection_within_existing_db_group",
         "physical_group_split": False,

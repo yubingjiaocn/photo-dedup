@@ -100,12 +100,18 @@ def run(
             phase_records = [{"phase_id": 0, "members": list(range(len(members))),
                               "keepers": list(candidate), "review_required": False}]
             review_required = False
+            diagnostics = []
+            mandatory_review = False
+            group_keeper_budget = 1
         else:
             phases = PS.segment_phases(members, group_type=group_type)
             selected = PS.select_phase_keepers(members, phases)
             candidate = set(selected["keepers"])
             phase_records = selected["phases"]
             review_required = bool(selected["review_required"])
+            diagnostics = selected["phase_coverage_diagnostics"]
+            mandatory_review = selected["mandatory_review"]
+            group_keeper_budget = selected["group_keeper_budget"]
         base_ids = [int(members[i]["id"]) for i in sorted(baseline)]
         cand_ids = [int(members[i]["id"]) for i in sorted(candidate)]
         changed = baseline != candidate
@@ -125,8 +131,8 @@ def run(
         # Every changed keeper set is primary user decision work, including a
         # two-frame replacement.  Unchanged optional-evidence gaps remain
         # available as secondary diagnostics without flooding the main queue.
-        primary_review = changed
-        secondary_review = review_required and not changed
+        primary_review = changed or mandatory_review
+        secondary_review = review_required and not primary_review
         if primary_review:
             summary["ab_review_groups"] += 1
             summary["ab_review_members"] += len(members)
@@ -138,6 +144,9 @@ def run(
             "dataset": name, "group_id": int(group["id"]), "group_type": group_type,
             "member_count": len(members), "member_ids": [int(item["id"]) for item in members],
             "baseline_keeper_ids": base_ids, "candidate_keeper_ids": cand_ids,
+            "group_keeper_budget": group_keeper_budget,
+            "phase_coverage_diagnostics": diagnostics,
+            "mandatory_review": mandatory_review,
             "logical_phase_count": len(phase_records),
             "logical_phases": [{
                 "phase_id": item["phase_id"],
@@ -147,7 +156,9 @@ def run(
             } for item in phase_records],
             "changed": changed, "review_required": primary_review,
             "review_tier": "primary" if primary_review else ("secondary" if secondary_review else "none"),
-            "review_reason": "CANDIDATE_CHANGED_HIGH_IMPACT" if primary_review else ("EVIDENCE_GAP_DIAGNOSTIC" if secondary_review else ""),
+            "review_reason": ("PHASE_COVERAGE_REVIEW_REQUIRED" if mandatory_review else
+                              "CANDIDATE_CHANGED_HIGH_IMPACT" if primary_review else
+                              "EVIDENCE_GAP_DIAGNOSTIC" if secondary_review else ""),
             "thumbnail_paths": [str(thumb_root / f"{item['id']}.jpg") for item in members],
         })
     conn.close()

@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from .phase_coverage import diagnostic_review_reasons
+
 REVIEW_PRIMARY = "REVIEW_PRIMARY"
 SAFE_SILENT = "SAFE_SILENT"
 DIAGNOSTIC_SAMPLE = "DIAGNOSTIC_SAMPLE"
@@ -78,7 +80,13 @@ def risk_score(evidence: Mapping[str, Any]) -> dict[str, Any]:
     expected_value = score * (1.0 + math.log2(impact + 1.0))
     top = sorted(reasons, key=lambda item: (-_REASON_WEIGHTS[item], item))[:3]
     explanation = "; ".join(reason.replace("_", " ").lower() for reason in top)
+    coverage_reasons = diagnostic_review_reasons(evidence.get("phase_coverage_diagnostics", []))
+    # Structural infeasibility is a review constraint, not a fitted risk weight.
+    reasons.extend(code for code in coverage_reasons if code not in reasons)
+    if coverage_reasons:
+        explanation = "; ".join([*coverage_reasons, explanation]).rstrip("; ")
     return {
+        "mandatory_review": bool(coverage_reasons),
         "risk_score": round(score, 6),
         "expected_review_value": round(expected_value, 6),
         "reason_codes": reasons,
@@ -87,7 +95,11 @@ def risk_score(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def assign_primary_budget(rows: Sequence[dict[str, Any]], budget: float = 0.10) -> list[dict[str, Any]]:
-    """Assign at most floor(budget*N) groups, ranked by expected error value."""
+    """Keep the ranked budget plus mandatory diagnostic reviews, with overflow.
+
+    Mandatory cases never evict previously ranked review work or become silent
+    due to the review budget. This changes attention only, not keeper authority.
+    """
     if not 0 <= budget <= 1:
         raise ValueError("budget must be in [0, 1]")
     count = math.floor(len(rows) * budget)
@@ -97,9 +109,10 @@ def assign_primary_budget(rows: Sequence[dict[str, Any]], budget: float = 0.10) 
     ))
     chosen = {(row["dataset"], row["group_id"]) for row in ranked[:count]}
     for row in rows:
-        row["selective_output"] = (
-            REVIEW_PRIMARY if (row["dataset"], row["group_id"]) in chosen else SAFE_SILENT
-        )
+        budgeted = (row["dataset"], row["group_id"]) in chosen
+        mandatory = bool(row.get("mandatory_review"))
+        row["review_budget_overflow"] = mandatory and not budgeted
+        row["selective_output"] = REVIEW_PRIMARY if budgeted or mandatory else SAFE_SILENT
     return ranked
 
 
@@ -114,12 +127,18 @@ def frontier(rows: Sequence[Mapping[str, Any]], budgets: Iterable[float],
     denominator = len(error_keys or ())
     output = []
     for budget in budgets:
-        count = math.floor(len(ranked) * budget)
-        selected = ranked[:count]
+        if not 0 <= budget <= 1:
+            raise ValueError("budget must be in [0, 1]")
+        budget_count = math.floor(len(ranked) * budget)
+        selected = [row for index, row in enumerate(ranked)
+                    if index < budget_count or row.get("mandatory_review")]
+        count = len(selected)
         captured = sum((row["dataset"], int(row["group_id"])) in (error_keys or set())
                        for row in selected)
         output.append({
             "review_budget": budget,
+            "review_budget_overflow_groups": count - budget_count,
+            "mandatory_review_groups": sum(bool(row.get("mandatory_review")) for row in ranked),
             "review_groups": count,
             "review_group_rate": count / len(ranked) if ranked else 0.0,
             "review_members": sum(int(row["member_count"]) for row in selected),

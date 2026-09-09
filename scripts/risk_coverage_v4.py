@@ -66,6 +66,7 @@ def _evidence(group: Any, members: list[dict[str, Any]], row: dict[str, Any],
         or old2.get("logical_phase_count") != old3.get("logical_phase_count")
     ))
     return {
+        "phase_coverage_diagnostics": row.get("phase_coverage_diagnostics", []),
         "group_type": str(group["group_type"]), "member_count": len(members),
         "time_span_seconds": max(times) - min(times) if len(times) > 1 else 0,
         "min_pair_similarity": min(valid_pairs) if valid_pairs else None,
@@ -233,6 +234,8 @@ def main() -> None:
         "v3_primary_baseline": {"groups": 46, "group_rate": 46 / 113,
                                 "source": "phase-ab-v3 final: disney 28 + jx3 18"},
         "selective_outputs": {REVIEW_PRIMARY: len(primary), DIAGNOSTIC_SAMPLE: len(diagnostics), SAFE_SILENT: len(safe)},
+        "mandatory_review_groups": sum(bool(row.get("mandatory_review")) for row in rows),
+        "review_budget_overflow_groups": sum(bool(row.get("review_budget_overflow")) for row in rows),
         "primary_review": {"groups": len(primary), "group_rate": len(primary) / len(rows),
                            "members": primary_members, "member_rate": primary_members / total_members},
         "silent_coverage": (len(rows) - len(primary)) / len(rows), "risk_decile_counts": buckets,

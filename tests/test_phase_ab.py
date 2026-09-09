@@ -97,3 +97,19 @@ def test_review_queue_separates_primary_change_from_secondary_evidence_gap(tmp_p
     assert json.loads(
         (output2 / "fixture-secondary-diagnostics.json").read_text()
     )["count"] == 1
+
+
+def test_mandatory_unchanged_group_is_not_counted_in_both_review_tiers(tmp_path, monkeypatch):
+    from scripts import phase_ab
+    inventory = tmp_path / "synthetic.sqlite"
+    make_inventory(inventory)
+    monkeypatch.setattr(phase_ab.PS, "select_phase_keepers", lambda members, phases: {
+        "keepers": [0], "phases": [{"phase_id": 0, "members": [0, 1, 2], "keepers": [0]}],
+        "review_required": True, "mandatory_review": True,
+        "group_keeper_budget": 2, "phase_coverage_diagnostics": [],
+    })
+    report = run("synthetic", inventory, tmp_path / "report")
+    assert report["groups"][0]["changed"] is False
+    assert report["groups"][0]["review_tier"] == "primary"
+    assert report["metrics"]["ab_review_groups"] == 1
+    assert report["metrics"].get("secondary_review_groups", 0) == 0
