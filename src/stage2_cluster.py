@@ -376,6 +376,7 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
                 local_quality_policy=cc.get("keeper_local_quality_policy", "off"),
                 local_quality_similarity=cc.get("keeper_local_quality_similarity", 0.9),
                 local_quality_penalty=cc.get("keeper_local_quality_penalty", 0.08),
+                instance_recovery_policy=cc.get("keeper_instance_recovery_policy", "off"),
             )
             # Logical-phase utility is the single authority for keeper choice,
             # decision margins, and persisted evidence in visual groups.

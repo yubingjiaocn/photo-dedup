@@ -383,6 +383,7 @@ def select_phase_keepers(
     pose_policy: str = "off", pose_displacement_threshold: float = 0.4,
     local_quality_policy: str = "off", local_quality_similarity: float = 0.9,
     local_quality_penalty: float = 0.08,
+    instance_recovery_policy: str = "off",
 ) -> dict[str, Any]:
     """Protect logical phases with variation-aware budget and deterministic MMR.
 
@@ -393,6 +394,8 @@ def select_phase_keepers(
     raises review, never keep-all. The explicit consensus-pose policy may
     protect one extra contrasting pose in a small group, always for review.
     """
+    if not isinstance(instance_recovery_policy, str) or instance_recovery_policy not in {"off", "review_only"}:
+        raise ValueError("instance_recovery_policy must be off or review_only")
     if not isinstance(local_quality_policy, str) or local_quality_policy not in {"off", "dominance", "region_set"}:
         raise ValueError("local_quality_policy must be off, dominance or region_set")
     from .local_quality import _finite, adjust_scores
@@ -670,5 +673,13 @@ def select_phase_keepers(
             score_change_margin=score_change_margin, diversity_policy=diversity_policy,
             diversity_quality_slack=diversity_quality_slack, pose_policy=pose_policy,
             pose_displacement_threshold=pose_displacement_threshold, local_quality_policy="off")
-        return protect_selection(result, baseline, phases, local_context)
+        result = protect_selection(result, baseline, phases, local_context)
+    if instance_recovery_policy == "review_only":
+        from .instance_recovery import review_context
+        context = review_context(members)
+        result["instance_recovery_context"] = context
+        if context["proposed_groups"]:
+            result["mandatory_review"] = True
+            result["review_required"] = True
+            result["reason_codes"].append("INSTANCE_RECOVERY_PROPOSAL_REVIEW")
     return result

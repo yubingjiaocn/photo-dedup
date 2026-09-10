@@ -125,6 +125,7 @@ _DEFAULTS: Dict[str, Any] = {
         "keeper_score_change_margin": 0.06,
         "keeper_diversity_policy": "mmr",
         "keeper_diversity_quality_slack": 0.04,
+        "keeper_instance_recovery_policy": "off",
         "keeper_pose_policy": "off",
         "keeper_pose_displacement_threshold": 0.4,
         "keeper_local_quality_policy": "off",
@@ -295,6 +296,9 @@ class Config:
                 raise ValueError(f"cluster.{key} is outside its finite range")
         if local_policy == "region_set" and self.cluster.get("keeper_local_quality_similarity", 0.9) < 0.9:
             raise ValueError("region_set requires similarity >= 0.9")
+        recovery_policy = self.cluster.get("keeper_instance_recovery_policy", "off")
+        if not isinstance(recovery_policy, str) or recovery_policy not in {"off", "review_only"}:
+            raise ValueError("cluster.keeper_instance_recovery_policy must be off or review_only")
         pose_policy = self.cluster.get("keeper_pose_policy", "off")
         if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus", "stable_actor"}:
             raise ValueError("cluster.keeper_pose_policy must be off, consensus or stable_actor")
