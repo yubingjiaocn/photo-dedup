@@ -52,7 +52,10 @@ def assess(phases, aliases, selection):
         if phase['required']:
             result['required_phases'] += 1
             result['phase_misses'] += not bool(retained)
-            result['high_confidence_phase_misses'] += not retained and phase['confidence'] == 'high'
+            confidence = phase.get('confidence')
+            high = confidence == 'high' or (isinstance(confidence, (int, float))
+                    and not isinstance(confidence, bool) and 0.8 <= confidence <= 1)
+            result['high_confidence_phase_misses'] += not retained and high
         if phase['quality_status'] == 'adjudicable':
             acceptable = set(phase['acceptable_keeper_aliases'])
             if not acceptable or not acceptable <= set(phase['member_aliases']):
