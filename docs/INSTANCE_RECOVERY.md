@@ -57,3 +57,29 @@ HF_HOME=/home/ubuntu/hf-cache-photo-dedup \
 8 组已暴露窄切片得到 1 个提案组：同一舞台演员的 2 帧观测。临时模型目视检查为 2/2，但只有 1 个物理轨迹，不能当作总体 precision。完整集合恢复仍是 0/8；暂不扩展提案生产至全部 development。188 组全量运行只是隔离性/回归验证，不是全量恢复实验。
 
 no_subject 保持原全图 baseline；不使用评测 regime 标签推断运行时主体。文档、票据和屏幕没有样本，未验证。新完整事件 holdout 需在参数冻结、标签封存后才揭盲；本轮不是新留出净改善证据。
+
+## 原生 dense 可见区域补充
+
+同一 `review_only` 开关可以消费另一个严格绑定到 group 的 `quality_meta.dense_instance_recovery` packet。它只追加 `dense_visible_region_context` 与人工审阅条目；没有该 packet 时，legacy 输出完全相同。默认依旧关闭，不更改 keeper 或评分。
+
+生产入口为 `scripts/research/run_native_dense_slice.py`，使用已安装 YOLO 分割与 DINOv2-base：显式 native crop 不 resize/center-crop；14px patch 位于分割前景内且有 native 纹理，最多均匀采样512个。局部描述子互最近、cosine至少0.90且双向patch margin至少0.01；RANSAC支持至少12点、inlier ratio至少0.65、双方空间覆盖至少0.15、scale在0.8–1.25，inlier数量占较小patch样本数至少0.08。物体层面还要求竞争者分数间隔及几何一致性，不能靠位置替代外观唯一性。
+
+这里允许 detector class0/77 跨类别参与候选，但**原始检测类别不是语义身份**。审阅范围明确为 `visible_region_only`；裁切边界、遮挡和身体完整度仍是 unknown，不把局部区域当完整身体、服装内人类身份或全组主体集合。该机制没有自动补保或删除权限。
+
+本轮8组/19帧只新增G018 F01↔F02的一条服装角色区域对应、2个帧级观测。它与既有pose-v0的G020不同，合计2个proposed groups，keeper变更仍0。局部对不能宣称覆盖G018全部4帧。`dense-review/review.html` 是单独的自包含匹配点载体，原v0审阅页保留。
+
+导出与新接入回放：
+
+```bash
+.venv/bin/python scripts/research/export_dense_review.py \
+  --source /home/ubuntu/photo-dedup-eval/astra-instance-recovery-20260910/dense-slice \
+  --output /home/ubuntu/photo-dedup-eval/astra-instance-recovery-20260910/NEW-dense-review
+
+.venv/bin/python scripts/research/replay_instance_recovery.py \
+  --proposals /home/ubuntu/photo-dedup-eval/astra-instance-recovery-20260910/candidate \
+  --dense-proposals /home/ubuntu/photo-dedup-eval/astra-instance-recovery-20260910/dense-review \
+  --days 2026-07-25 \
+  --output /home/ubuntu/photo-dedup-eval/astra-instance-recovery-20260910/NEW-dense-stage2-3
+```
+
+全部188组与冻结f79cc0d的keeper顺序、评分、预算、phase输出逐组相同；本补充的真实Stage2/3新增回放范围是受影响的Jul25 52组，两配置unsafe AUTO_REMOVE均为0。原188组Stage2/3证据仍归属v0，不重复宣称为本补充的新回放。

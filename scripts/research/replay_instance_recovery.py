@@ -47,14 +47,21 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--proposals',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--dense-proposals',type=Path)
+    p.add_argument('--days',nargs='+',choices=DAYS,default=DAYS)
     a=p.parse_args()
     a.output.mkdir(parents=True,exist_ok=True)
     packets=defaultdict(list)
     for path in sorted(a.proposals.glob('*/result.json')):
         result=json.loads(path.read_text())
         packets[result['day']].append(result)
+    dense_packets=defaultdict(list)
+    if a.dense_proposals:
+        for path in sorted(a.dense_proposals.glob('*/result.json')):
+            result=json.loads(path.read_text())
+            dense_packets[result['day']].append(result['dense_packet'])
     outcomes=[]
-    for day in DAYS:
+    for day in a.days:
         origin=OLD if day.startswith('2026-07-2') else BASE/'astra-real-events-20260910'
         source=BASE/f'astra-regime-validation-20260910/development/{day}/inventory.sqlite'
         mapping_path=origin/f'panels/{day}/mapping.json'
@@ -82,6 +89,12 @@ def main():
                         row=dest.execute('SELECT quality_meta FROM features WHERE file_id=?',(fid,)).fetchone()
                         meta=json.loads(row[0] or '{}')
                         meta['instance_recovery']=packet
+                        dest.execute('UPDATE features SET quality_meta=? WHERE file_id=?',(json.dumps(meta),fid))
+                for packet in dense_packets[day]:
+                    for fid in packet['group_member_ids']:
+                        row=dest.execute('SELECT quality_meta FROM features WHERE file_id=?',(fid,)).fetchone()
+                        meta=json.loads(row[0] or '{}')
+                        meta['dense_instance_recovery']=packet
                         dest.execute('UPDATE features SET quality_meta=? WHERE file_id=?',(json.dumps(meta),fid))
                 dest.commit()
                 dest.close()

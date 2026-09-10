@@ -248,7 +248,7 @@ def stable_tracks(catalogs, edges):
                                               for t in range(len(track)))]
 
 
-def review_context(members):
+def _legacy_review_context(members):
     """Read only producer proposals bound to the exact group; fail closed.
 
     This consumer never edits member evidence, keeper selection, scores or order.
@@ -305,4 +305,18 @@ def review_context(members):
                                    'review_required': True}]
     else:
         base['refusals'] = ['NO_CONFIRMED_UNIQUE_PROPOSALS']
+    return base
+
+
+def review_context(members):
+    """Optional independent producers share review flags, never keeper authority."""
+    base = _legacy_review_context(members)
+    from .dense_recovery_review import context
+    dense = context(members)
+    if dense is not None:
+        base['dense_visible_region_context'] = dense
+        if dense['proposals']:
+            base['legacy_refusals'] = base['refusals']
+            base['refusals'] = []
+            base['proposed_groups'].append(dense)
     return base
