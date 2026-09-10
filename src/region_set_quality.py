@@ -274,6 +274,15 @@ def protect_selection(candidate, baseline, phases, context):
         for i in old - new
     ):
         reason = "REMOVED_KEEPER_HAS_NO_RETAINED_SET_WITNESS"
+    if reason is None and len(old) != len(new):
+        reason = "REGION_SET_MUST_NOT_CHANGE_KEEPER_COUNT"
+    if reason is None and any(
+        not any(
+            c["better"] == i and c["worse"] in old - new for c in context["comparisons"]
+        )
+        for i in new - old
+    ):
+        reason = "NEW_KEEPER_UNSUPPORTED_BY_REMOVED_SET"
     if reason:
         context = {
             **context,

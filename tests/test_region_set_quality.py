@@ -257,3 +257,15 @@ def test_position_alone_cannot_identify_indistinguishable_actors():
         s["S1"]["vector"] = s["S0"]["vector"].copy()
     assert rs.match(a, b)[1] == "IDENTITY_NOT_UNIQUE_WITHOUT_POSITION"
     assert rs.match(b, a)[1] == "IDENTITY_NOT_UNIQUE_WITHOUT_POSITION"
+
+
+def test_freeing_redundant_slot_cannot_introduce_unassessed_new_keeper():
+    ctx = {"changed_members": [0], "comparisons": [{"worse": 0, "better": 1}]}
+    result = rs.protect_selection(
+        {"keepers": [1, 2]}, {"keepers": [0, 1]}, phases(0, 1, 2), ctx
+    )
+    assert result["keepers"] == [0, 1]
+    assert (
+        result["local_quality_context"]["selection_guard"]
+        == "NEW_KEEPER_UNSUPPORTED_BY_REMOVED_SET"
+    )
