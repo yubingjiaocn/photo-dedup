@@ -5,7 +5,7 @@ const fs=require('node:fs'); const path=require('node:path');
 const {atomicJson,safeError,terminal,retryOperation,preservePayload}=require('./acquisition_state.cjs');
 let checkpoint=()=>{};
 for(const [signal,code] of [['SIGTERM',143],['SIGINT',130]])process.once(signal,()=>{checkpoint(signal);process.exit(code);});
-const OUT='/home/ubuntu/photo-dedup-eval/astra-real-events-20260910/acquisition';
+const OUT=process.env.PHOTO_DEDUP_ACQUISITION_ROOT || '/home/ubuntu/photo-dedup-eval/astra-real-events-20260910/acquisition';
 const TARGET=(process.argv.find(a=>a.startsWith('--target='))||'--target=B344106AE822C093792854A484ACAEA8').slice(9);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const stamp=()=>new Date().toISOString();

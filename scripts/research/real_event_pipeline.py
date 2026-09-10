@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -18,7 +19,7 @@ import yaml
 from PIL import Image, ImageDraw, ImageOps
 
 REPO = Path(__file__).resolve().parents[2]
-ROOT = Path('/home/ubuntu/photo-dedup-eval/astra-real-events-20260910')
+ROOT = Path(os.environ.get('PHOTO_DEDUP_RESEARCH_ROOT', '/home/ubuntu/photo-dedup-eval/astra-real-events-20260910'))
 sys.path.insert(0, str(REPO))
 
 

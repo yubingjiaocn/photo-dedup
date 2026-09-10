@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS features (
   phash BLOB,                   -- 8-byte 64-bit perceptual hash
   content_sha256 TEXT,          -- byte identity; pHash alone is never exact proof
   dinov2_embedding BLOB,        -- 768-dim float16 = 1536 bytes
+  local_quality_embedding BLOB, -- optional packed local-crop float16 embeddings; never report payload
   quality_score REAL,           -- MUSIQ 0-100 (or stub proxy)
   quality_meta TEXT,            -- JSON: {sharpness, clipiqa, ...}
   face_count INTEGER,
@@ -122,7 +123,7 @@ FILE_COLUMNS = (
 
 # Columns added by later releases, per table.
 _ADDITIONS: Dict[str, Dict[str, str]] = {
-    "features": {"content_sha256": "TEXT"},
+    "features": {"content_sha256": "TEXT", "local_quality_embedding": "BLOB"},
     "groups": {"decision_state": "TEXT", "confidence": "REAL",
                "policy_version": "TEXT", "decision_json": "TEXT"},
     "group_members": {"decision": "TEXT", "confidence": "REAL",

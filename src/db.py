@@ -138,7 +138,7 @@ def refresh_file_identity(conn: sqlite3.Connection, file_id: int,
     conn.execute(f"UPDATE files SET {assignments} WHERE id = ?",
                  [meta[name] for name in updatable] + [int(file_id)])
     # Any cached derivative now describes bytes that no longer exist.
-    conn.execute("UPDATE features SET status = 'pending' WHERE file_id = ?", (int(file_id),))
+    conn.execute("UPDATE features SET status = 'pending', local_quality_embedding = NULL WHERE file_id = ?", (int(file_id),))
     conn.execute("DELETE FROM thumbnails WHERE file_id = ?", (int(file_id),))
     return True
 
@@ -268,6 +268,7 @@ def batch_insert_features(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any
             phash=excluded.phash,
             content_sha256=excluded.content_sha256,
             dinov2_embedding=excluded.dinov2_embedding,
+            local_quality_embedding=NULL,
             quality_score=excluded.quality_score,
             quality_meta=excluded.quality_meta,
             face_count=excluded.face_count,
@@ -307,7 +308,7 @@ def load_features_joined(conn: sqlite3.Connection,
                f.exif_datetime, f.exif_timestamp, f.width, f.height,
                f.file_kind, f.motion_partner_id,
                fe.phash, fe.content_sha256, fe.dinov2_embedding, fe.quality_score,
-               fe.quality_meta, fe.face_count, fe.faces_json
+               fe.local_quality_embedding, fe.quality_meta, fe.face_count, fe.faces_json
         FROM files f
         JOIN features fe ON fe.file_id = f.id
         WHERE f.file_kind IN ({placeholders})

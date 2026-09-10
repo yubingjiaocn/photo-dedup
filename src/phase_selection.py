@@ -381,6 +381,8 @@ def select_phase_keepers(
     score_policy: str = "per_member", score_change_margin: float = 0.06,
     diversity_policy: str = "mmr", diversity_quality_slack: float = 0.04,
     pose_policy: str = "off", pose_displacement_threshold: float = 0.4,
+    local_quality_policy: str = "off", local_quality_similarity: float = 0.9,
+    local_quality_penalty: float = 0.08,
 ) -> dict[str, Any]:
     """Protect logical phases with variation-aware budget and deterministic MMR.
 
@@ -391,6 +393,11 @@ def select_phase_keepers(
     raises review, never keep-all. The explicit consensus-pose policy may
     protect one extra contrasting pose in a small group, always for review.
     """
+    if not isinstance(local_quality_policy, str) or local_quality_policy not in {"off", "dominance"}:
+        raise ValueError("local_quality_policy must be off or dominance")
+    from .local_quality import _finite, adjust_scores
+    if not _finite(local_quality_similarity, 0, 1) or not _finite(local_quality_penalty, 0, 0.25):
+        raise ValueError("invalid local quality similarity/penalty")
     if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
         raise ValueError("pose_policy must be off or consensus")
     if (isinstance(pose_displacement_threshold, bool)
@@ -410,6 +417,11 @@ def select_phase_keepers(
     selections: list[dict[str, Any]] = []
     all_keepers: list[int] = []
     scores, scoring_context = _score_group(members, score_policy, score_change_margin)
+    local_context = None
+    if local_quality_policy == "dominance":
+        scores, local_context = adjust_scores(members, phases, scores,
+            similarity=local_quality_similarity, penalty=local_quality_penalty)
+    local_changed = bool(local_context and local_context["changed_members"])
     for phase in phases:
         target = max(1, keepers_per_phase)
         reasons = ["LOGICAL_PHASE_MINIMUM_KEEPER"]
@@ -618,21 +630,23 @@ def select_phase_keepers(
     scoring_review = (score_policy == "guarded_common"
                       and scoring_context["effective_policy"] == "common_evidence")
     selection_reasons = [*coverage_reasons, *(["KEEPER_SCORE_COMPARABILITY_CHANGE"] if scoring_review else []),
-                         *(["POSE_VARIANT_KEEPER"] if pose_added else [])]
+                         *(["POSE_VARIANT_KEEPER"] if pose_added else []),
+                         *(["LOCAL_QUALITY_DOMINANCE"] if local_changed else [])]
     return {
         **({"scoring_context": scoring_context} if score_policy != "per_member" else {}),
         **({"diversity_context": {"policy": diversity_policy, "quality_slack": diversity_quality_slack}}
            if diversity_policy != "mmr" else {}),
         **({"pose_coverage": pose_context} if pose_context is not None else {}),
+        **({"local_quality_context": local_context} if local_context is not None else {}),
         "keepers": unique_keepers,
         "phase_coverage_diagnostics": diagnostics,
         "reason_codes": selection_reasons,
-        "mandatory_review": bool(coverage_reasons) or pose_added,
+        "mandatory_review": bool(coverage_reasons) or pose_added or local_changed,
         "utility_scores": scores,
         "phases": selections,
         "group_keeper_budget": group_budget,
         "budget_limited": budget_limited,
-        "review_required": scoring_review or bool(coverage_reasons) or any(item["review_required"] for item in selections),
+        "review_required": scoring_review or local_changed or bool(coverage_reasons) or any(item["review_required"] for item in selections),
         "review_phase_count": sum(item["review_required"] for item in selections),
         "semantics": "logical_phase_protection_within_existing_db_group",
         "physical_group_split": False,
