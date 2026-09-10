@@ -67,9 +67,13 @@ def replay(source, config_path, mapping_path, reference_path, reference_variant,
         selected={aliases[m['file_id']] for m in members if m['is_keep']}
         assert selected==set(reference[g['group_alias']]['variants'][reference_variant]['keepers'])
         decision=json.loads(saved['decision_json'])
-        context=decision['phase_selection']['local_quality_context']
-        assert not context['eye_state_authority'] and not context['amodal_completeness_authority']
-        evidence_groups+=bool(context['changed_members'])
+        context=decision['phase_selection'].get('local_quality_context')
+        if options.get('local_quality_policy','off')!='off':
+            assert context is not None
+            assert not context['eye_state_authority'] and not context['amodal_completeness_authority']
+            evidence_groups+=bool(context['changed_members'])
+        else:
+            assert context is None
         pose=decision['phase_selection'].get('pose_coverage') or {}
         pose_groups+=pose.get('added_keeper') is not None
     unsafe=c.execute("SELECT COUNT(*) FROM group_members gm JOIN groups g ON gm.group_id=g.id JOIN features f ON gm.file_id=f.file_id JOIN features k ON g.keep_file_id=k.file_id WHERE gm.decision='AUTO_REMOVE' AND (g.group_type!='sha_exact' OR f.content_sha256 IS NULL OR f.content_sha256!=k.content_sha256)").fetchone()[0]
