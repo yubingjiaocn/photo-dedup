@@ -17,6 +17,7 @@ import numpy as np
 from . import cluster_layers as CL
 from . import quality as Q
 from .phase_coverage import diagnose_phase_coverage, diagnostic_review_reasons, keeper_budget
+from .pose_evidence import protect_pose_variants
 
 
 @dataclass(frozen=True)
@@ -378,6 +379,8 @@ def select_phase_keepers(
     diversity_similarity: float = 0.965, mmr_quality_weight: float = 0.7,
     phase_requirements: Mapping[str, Any] | None = None,
     score_policy: str = "per_member", score_change_margin: float = 0.06,
+    diversity_policy: str = "mmr", diversity_quality_slack: float = 0.04,
+    pose_policy: str = "off", pose_displacement_threshold: float = 0.4,
 ) -> dict[str, Any]:
     """Protect logical phases with variation-aware budget and deterministic MMR.
 
@@ -385,12 +388,21 @@ def select_phase_keepers(
     primary-signal uncertainty keeper are proposed per logical phase, then a
     group-level cap prevents detector flicker from recreating keep-all. The cap
     limits the budget; it does not create it. Optional scoring evidence only
-    raises review, never keep-all.
-
-    At most one extra
-    variation keeper and one primary-signal uncertainty keeper are added per
-    logical phase.
+    raises review, never keep-all. The explicit consensus-pose policy may
+    protect one extra contrasting pose in a small group, always for review.
     """
+    if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
+        raise ValueError("pose_policy must be off or consensus")
+    if (isinstance(pose_displacement_threshold, bool)
+            or not isinstance(pose_displacement_threshold, (int, float))
+            or not math.isfinite(pose_displacement_threshold) or pose_displacement_threshold <= 0):
+        raise ValueError("pose_displacement_threshold must be positive and finite")
+    if not isinstance(diversity_policy, str) or diversity_policy not in {"mmr", "quality_banded"}:
+        raise ValueError("diversity_policy must be mmr or quality_banded")
+    if (isinstance(diversity_quality_slack, bool)
+            or not isinstance(diversity_quality_slack, (int, float))
+            or not 0 <= diversity_quality_slack <= 1):
+        raise ValueError("diversity_quality_slack must be finite and in [0, 1]")
     if max_group_keepers < 1:
         raise ValueError("max_group_keepers must be >= 1")
     if not 0.0 <= mmr_quality_weight <= 1.0:
@@ -460,10 +472,28 @@ def select_phase_keepers(
                     )
                     details[idx] = (mmr_score, max_similarity)
                 pick = max(candidates, key=ranks.__getitem__)
+                method = "mmr"
+                if diversity_policy == "quality_banded":
+                    embeddings = [_embedding(members[i]) for i in [*chosen, *candidates]]
+                    comparable = all(e is not None and e.shape == embeddings[0].shape
+                                     for e in embeddings) if embeddings[0] is not None else False
+                    if comparable:
+                        floor = max(scores[i] for i in candidates) - diversity_quality_slack
+                        eligible = [i for i in candidates if scores[i] >= floor]
+                        diverse = min(eligible, key=lambda i: (
+                            details[i][1], -scores[i],
+                            -int(members[i].get("size_bytes") or 0),
+                            int(members[i].get("id") or i),
+                        ))
+                        # A utility budget bounds the quality/diversity tradeoff;
+                        # cosine gain is ranking evidence, not an action label.
+                        if details[pick][1] - details[diverse][1] > 1e-6:
+                            pick, method = diverse, "quality_banded_diversity"
+                            reasons.append("QUALITY_BANDED_DIVERSITY")
                 candidates.remove(pick)
                 mmr_score, max_similarity = details[pick]
                 selection_steps.append({
-                    "member": pick, "method": "mmr", "score": mmr_score,
+                    "member": pick, "method": method, "score": mmr_score,
                     "utility_score": scores[pick], "max_selected_similarity": max_similarity,
                 })
                 reasons.append("MMR_QUALITY_DIVERSITY")
@@ -476,7 +506,9 @@ def select_phase_keepers(
             "reason_codes": list(dict.fromkeys([
                 *phase.boundary_reasons, *phase.uncertainty_reasons, *reasons,
             ])),
-            "review_required": bool(critical_uncertainty or optional_gap_review),
+            "review_required": bool(critical_uncertainty or optional_gap_review or any(
+                step["method"] == "quality_banded_diversity" for step in selection_steps
+            )),
             "critical_uncertainty": critical_uncertainty,
             "optional_gap_review": optional_gap_review,
             "utility_margin": utility_margin,
@@ -488,14 +520,14 @@ def select_phase_keepers(
             },
         })
     unique_keepers = list(dict.fromkeys(all_keepers))
-    # Logical phases are evidence annotations, not a promise to keep every
-    # member or every detector transition. Bound group retention to at most
-    # three representatives (and never all members for a non-singleton group).
-    # This preserves multi-stage narratives without recreating keep-all.
+    # Logical phases annotate evidence rather than guarantee every transition.
+    # The base budget excludes keep-all. The explicit pose policy can protect
+    # one additional contrasting pose in groups of 2–6, including both of a pair.
     group_budget = keeper_budget(len(members), max_group_keepers)
     if len(unique_keepers) > group_budget:
         pool = list(unique_keepers)
         bounded: list[int] = []
+        banded_budget_change = False
         while pool and len(bounded) < group_budget:
             if not bounded:
                 pick = max(pool, key=lambda idx: (
@@ -515,18 +547,52 @@ def select_phase_keepers(
                     return (value, scores[idx], int(members[idx].get("size_bytes") or 0),
                             -int(members[idx].get("id") or idx))
                 pick = max(pool, key=rank)
+                if diversity_policy == "quality_banded":
+                    embs = {i: _embedding(members[i]) for i in [*pool, *bounded]}
+                    first = embs[bounded[0]]
+                    if first is not None and all(e is not None and e.shape == first.shape for e in embs.values()):
+                        similarities = {i: max(float(np.dot(embs[i], embs[j])) for j in bounded) for i in pool}
+                        floor = max(scores[i] for i in pool) - diversity_quality_slack
+                        eligible = [i for i in pool if scores[i] >= floor]
+                        diverse = min(eligible, key=lambda i: (
+                            similarities[i], -scores[i], -int(members[i].get("size_bytes") or 0),
+                            int(members[i].get("id") or i),
+                        ))
+                        if similarities[pick] - similarities[diverse] > 1e-6:
+                            pick = diverse
+                            banded_budget_change = True
             bounded.append(pick)
             pool.remove(pick)
         unique_keepers = bounded
         keeper_set = set(unique_keepers)
         for item in selections:
             item["keepers"] = [idx for idx in item["keepers"] if idx in keeper_set]
+            if banded_budget_change and item["keepers"]:
+                item["reason_codes"].append("QUALITY_BANDED_BUDGET_ALLOCATION")
+                item["review_required"] = True
             if not item["keepers"]:
                 item["reason_codes"].append("LOGICAL_PHASE_ANNOTATED_NOT_SEPARATELY_RETAINED")
                 item["review_required"] = True
         budget_limited = True
     else:
         budget_limited = False
+    pose_context = None
+    pose_added = False
+    if pose_policy == "consensus" and unique_keepers:
+        unique_keepers, pose_context = protect_pose_variants(
+            members, unique_keepers, scores, displacement_threshold=pose_displacement_threshold,
+        )
+        extra = pose_context["added_keeper"]
+        pose_added = extra is not None
+        if pose_added:
+            pose_context["base_keeper_budget"] = group_budget
+            group_budget = max(group_budget, len(unique_keepers))
+            for item in selections:
+                if extra in item["members"]:
+                    item["keepers"].append(extra)
+                    item["reason_codes"].append("POSE_VARIANT_KEEPER")
+                    item["review_required"] = True
+                    item["selection_steps"].append({"member": extra, "method": "pose_variant", "semantic_phase_authority": False})
     # Diagnose after selection: external phase evidence cannot steer keepers.
     # Metadata-only callers need no stable IDs. Use an explicit index namespace
     # for the entire partition if any IDs are missing; never mix namespaces.
@@ -551,13 +617,17 @@ def select_phase_keepers(
     coverage_reasons = diagnostic_review_reasons(diagnostics)
     scoring_review = (score_policy == "guarded_common"
                       and scoring_context["effective_policy"] == "common_evidence")
-    selection_reasons = [*coverage_reasons, *(["KEEPER_SCORE_COMPARABILITY_CHANGE"] if scoring_review else [])]
+    selection_reasons = [*coverage_reasons, *(["KEEPER_SCORE_COMPARABILITY_CHANGE"] if scoring_review else []),
+                         *(["POSE_VARIANT_KEEPER"] if pose_added else [])]
     return {
         **({"scoring_context": scoring_context} if score_policy != "per_member" else {}),
+        **({"diversity_context": {"policy": diversity_policy, "quality_slack": diversity_quality_slack}}
+           if diversity_policy != "mmr" else {}),
+        **({"pose_coverage": pose_context} if pose_context is not None else {}),
         "keepers": unique_keepers,
         "phase_coverage_diagnostics": diagnostics,
         "reason_codes": selection_reasons,
-        "mandatory_review": bool(coverage_reasons),
+        "mandatory_review": bool(coverage_reasons) or pose_added,
         "utility_scores": scores,
         "phases": selections,
         "group_keeper_budget": group_budget,

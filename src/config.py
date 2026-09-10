@@ -18,6 +18,7 @@ came from the default merge.
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -122,6 +123,10 @@ _DEFAULTS: Dict[str, Any] = {
         "keeper_mmr_quality_weight": 0.7,
         "keeper_score_policy": "per_member",
         "keeper_score_change_margin": 0.06,
+        "keeper_diversity_policy": "mmr",
+        "keeper_diversity_quality_slack": 0.04,
+        "keeper_pose_policy": "off",
+        "keeper_pose_displacement_threshold": 0.4,
     },
     "quality": {
         "weight_iqa": 0.6,
@@ -270,6 +275,19 @@ class Config:
         margin = self.cluster.get("keeper_score_change_margin", 0.06)
         if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not 0 <= margin <= 1:
             raise ValueError("cluster.keeper_score_change_margin must be a finite number in [0, 1]")
+        diversity_policy = self.cluster.get("keeper_diversity_policy", "mmr")
+        if not isinstance(diversity_policy, str) or diversity_policy not in {"mmr", "quality_banded"}:
+            raise ValueError("cluster.keeper_diversity_policy must be mmr or quality_banded")
+        slack = self.cluster.get("keeper_diversity_quality_slack", 0.04)
+        if isinstance(slack, bool) or not isinstance(slack, (int, float)) or not 0 <= slack <= 1:
+            raise ValueError("cluster.keeper_diversity_quality_slack must be finite and in [0, 1]")
+        pose_policy = self.cluster.get("keeper_pose_policy", "off")
+        if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
+            raise ValueError("cluster.keeper_pose_policy must be off or consensus")
+        pose_threshold = self.cluster.get("keeper_pose_displacement_threshold", 0.4)
+        if (isinstance(pose_threshold, bool) or not isinstance(pose_threshold, (int, float))
+                or not math.isfinite(pose_threshold) or pose_threshold <= 0):
+            raise ValueError("cluster.keeper_pose_displacement_threshold must be positive and finite")
         if int(self.cluster.get("phase_max_gap_seconds", 4)) <= 0:
             raise ValueError("cluster.phase_max_gap_seconds must be > 0")
         for key in ("phase_embedding_boundary", "phase_position_shift", "keeper_diversity_similarity",

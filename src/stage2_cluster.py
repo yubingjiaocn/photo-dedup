@@ -369,6 +369,10 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
                 mmr_quality_weight=float(cc.get("keeper_mmr_quality_weight", 0.7)),
                 score_policy=cc.get("keeper_score_policy", "per_member"),
                 score_change_margin=cc.get("keeper_score_change_margin", 0.06),
+                diversity_policy=cc.get("keeper_diversity_policy", "mmr"),
+                diversity_quality_slack=cc.get("keeper_diversity_quality_slack", 0.04),
+                pose_policy=cc.get("keeper_pose_policy", "off"),
+                pose_displacement_threshold=cc.get("keeper_pose_displacement_threshold", 0.4),
             )
             # Logical-phase utility is the single authority for keeper choice,
             # decision margins, and persisted evidence in visual groups.
@@ -434,13 +438,16 @@ def cluster(conn, cfg: Config, scope: Any = None) -> Dict[str, int]:
             for extra_keeper in phase_result["keepers"]:
                 if extra_keeper == keep_local:
                     continue
+                pose_extra = (phase_result.get("pose_coverage") or {}).get("added_keeper") == extra_keeper
                 result["members"][extra_keeper] = {
                     "decision": "KEEP", "confidence": 1.0,
-                    "reason": "LOGICAL_PHASE_KEEPER",
+                    "reason": "POSE_VARIANT_KEEPER" if pose_extra else "LOGICAL_PHASE_KEEPER",
                     "evidence": {
                         "utility_score": float(scores[extra_keeper]),
                         "pair_margin": float(scores[keep_local] - scores[extra_keeper]),
-                        "logical_phase_protection": True,
+                        "logical_phase_protection": not pose_extra,
+                        **({"pose_variation_protection": True, "semantic_phase_authority": False,
+                            "pose_comparisons": phase_result["pose_coverage"]["comparisons"]} if pose_extra else {}),
                         "physical_group_split": False,
                     },
                 }
