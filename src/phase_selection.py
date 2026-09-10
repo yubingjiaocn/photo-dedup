@@ -393,8 +393,8 @@ def select_phase_keepers(
     raises review, never keep-all. The explicit consensus-pose policy may
     protect one extra contrasting pose in a small group, always for review.
     """
-    if not isinstance(local_quality_policy, str) or local_quality_policy not in {"off", "dominance"}:
-        raise ValueError("local_quality_policy must be off or dominance")
+    if not isinstance(local_quality_policy, str) or local_quality_policy not in {"off", "dominance", "region_set"}:
+        raise ValueError("local_quality_policy must be off, dominance or region_set")
     from .local_quality import _finite, adjust_scores
     if not _finite(local_quality_similarity, 0, 1) or not _finite(local_quality_penalty, 0, 0.25):
         raise ValueError("invalid local quality similarity/penalty")
@@ -420,6 +420,10 @@ def select_phase_keepers(
     local_context = None
     if local_quality_policy == "dominance":
         scores, local_context = adjust_scores(members, phases, scores,
+            similarity=local_quality_similarity, penalty=local_quality_penalty)
+    if local_quality_policy == "region_set":
+        from .region_set_quality import adjust_scores as adjust_set_scores
+        scores, local_context = adjust_set_scores(members, phases, scores,
             similarity=local_quality_similarity, penalty=local_quality_penalty)
     local_changed = bool(local_context and local_context["changed_members"])
     for phase in phases:
@@ -632,7 +636,7 @@ def select_phase_keepers(
     selection_reasons = [*coverage_reasons, *(["KEEPER_SCORE_COMPARABILITY_CHANGE"] if scoring_review else []),
                          *(["POSE_VARIANT_KEEPER"] if pose_added else []),
                          *(["LOCAL_QUALITY_DOMINANCE"] if local_changed else [])]
-    return {
+    result = {
         **({"scoring_context": scoring_context} if score_policy != "per_member" else {}),
         **({"diversity_context": {"policy": diversity_policy, "quality_slack": diversity_quality_slack}}
            if diversity_policy != "mmr" else {}),
@@ -652,3 +656,14 @@ def select_phase_keepers(
         "physical_group_split": False,
         "authority": "shadow_review_only",
     }
+    if local_quality_policy == "region_set":
+        from .region_set_quality import protect_selection
+        baseline = select_phase_keepers(members, phases,
+            keepers_per_phase=keepers_per_phase, max_group_keepers=max_group_keepers,
+            diversity_similarity=diversity_similarity, mmr_quality_weight=mmr_quality_weight,
+            phase_requirements=phase_requirements, score_policy=score_policy,
+            score_change_margin=score_change_margin, diversity_policy=diversity_policy,
+            diversity_quality_slack=diversity_quality_slack, pose_policy=pose_policy,
+            pose_displacement_threshold=pose_displacement_threshold, local_quality_policy="off")
+        return protect_selection(result, baseline, phases, local_context)
+    return result

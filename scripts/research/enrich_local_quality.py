@@ -87,6 +87,8 @@ def enrich(source, output, config, model_path):
         meta['local_quality'] = {'schema_version':1,'method':'native_coco_crop_v1',
                                  'producer':model_path.name,'appearance_model':'dinov2-base',
                                  'regions':regions,'status':'observed' if regions else 'abstain',
+                                 'catalog_complete_single':len(pred.boxes)==1 and len(objects)==1,
+                                 'detected_subject_count':len(pred.boxes),
                                  'eye_state':'not_measured','amodal_completeness':'not_measured'}
         conn.execute('UPDATE features SET quality_meta=?,local_quality_embedding=? WHERE file_id=?',
                      (json.dumps(meta),bytes(blob) if blob else None,row['id']))

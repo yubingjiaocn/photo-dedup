@@ -16,6 +16,7 @@ def observed(fid, musiq, clip, *, kind='subject', cls=16, axis=0):
     m['local_quality_embedding'] = v.tobytes()
     meta = json.loads(m['quality_meta'])
     meta['local_quality'] = {'schema_version': 1, 'method': 'native_coco_crop_v1',
+        'catalog_complete_single': True, 'detected_subject_count': 1,
         'regions': [{'kind': kind, 'class_id': cls, 'confidence': .99,
                      'box_normalized': [.1, .1, .9, .9], 'embedding_offset': 0,
                      'native_size': [500, 500], 'musiq': musiq, 'clipiqa': clip}]}

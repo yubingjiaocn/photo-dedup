@@ -23,6 +23,8 @@ def observations(member: Mapping[str, Any]) -> dict[tuple[str, int], dict]:
         meta = json.loads(member.get('quality_meta') or '{}')['local_quality']
         blob = member.get('local_quality_embedding')
         if (meta.get('schema_version') != 1 or meta.get('method') != 'native_coco_crop_v1'
+                or meta.get('catalog_complete_single') is not True
+                or type(meta.get('detected_subject_count')) is not int or meta['detected_subject_count'] != 1
                 or not isinstance(blob, (bytes, bytearray, memoryview))
                 or not 0 < len(blob) <= 16 * STRIDE):
             return {}
@@ -48,6 +50,8 @@ def observations(member: Mapping[str, Any]) -> dict[tuple[str, int], dict]:
             if not np.all(np.isfinite(vector)) or not math.isfinite(norm) or norm <= 0:
                 return {}
             result[key] = {**r, 'vector': vector / norm}
+        if sum(k[0] == 'subject' for k in result) != 1:
+            return {}
         return result
     except (KeyError, ValueError, TypeError, OverflowError, AttributeError, BufferError):
         return {}

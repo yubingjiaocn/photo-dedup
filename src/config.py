@@ -285,14 +285,16 @@ class Config:
         if isinstance(slack, bool) or not isinstance(slack, (int, float)) or not 0 <= slack <= 1:
             raise ValueError("cluster.keeper_diversity_quality_slack must be finite and in [0, 1]")
         local_policy = self.cluster.get("keeper_local_quality_policy", "off")
-        if not isinstance(local_policy, str) or local_policy not in {"off", "dominance"}:
-            raise ValueError("cluster.keeper_local_quality_policy must be off or dominance")
+        if not isinstance(local_policy, str) or local_policy not in {"off", "dominance", "region_set"}:
+            raise ValueError("cluster.keeper_local_quality_policy must be off, dominance or region_set")
         for key, upper, default in [("keeper_local_quality_similarity", 1.0, 0.9),
                                     ("keeper_local_quality_penalty", 0.25, 0.08)]:
             value = self.cluster.get(key, default)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or not 0 <= value <= upper):
                 raise ValueError(f"cluster.{key} is outside its finite range")
+        if local_policy == "region_set" and self.cluster.get("keeper_local_quality_similarity", 0.9) < 0.9:
+            raise ValueError("region_set requires similarity >= 0.9")
         pose_policy = self.cluster.get("keeper_pose_policy", "off")
         if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
             raise ValueError("cluster.keeper_pose_policy must be off or consensus")
