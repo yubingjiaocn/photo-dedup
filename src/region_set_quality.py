@@ -153,10 +153,27 @@ def _global_vector(m):
         return None
 
 
+def evidence_dispatch(sets):
+    """Shared evidence route; never claims semantic scene classification."""
+    counts = [sum(r["kind"] == "subject" for r in s.values()) if s else 0 for s in sets]
+    if not counts or 0 in counts or len(set(counts)) != 1:
+        route = "global_baseline"
+    else:
+        route = "single_set" if counts[0] == 1 else "multi_set"
+    return {
+        "route": route,
+        "observed_subject_counts": counts,
+        "semantic_scene_regime_authority": False,
+        "evaluation_labels_used": False,
+        "document_screen_region_model": None,
+    }
+
+
 def adjust_scores(members, phases, scores, *, similarity=0.97, penalty=0.08):
     if not _finite(similarity, 0.9, 1) or not _finite(penalty, 0, 0.25):
         raise ValueError("region-set parameters out of range")
     sets = [decode(m) for m in members]
+    dispatch = evidence_dispatch(sets)
     vectors = [_global_vector(m) for m in members]
     out = dict(scores)
     comparisons = []
@@ -180,7 +197,7 @@ def adjust_scores(members, phases, scores, *, similarity=0.97, penalty=0.08):
         for j, b in enumerate(sets):
             if i == j:
                 continue
-            if a is None or b is None:
+            if dispatch["route"] == "global_baseline" or a is None or b is None:
                 refusals["NO_COMPLETE_RELIABLE_SET"] += 1
                 continue
             pairs, reason = match(a, b, similarity)
@@ -247,6 +264,7 @@ def adjust_scores(members, phases, scores, *, similarity=0.97, penalty=0.08):
             )
     return out, {
         "policy": "symmetric_region_set",
+        "dispatch": dispatch,
         "similarity": similarity,
         "max_utility_penalty": penalty,
         "frames": frames,

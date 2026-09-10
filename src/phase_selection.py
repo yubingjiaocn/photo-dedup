@@ -398,8 +398,8 @@ def select_phase_keepers(
     from .local_quality import _finite, adjust_scores
     if not _finite(local_quality_similarity, 0, 1) or not _finite(local_quality_penalty, 0, 0.25):
         raise ValueError("invalid local quality similarity/penalty")
-    if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
-        raise ValueError("pose_policy must be off or consensus")
+    if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus", "stable_actor"}:
+        raise ValueError("pose_policy must be off, consensus or stable_actor")
     if (isinstance(pose_displacement_threshold, bool)
             or not isinstance(pose_displacement_threshold, (int, float))
             or not math.isfinite(pose_displacement_threshold) or pose_displacement_threshold <= 0):
@@ -594,10 +594,15 @@ def select_phase_keepers(
         budget_limited = False
     pose_context = None
     pose_added = False
-    if pose_policy == "consensus" and unique_keepers:
-        unique_keepers, pose_context = protect_pose_variants(
-            members, unique_keepers, scores, displacement_threshold=pose_displacement_threshold,
-        )
+    if pose_policy in {"consensus", "stable_actor"} and unique_keepers:
+        if pose_policy == "stable_actor":
+            from .actor_set_pose import protect_actor_variants
+            unique_keepers, pose_context = protect_actor_variants(
+                members, unique_keepers, scores, displacement_threshold=pose_displacement_threshold)
+        else:
+            unique_keepers, pose_context = protect_pose_variants(
+                members, unique_keepers, scores, displacement_threshold=pose_displacement_threshold,
+            )
         extra = pose_context["added_keeper"]
         pose_added = extra is not None
         if pose_added:

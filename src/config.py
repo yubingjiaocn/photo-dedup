@@ -296,8 +296,8 @@ class Config:
         if local_policy == "region_set" and self.cluster.get("keeper_local_quality_similarity", 0.9) < 0.9:
             raise ValueError("region_set requires similarity >= 0.9")
         pose_policy = self.cluster.get("keeper_pose_policy", "off")
-        if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus"}:
-            raise ValueError("cluster.keeper_pose_policy must be off or consensus")
+        if not isinstance(pose_policy, str) or pose_policy not in {"off", "consensus", "stable_actor"}:
+            raise ValueError("cluster.keeper_pose_policy must be off, consensus or stable_actor")
         pose_threshold = self.cluster.get("keeper_pose_displacement_threshold", 0.4)
         if (isinstance(pose_threshold, bool) or not isinstance(pose_threshold, (int, float))
                 or not math.isfinite(pose_threshold) or pose_threshold <= 0):

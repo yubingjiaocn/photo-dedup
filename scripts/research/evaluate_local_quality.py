@@ -71,6 +71,9 @@ def run(mapping_path, labels_path, database, variants_path, output, split):
             metric['selection_seconds'] = elapsed
             metric['changed_groups'] = int(set(selection['keepers']) != set(original['keepers']))
             metric['local_evidence_changed_groups'] = int(bool(selection.get('local_quality_context',{}).get('changed_members')))
+            pose_context = selection.get('pose_coverage') or {}
+            metric['pose_trigger_groups'] = int(pose_context.get('added_keeper') is not None)
+            metric['pose_abstain_groups'] = int(bool(pose_context) and pose_context.get('added_keeper') is None)
             keep = {aliases[i] for i in selection['keepers']}
             metric['usable_required_phases'] = 0
             metric['adjudicable_required_phases'] = 0
@@ -81,7 +84,8 @@ def run(mapping_path, labels_path, database, variants_path, output, split):
             totals[name].update(metric)
             row['variants'][name] = {'keepers':[aliases[i] for i in selection['keepers']],
                 'metrics':metric,'review':selection['review_required'],'budget':selection['group_keeper_budget'],
-                'local_quality_context':selection.get('local_quality_context')}
+                'local_quality_context':selection.get('local_quality_context'),
+                'pose_context':selection.get('pose_coverage')}
         rows.append(row)
     conn.close()
     count = sum(len(g['frames']) for g in groups)
