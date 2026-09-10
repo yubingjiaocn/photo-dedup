@@ -248,3 +248,12 @@ def test_one_worse_face_blocks_group_improvement():
     scores, ctx = rs.adjust_scores([a, b], phases(0, 1), {0: 0.8, 1: 0.8})
     assert scores == {0: 0.8, 1: 0.8}
     assert ctx["refusals"]["ANY_REGION_WORSENED"] > 0
+
+
+def test_position_alone_cannot_identify_indistinguishable_actors():
+    a = rs.decode(frame(1))
+    b = rs.decode(frame(2))
+    for s in (a, b):
+        s["S1"]["vector"] = s["S0"]["vector"].copy()
+    assert rs.match(a, b)[1] == "IDENTITY_NOT_UNIQUE_WITHOUT_POSITION"
+    assert rs.match(b, a)[1] == "IDENTITY_NOT_UNIQUE_WITHOUT_POSITION"

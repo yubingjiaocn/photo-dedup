@@ -105,10 +105,13 @@ def match(left, right, similarity=0.97):
     ):
         return None, "SET_COVERAGE_UNSTABLE"
     costs = np.full((len(a), len(b)), -2.0)
+    appearance = np.full_like(costs, -2.0)
     for i, x in enumerate(a):
         for j, y in enumerate(b):
             sim = float(x["vector"] @ y["vector"])
             overlap = _iou(x["box_normalized"], y["box_normalized"])
+            if x["class_id"] == y["class_id"]:
+                appearance[i, j] = sim
             if x["class_id"] == y["class_id"] and sim >= similarity and overlap >= 0.5:
                 costs[i, j] = 0.8 * sim + 0.2 * overlap
     rows = np.argmax(costs, axis=1)
@@ -117,6 +120,12 @@ def match(left, right, similarity=0.97):
     for i, j in enumerate(rows):
         if costs[i, j] < 0 or cols[j] != i:
             return None, "ASSOCIATION_UNKNOWN"
+        other_row = np.delete(appearance[i], j)
+        other_col = np.delete(appearance[:, j], i)
+        if (other_row.size and appearance[i, j] - other_row.max() < 0.03) or (
+            other_col.size and appearance[i, j] - other_col.max() < 0.03
+        ):
+            return None, "IDENTITY_NOT_UNIQUE_WITHOUT_POSITION"
         row = np.sort(costs[i])
         col = np.sort(costs[:, j])
         if (len(row) > 1 and row[-1] - row[-2] < 0.03) or (
