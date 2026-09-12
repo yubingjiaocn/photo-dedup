@@ -18,11 +18,11 @@ from PIL import Image, ImageDraw, ImageOps
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from src.instance_recovery import (PRODUCER, track_box, sift_box, confirm_target,
+from src.instance_recovery import (PRODUCER, track_box, sift_box, confirm_target,  # noqa: E402
                                    appearance_unique, novel_detection, pose_pair_support, stable_tracks)
-from src.local_quality import _iou
-from src.config import Config, load_config
-from src.stage1_backends import TorchBackend
+from src.local_quality import _iou  # noqa: E402
+from src.config import Config, load_config  # noqa: E402
+from src.stage1_backends import TorchBackend  # noqa: E402
 
 
 def read_group(group):

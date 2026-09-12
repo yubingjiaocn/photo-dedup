@@ -8,7 +8,7 @@ import sys
 
 REPO=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(REPO))
-from src import phase_selection as ps
+from src import phase_selection as ps  # noqa: E402
 
 
 def main():

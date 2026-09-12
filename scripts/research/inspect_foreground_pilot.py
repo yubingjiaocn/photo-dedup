@@ -7,5 +7,5 @@ for path in root.glob('*/result.json'):
  print(r['group_alias'],'frames',[(x['frame']['alias'],len(x['observations']),sum(o['view_confirmed'] for o in x['observations'])) for x in r['records']])
  for f,rec in enumerate(r['records']):
   print(' F',f,[(i,o['class_id'],o['view_confirmed'],o['new_vs_v0_catalog']) for i,o in enumerate(rec['observations'])])
- for link in sorted(r['links'],key=lambda l:l.get('similarity',0),reverse=True)[:12]:
+ for link in sorted(r['links'],key=lambda l:l.get('similarity',0),reverse=True)[:12]:  # noqa: E741
   print({k:v for k,v in link.items() if k!='support'}, {k:v for k,v in link.get('support',{}).items() if 'inliers_native' not in k})

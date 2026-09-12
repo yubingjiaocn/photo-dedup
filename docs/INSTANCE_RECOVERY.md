@@ -2,6 +2,8 @@
 
 本地、默认关闭、review-only。提案只补充人工审阅信息，不替换原始 region catalog，不改 keeper 集合、顺序、首选图、评分或预算，不授予删除权限。
 
+**完整日期最终验收见 [FINAL_ACCEPTANCE.md](FINAL_ACCEPTANCE.md)。** 37组/143张的三臂回放保持63keepers，未证实净收益；multi样本不足，模型标签不是人标，浏览器与Windows真机门禁未过。以下8组/19帧和188组/498张均为此前已暴露development证据，不与新日期混算。
+
 ## 运行时开关
 
 ```yaml
@@ -62,9 +64,9 @@ no_subject 保持原全图 baseline；不使用评测 regime 标签推断运行�
 
 同一 `review_only` 开关可以消费另一个严格绑定到 group 的 `quality_meta.dense_instance_recovery` packet。它只追加 `dense_visible_region_context` 与人工审阅条目；没有该 packet 时，legacy 输出完全相同。默认依旧关闭，不更改 keeper 或评分。
 
-生产入口为 `scripts/research/run_native_dense_slice.py`，使用已安装 YOLO 分割与 DINOv2-base：显式 native crop 不 resize/center-crop；14px patch 位于分割前景内且有 native 纹理，最多均匀采样512个。局部描述子互最近、cosine至少0.90且双向patch margin至少0.01；RANSAC支持至少12点、inlier ratio至少0.65、双方空间覆盖至少0.15、scale在0.8–1.25，inlier数量占较小patch样本数至少0.08。物体层面还要求竞争者分数间隔及几何一致性，不能靠位置替代外观唯一性。
+生产入口为 `scripts/research/run_native_dense_slice.py`，使用已安装 YOLO 分割与 DINOv2-base：显式 native crop 不 resize/center-crop；14px patch 的分割前景占比至少75%、native纹理足够，最多均匀采样512个。DINO先处理未中和背景的矩形crop，再筛选token，因此描述子仍可含背景及上下文信息，不能视作已消除背景混淆。局部描述子互最近、cosine至少0.90且双向patch margin至少0.01；RANSAC支持至少12点、inlier ratio至少0.65、双方空间覆盖至少0.15、scale在0.8–1.25，inlier数量占较小patch样本数至少0.08。物体竞争只在已通过上述门槛的eligible pairs中比较（至少1.5倍竞争分数，且IoU至少0.5），不等于所有潜在对象中的外观唯一性。
 
-这里允许 detector class0/77 跨类别参与候选，但**原始检测类别不是语义身份**。审阅范围明确为 `visible_region_only`；裁切边界、遮挡和身体完整度仍是 unknown，不把局部区域当完整身体、服装内人类身份或全组主体集合。该机制没有自动补保或删除权限。
+这里允许 detector class0/77 跨类别参与候选，但**原始检测类别不是语义身份**。审阅范围明确为 `visible_region_only`；裁切边界、遮挡和身体完整度仍是 unknown，不把局部区域当完整身体、服装内人类身份或全组主体集合。该机制没有自动补保或删除权限。新数据必须使用完整隔离的root，并核验slice里的source_db、config、原图路径和输入身份；不要复制旧dense-pilot，不能仅凭G018/F01、observation index或result文件存在判定缓存可复用。现有研究producer不是任意数据根之间可安全共享缓存的通用服务。
 
 本轮8组/19帧只新增G018 F01↔F02的一条服装角色区域对应、2个帧级观测。它与既有pose-v0的G020不同，合计2个proposed groups，keeper变更仍0。局部对不能宣称覆盖G018全部4帧。`dense-review/review.html` 是单独的自包含匹配点载体，原v0审阅页保留。
 

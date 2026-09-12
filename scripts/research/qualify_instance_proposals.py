@@ -8,7 +8,7 @@ import sys
 
 REPO=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(REPO))
-from src.instance_recovery import novel_detection, stable_tracks
+from src.instance_recovery import novel_detection, stable_tracks  # noqa: E402
 
 
 def main():

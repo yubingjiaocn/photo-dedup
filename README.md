@@ -1,5 +1,7 @@
 # Photo Dedup
 
+> Instance recovery 的完整日期评估与当前边界见 [最终验收](docs/FINAL_ACCEPTANCE.md)：pose/dense 默认关闭、仅供审阅；尚未证明净收益或通过 Windows 真机与新增人标安全验收。
+
 ## 5-minute Quick Start (Windows)
 
 This first run only creates a review page. It **never calls `execute_local` and

@@ -14,8 +14,8 @@ import yaml
 
 REPO=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(REPO))
-from src import stage2_cluster, stage3_report, phase_selection as ps
-from real_event_evaluate import assess
+from src import stage2_cluster, stage3_report, phase_selection as ps  # noqa: E402
+from real_event_evaluate import assess  # noqa: E402
 
 BASE=Path('/home/ubuntu/photo-dedup-eval')
 OLD=BASE/'astra-local-quality-20260910'
