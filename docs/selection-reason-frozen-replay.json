@@ -1,0 +1,1660 @@
+{
+  "schema_version": 1,
+  "source": "sealed 37-group A_off real-photo replay",
+  "source_root": "astra-instance-recovery-20260910",
+  "label_status": "sealed_blind_model_provisional",
+  "human_truth": false,
+  "safety_validated": false,
+  "metrics": {
+    "groups": 37,
+    "photos": 143,
+    "keepers": 63,
+    "explained": 15,
+    "coverage": 0.40540540540540543,
+    "abstained": 22,
+    "abstention_rate": 0.5945945945945946,
+    "endorsed_existing_keeper_groups": 0,
+    "close_call_no_endorsement_groups": 15,
+    "claims": 185,
+    "evidence_linked_claims": 185,
+    "evidence_link_integrity": 1.0,
+    "translated_evidence_items_checked": 139,
+    "translated_evidence_items_valid": 139,
+    "translated_evidence_self_consistency": 1.0,
+    "input_decision_digest_before": "6bcb0202670b1e7345774849a0c89c64d6494ae8aa35a02dc2d097a6c8c142aa",
+    "input_decision_digest_after": "6bcb0202670b1e7345774849a0c89c64d6494ae8aa35a02dc2d097a6c8c142aa",
+    "function_input_unchanged": true,
+    "provisional_issue_groups": 7,
+    "explained_provisional_issue_groups": 2,
+    "endorsed_provisional_issue_groups": 0
+  },
+  "by_regime": {
+    "no_subject": {
+      "groups": 20,
+      "explained": 9,
+      "abstained": 11
+    },
+    "single": {
+      "groups": 16,
+      "explained": 5,
+      "abstained": 11
+    },
+    "multi": {
+      "groups": 1,
+      "explained": 1,
+      "abstained": 0
+    }
+  },
+  "interpretation": "The replay translates frozen snapshots into review-shaped rows, then checks that generated statements resolve to those translated values. This is conversion self-consistency, not a direct live-SQLite fidelity proof. The sealed labels are model-provisional, so issue overlap is a warning signal, not human-truth accuracy.",
+  "examples": [
+    {
+      "case_id": "2026-03-29:G001",
+      "regime": "no_subject",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E005"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G001-F02 的持久化效用高出主保留项 0.005；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-03-29-G001-F02 的缓存质量分高 0.739，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E005"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 1,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 105,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 67,
+            "compared_to_file_id": 1,
+            "value": -0.005329
+          },
+          {
+            "id": "E004",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 67,
+            "compared_to_file_id": 1,
+            "value": {
+              "subject": 58.518223,
+              "compared_to": 57.779419,
+              "delta": 0.738804
+            }
+          },
+          {
+            "id": "E005",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 2,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            1,
+            105
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G010",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E006"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E006"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G010-F01 的持久化效用高出主保留项 0.012；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "text": "对手 2026-03-29-G010-F01 的人脸局部质量值高 0.031，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E006"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 2,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 19,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 147,
+            "value": true
+          },
+          {
+            "id": "E004",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 156,
+            "compared_to_file_id": 147,
+            "value": -0.011866
+          },
+          {
+            "id": "E005",
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 156,
+            "compared_to_file_id": 147,
+            "value": {
+              "subject": 0.551612,
+              "compared_to": 0.5205,
+              "delta": 0.031112
+            }
+          },
+          {
+            "id": "E006",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 3,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            2,
+            19,
+            147
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G012",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 1,
+        "selected_unacceptable": 1
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_CLOSE_CALL",
+          "text": "现有选择为：2026-03-29-G012-F02、2026-03-29-G012-F05；与对手差距很小，理由层不为该选择背书，请直接人工比较。",
+          "evidence_codes": [
+            "E001",
+            "E002"
+          ]
+        },
+        "support": [
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 2026-03-29-G012-F03，持久化效用差为 0.002。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 2026-03-29-G012-F03 高 0.533。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "LOW_UTILITY_MARGIN",
+            "text": "解释层将效用差低于 0.080 视为接近；请直接人工比较，这不等同于决策层的 LOW_MARGIN 判定。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_LOW",
+          "text": "解释证据置信度：low（0.45）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E003",
+            "E004"
+          ],
+          "level": "low",
+          "score": 0.45
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 27,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 145,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 4,
+            "compared_to_file_id": 27,
+            "value": 0.001658
+          },
+          {
+            "id": "E004",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 27,
+            "compared_to_file_id": 4,
+            "value": {
+              "subject": 76.563133,
+              "compared_to": 76.030525,
+              "delta": 0.532608
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            27,
+            145
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G013",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E007"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E007"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G013-F04 的持久化效用高出主保留项 0.023；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-03-29-G013-F15 的缓存质量分高 1.924，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E005"
+            ]
+          },
+          {
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "text": "对手 2026-03-29-G013-F04 的人脸局部质量值高 0.062，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E006"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E007"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 39,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 129,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 134,
+            "value": true
+          },
+          {
+            "id": "E004",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 94,
+            "compared_to_file_id": 39,
+            "value": -0.023092
+          },
+          {
+            "id": "E005",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 68,
+            "compared_to_file_id": 39,
+            "value": {
+              "subject": 77.09169,
+              "compared_to": 75.167198,
+              "delta": 1.924492
+            }
+          },
+          {
+            "id": "E006",
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 94,
+            "compared_to_file_id": 39,
+            "value": {
+              "subject": 0.62638,
+              "compared_to": 0.564871,
+              "delta": 0.061509
+            }
+          },
+          {
+            "id": "E007",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 3,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            39,
+            129,
+            134
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G007",
+      "regime": "no_subject",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_CLOSE_CALL",
+          "text": "现有选择为：2026-03-29-G007-F05、2026-03-29-G007-F03、2026-03-29-G007-F02；与对手差距很小，理由层不为该选择背书，请直接人工比较。",
+          "evidence_codes": [
+            "E001",
+            "E002",
+            "E003"
+          ]
+        },
+        "support": [
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 2026-03-29-G007-F04，持久化效用差为 0.012。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "text": "主保留项的人脸局部质量值比 2026-03-29-G007-F04 高 0.043。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "LOW_UTILITY_MARGIN",
+            "text": "解释层将效用差低于 0.080 视为接近；请直接人工比较，这不等同于决策层的 LOW_MARGIN 判定。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_LOW",
+          "text": "解释证据置信度：low（0.45）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E004",
+            "E005"
+          ],
+          "level": "low",
+          "score": 0.45
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 59,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 78,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 146,
+            "value": true
+          },
+          {
+            "id": "E004",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 167,
+            "compared_to_file_id": 146,
+            "value": 0.01167
+          },
+          {
+            "id": "E005",
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 146,
+            "compared_to_file_id": 167,
+            "value": {
+              "subject": 0.485128,
+              "compared_to": 0.442467,
+              "delta": 0.04266
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            59,
+            78,
+            146
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G005",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_CLOSE_CALL",
+          "text": "现有选择为：2026-03-29-G005-F03、2026-03-29-G005-F05；与对手差距很小，理由层不为该选择背书，请直接人工比较。",
+          "evidence_codes": [
+            "E001",
+            "E002"
+          ]
+        },
+        "support": [
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 2026-03-29-G005-F02，持久化效用差为 0.033。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 2026-03-29-G005-F02 高 2.625。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "text": "主保留项的人脸局部质量值比 2026-03-29-G005-F02 高 0.063。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "LOW_UTILITY_MARGIN",
+            "text": "解释层将效用差低于 0.080 视为接近；请直接人工比较，这不等同于决策层的 LOW_MARGIN 判定。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_LOW",
+          "text": "解释证据置信度：low（0.45）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E003",
+            "E004",
+            "E005"
+          ],
+          "level": "low",
+          "score": 0.45
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 121,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 141,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 93,
+            "compared_to_file_id": 141,
+            "value": 0.032896
+          },
+          {
+            "id": "E004",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 141,
+            "compared_to_file_id": 93,
+            "value": {
+              "subject": 69.239769,
+              "compared_to": 66.614876,
+              "delta": 2.624893
+            }
+          },
+          {
+            "id": "E005",
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 141,
+            "compared_to_file_id": 93,
+            "value": {
+              "subject": 0.551148,
+              "compared_to": 0.487906,
+              "delta": 0.063242
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            121,
+            141
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G011",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 1
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E006"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E006"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G011-F02 的持久化效用高出主保留项 0.019；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-03-29-G011-F02 的缓存质量分高 3.041，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "text": "对手 2026-03-29-G011-F02 的人脸局部质量值高 0.012，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E006"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 15,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 88,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 161,
+            "compared_to_file_id": 15,
+            "value": -0.018838
+          },
+          {
+            "id": "E004",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 161,
+            "compared_to_file_id": 15,
+            "value": {
+              "subject": 62.899708,
+              "compared_to": 59.859161,
+              "delta": 3.040546
+            }
+          },
+          {
+            "id": "E005",
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 161,
+            "compared_to_file_id": 15,
+            "value": {
+              "subject": 0.491167,
+              "compared_to": 0.479632,
+              "delta": 0.011535
+            }
+          },
+          {
+            "id": "E006",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 2,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            15,
+            88
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G014",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": false,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E004"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G014-F03 的持久化效用高出主保留项 0.005；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E002"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-03-29-G014-F03 的缓存质量分高 1.425，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E004"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 16,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 33,
+            "compared_to_file_id": 16,
+            "value": -0.004684
+          },
+          {
+            "id": "E003",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 33,
+            "compared_to_file_id": 16,
+            "value": {
+              "subject": 75.955376,
+              "compared_to": 74.529945,
+              "delta": 1.42543
+            }
+          },
+          {
+            "id": "E004",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 1,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            16
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-03-29:G008",
+      "regime": "no_subject",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 1,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E004"
+          ]
+        },
+        "support": [
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 2026-03-29-G008-F02 高 0.525。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-03-29-G008-F02 的持久化效用高出主保留项 0.095；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E002"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E004"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 118,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 60,
+            "compared_to_file_id": 118,
+            "value": -0.095225
+          },
+          {
+            "id": "E003",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 118,
+            "compared_to_file_id": 60,
+            "value": {
+              "subject": 74.114159,
+              "compared_to": 73.588791,
+              "delta": 0.525368
+            }
+          },
+          {
+            "id": "E004",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 1,
+              "primary_keeper_resolved": true,
+              "support_count": 1,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            118
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-05-27:G005",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 1
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_CLOSE_CALL",
+          "text": "现有选择为：2026-05-27-G005-F02、2026-05-27-G005-F03；与对手差距很小，理由层不为该选择背书，请直接人工比较。",
+          "evidence_codes": [
+            "E001",
+            "E002"
+          ]
+        },
+        "support": [
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 2026-05-27-G005-F04，持久化效用差为 0.003。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "text": "主保留项的人脸局部质量值比 2026-05-27-G005-F04 高 0.015。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "LOW_UTILITY_MARGIN",
+            "text": "解释层将效用差低于 0.080 视为接近；请直接人工比较，这不等同于决策层的 LOW_MARGIN 判定。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_LOW",
+          "text": "解释证据置信度：low（0.45）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E003",
+            "E004"
+          ],
+          "level": "low",
+          "score": 0.45
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 14,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 45,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 18,
+            "compared_to_file_id": 14,
+            "value": 0.003134
+          },
+          {
+            "id": "E004",
+            "code": "FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 14,
+            "compared_to_file_id": 18,
+            "value": {
+              "subject": 0.636899,
+              "compared_to": 0.621769,
+              "delta": 0.01513
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            14,
+            45
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-05-27:G013",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 1,
+        "quality_wrong": 0,
+        "selected_unacceptable": 0
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E005"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-05-27-G013-F02 的持久化效用高出主保留项 0.006；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-05-27-G013-F02 的缓存质量分高 0.643，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E005"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 8,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 139,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 141,
+            "compared_to_file_id": 8,
+            "value": -0.00634
+          },
+          {
+            "id": "E004",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 141,
+            "compared_to_file_id": 8,
+            "value": {
+              "subject": 70.258232,
+              "compared_to": 69.61499,
+              "delta": 0.643242
+            }
+          },
+          {
+            "id": "E005",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 2,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            8,
+            139
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-05-27:G014",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 1
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E005"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-05-27-G014-F01 的持久化效用高出主保留项 0.011；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "text": "对手 2026-05-27-G014-F01 的缓存质量分高 1.736，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E005"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 15,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 75,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 89,
+            "compared_to_file_id": 75,
+            "value": -0.011175
+          },
+          {
+            "id": "E004",
+            "code": "RIVAL_QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 89,
+            "compared_to_file_id": 75,
+            "value": {
+              "subject": 72.676666,
+              "compared_to": 70.940598,
+              "delta": 1.736069
+            }
+          },
+          {
+            "id": "E005",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 2,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            15,
+            75
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "2026-05-27:G015",
+      "regime": "single",
+      "label_status": "model_provisional",
+      "provisional_issue": true,
+      "provisional_metrics": {
+        "phase_misses": 0,
+        "quality_wrong": 0,
+        "selected_unacceptable": 1
+      },
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E006"
+          ]
+        },
+        "support": [
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 2026-05-27-G015-F02 高 1.031。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "NEGATIVE_PERSISTED_MARGIN",
+            "text": "2026-05-27-G015-F02 的持久化效用高出主保留项 0.002；理由层拒绝解释这一矛盾。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "text": "对手 2026-05-27-G015-F02 的人脸局部质量值高 0.024，这是人工复核时应检查的取舍。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E006"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 49,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 98,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 76,
+            "compared_to_file_id": 49,
+            "value": -0.002149
+          },
+          {
+            "id": "E004",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 49,
+            "compared_to_file_id": 76,
+            "value": {
+              "subject": 68.930656,
+              "compared_to": 67.89933,
+              "delta": 1.031326
+            }
+          },
+          {
+            "id": "E005",
+            "code": "RIVAL_FACE_QUALITY_ADVANTAGE",
+            "source": "features.quality_meta.face_quality",
+            "subject_file_id": 76,
+            "compared_to_file_id": 49,
+            "value": {
+              "subject": 0.567535,
+              "compared_to": 0.543066,
+              "delta": 0.024468
+            }
+          },
+          {
+            "id": "E006",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 2,
+              "primary_keeper_resolved": true,
+              "support_count": 1,
+              "contradiction": true
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            49,
+            98
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    }
+  ]
+}

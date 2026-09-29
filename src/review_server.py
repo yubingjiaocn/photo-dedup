@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import db, review_assets, review_state, root_scope, thumbnails
+from . import db, review_assets, review_state, root_scope, selection_reason, thumbnails
 
 DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
@@ -93,9 +93,11 @@ def _public_item(row: Any) -> Dict[str, Any]:
 
 
 def _group_items(rows: List[Any]) -> List[Dict[str, Any]]:
-    """Fold flat (group, member) rows into one entry per group, order preserved."""
+    """Fold rows into groups and add a read-only shadow explanation."""
     groups: List[Dict[str, Any]] = []
     index: Dict[int, Dict[str, Any]] = {}
+    reason_rows: Dict[int, List[Dict[str, Any]]] = {}
+    reason_groups: Dict[int, Dict[str, Any]] = {}
     for row in rows:
         group_id = int(row["group_id"])
         entry = index.get(group_id)
@@ -104,7 +106,19 @@ def _group_items(rows: List[Any]) -> List[Dict[str, Any]]:
                      "member_count": row["member_count"], "members": []}
             index[group_id] = entry
             groups.append(entry)
+            reason_rows[group_id] = []
+            reason_groups[group_id] = {
+                key: row[key] for key in (
+                    "group_id", "group_type", "keep_file_id", "decision_state",
+                    "group_confidence", "policy_version",
+                ) if key in row.keys()
+            }
+        reason_rows[group_id].append(dict(row))
         entry["members"].append(_public_item(row))
+    for entry in groups:
+        group_id = int(entry["group_id"])
+        entry["selection_reason"] = selection_reason.explain_group(
+            reason_groups[group_id], reason_rows[group_id])
     return groups
 
 

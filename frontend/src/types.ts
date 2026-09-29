@@ -34,6 +34,44 @@ export interface Group {
   group_type: string;
   member_count: number;
   members: Item[];
+  selection_reason?: SelectionReason;
+}
+
+export interface ReasonStatement {
+  code: string;
+  text: string;
+  evidence_codes: string[];
+}
+
+export interface SelectionReason {
+  schema_version: number;
+  generator: string;
+  mode: 'shadow_review_only';
+  status: 'explained' | 'abstained';
+  recommendation: ReasonStatement;
+  support: ReasonStatement[];
+  tradeoffs: ReasonStatement[];
+  confidence: ReasonStatement & {
+    level: 'high' | 'medium' | 'low' | 'unknown';
+    score: number | null;
+  };
+  human_confirmation: { required: true; code: string; text: string };
+  evidence: Array<{
+    id: string;
+    code: string;
+    source: string;
+    subject_file_id?: number;
+    compared_to_file_id?: number;
+    value?: unknown;
+  }>;
+  invariants: {
+    keeper_file_ids: number[];
+    changes_keeper: false;
+    changes_sorting: false;
+    changes_routing: false;
+    deletion_authority: 'none';
+    model_calls: 0;
+  };
 }
 
 /** The one recorded human decision per group (subset the UI reads). */

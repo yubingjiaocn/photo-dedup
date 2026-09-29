@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "kind": "selection_reason_shadow_smoke",
+  "source_basis": [
+    "tests/test_offline_evaluation.py synthetic-event/g1 keeper layout",
+    "tests/test_review_server.py production-shaped review rows",
+    "fixtures/scene-benchmark/manifest.json conservative abstention cases"
+  ],
+  "cases": [
+    {
+      "case_id": "quality-and-tradeoff",
+      "group": {"group_id": 1, "group_type": "burst", "keep_file_id": 101},
+      "members": [
+        {"file_id": 101, "basename": "M1.jpg", "is_keep": 1, "decision": "KEEP", "reason": "GROUP_KEEPER", "quality_score": 84.0, "quality_meta": "{\"backend\":\"torch\",\"clipiqa\":0.72}", "evidence_json": "{\"utility_score\":0.82,\"pair_margin\":0.0}", "width": 3000, "height": 2000, "face_count": 0},
+        {"file_id": 102, "basename": "M2.jpg", "is_keep": 0, "decision": "MAYBE", "reason": "RELATIVE_ONLY", "quality_score": 75.0, "quality_meta": "{\"backend\":\"torch\",\"clipiqa\":0.66}", "evidence_json": "{\"utility_score\":0.67,\"pair_margin\":0.15}", "width": 6000, "height": 4000, "face_count": 0}
+      ]
+    },
+    {
+      "case_id": "byte-identical",
+      "group": {"group_id": 2, "group_type": "sha_exact", "keep_file_id": 201},
+      "members": [
+        {"file_id": 201, "basename": "copy-a.jpg", "is_keep": 1, "decision": "KEEP", "reason": "GROUP_KEEPER", "quality_score": 70.0, "quality_meta": "{\"backend\":\"stub\"}", "evidence_json": "{\"utility_score\":0.7,\"pair_margin\":0.0}", "width": 4000, "height": 3000, "face_count": 0},
+        {"file_id": 202, "basename": "copy-b.jpg", "is_keep": 0, "decision": "AUTO_REMOVE", "reason": "BYTE_IDENTICAL", "quality_score": 70.0, "quality_meta": "{\"backend\":\"stub\"}", "evidence_json": "{\"utility_score\":0.7,\"pair_margin\":0.0}", "width": 4000, "height": 3000, "face_count": 0}
+      ]
+    },
+    {
+      "case_id": "protected-extra-keeper",
+      "group": {"group_id": 3, "group_type": "burst", "keep_file_id": 301},
+      "members": [
+        {"file_id": 301, "basename": "phase-a.jpg", "is_keep": 1, "decision": "KEEP", "reason": "GROUP_KEEPER", "quality_score": 80.0, "quality_meta": "{}", "evidence_json": "{\"utility_score\":0.8,\"pair_margin\":0.0}", "width": 4000, "height": 3000, "face_count": 1},
+        {"file_id": 302, "basename": "phase-b.jpg", "is_keep": 1, "decision": "KEEP", "reason": "POSE_VARIANT_KEEPER", "quality_score": 77.0, "quality_meta": "{}", "evidence_json": "{\"utility_score\":0.76,\"pair_margin\":0.04,\"pose_variation_protection\":true}", "width": 4000, "height": 3000, "face_count": 1},
+        {"file_id": 303, "basename": "other.jpg", "is_keep": 0, "decision": "MAYBE", "reason": "RELATIVE_ONLY", "quality_score": 72.0, "quality_meta": "{}", "evidence_json": "{\"utility_score\":0.65,\"pair_margin\":0.15}", "width": 4000, "height": 3000, "face_count": 1}
+      ]
+    },
+    {
+      "case_id": "insufficient-evidence",
+      "group": {"group_id": 4, "group_type": "phash_near", "keep_file_id": 401},
+      "members": [
+        {"file_id": 401, "basename": "unknown-a.jpg", "is_keep": 1, "decision": "KEEP", "reason": "GROUP_KEEPER", "quality_score": null, "quality_meta": "{}", "evidence_json": "{}", "width": null, "height": null, "face_count": null},
+        {"file_id": 402, "basename": "unknown-b.jpg", "is_keep": 0, "decision": "UNKNOWN", "reason": "FEATURE_MISSING", "quality_score": null, "quality_meta": "{}", "evidence_json": "{}", "width": null, "height": null, "face_count": null}
+      ]
+    }
+  ]
+}

@@ -241,14 +241,16 @@ def group_page(conn: sqlite3.Connection, offset: int, limit: int,
     counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+               g.decision_state, g.confidence AS group_confidence, g.policy_version,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
+               gm.confidence AS member_confidence, gm.evidence_json,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               fe.quality_score, fe.face_count,
+               fe.quality_score, fe.quality_meta, fe.face_count,
                t.status AS thumb_status, t.error AS thumb_error
         FROM (
             SELECT g2.id FROM groups g2
@@ -284,14 +286,16 @@ def group_page_by_id(conn: sqlite3.Connection, group_id: int,
     counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+               g.decision_state, g.confidence AS group_confidence, g.policy_version,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
+               gm.confidence AS member_confidence, gm.evidence_json,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               f.file_kind, fe.quality_score, fe.face_count,
+               f.file_kind, fe.quality_score, fe.quality_meta, fe.face_count,
                t.status AS thumb_status, t.error AS thumb_error
         FROM groups g
         JOIN group_members gm ON gm.group_id = g.id
@@ -344,14 +348,16 @@ def group_page_by_ids(conn: sqlite3.Connection, group_ids: Sequence[int],
     predicate, params = _scope_sql(scope, "sf")
     rows = conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+               g.decision_state, g.confidence AS group_confidence, g.policy_version,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
+               gm.confidence AS member_confidence, gm.evidence_json,
                f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               f.file_kind, fe.quality_score, fe.face_count,
+               f.file_kind, fe.quality_score, fe.quality_meta, fe.face_count,
                t.status AS thumb_status, t.error AS thumb_error
         FROM groups g
         JOIN group_members gm ON gm.group_id = g.id

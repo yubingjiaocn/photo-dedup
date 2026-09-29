@@ -1,0 +1,460 @@
+{
+  "schema_version": 1,
+  "generator": "deterministic-selection-reason-v1",
+  "fixture_kind": "selection_reason_shadow_smoke",
+  "source_basis": [
+    "tests/test_offline_evaluation.py synthetic-event/g1 keeper layout",
+    "tests/test_review_server.py production-shaped review rows",
+    "fixtures/scene-benchmark/manifest.json conservative abstention cases"
+  ],
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-7.0.0-1013-aws-x86_64-with-glibc2.39"
+  },
+  "metrics": {
+    "cases": 4,
+    "explained": 3,
+    "coverage": 0.75,
+    "abstained": 1,
+    "abstention_rate": 0.25,
+    "claims": 20,
+    "faithful_claims": 20,
+    "faithfulness": 1.0,
+    "decision_digest_before": "81ef3bea261b20b22f037d78125413ab9be1efc7ffe013fc660b6f377cdc5bd1",
+    "decision_digest_after": "81ef3bea261b20b22f037d78125413ab9be1efc7ffe013fc660b6f377cdc5bd1",
+    "decision_unchanged": true,
+    "benchmark_calls": 32000,
+    "benchmark_seconds": 1.1420529269962572,
+    "microseconds_per_group": 35.689153968633036,
+    "model_calls": 0
+  },
+  "limitations": [
+    "Checked-in production-shaped synthetic smoke cases; not a real-photo accuracy estimate.",
+    "Human preference, expression, eye state, occlusion, composition and narrative remain unverified.",
+    "Confidence is explanation sufficiency, not keeper correctness or deletion safety."
+  ],
+  "cases": [
+    {
+      "case_id": "quality-and-tradeoff",
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_EXISTING_KEEPERS",
+          "text": "建议人工优先复核并暂按现有选择保留：M1.jpg。",
+          "evidence_codes": [
+            "E001"
+          ]
+        },
+        "support": [
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 M2.jpg，持久化效用差为 0.150。",
+            "evidence_codes": [
+              "E002"
+            ]
+          },
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 M2.jpg 高 9.000。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "CLIPIQA_ADVANTAGE",
+            "text": "主保留项的CLIP-IQA比 M2.jpg 高 0.060。",
+            "evidence_codes": [
+              "E004"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "RIVAL_RESOLUTION_ADVANTAGE",
+            "text": "对手 M2.jpg 的像素数是主保留项的 4.00 倍。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_MEDIUM",
+          "text": "解释证据置信度：medium（0.72）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E002",
+            "E003",
+            "E004"
+          ],
+          "level": "medium",
+          "score": 0.72
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 101,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 102,
+            "compared_to_file_id": 101,
+            "value": 0.15
+          },
+          {
+            "id": "E003",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 101,
+            "compared_to_file_id": 102,
+            "value": {
+              "subject": 84.0,
+              "compared_to": 75.0,
+              "delta": 9.0
+            }
+          },
+          {
+            "id": "E004",
+            "code": "CLIPIQA_ADVANTAGE",
+            "source": "features.quality_meta.clipiqa",
+            "subject_file_id": 101,
+            "compared_to_file_id": 102,
+            "value": {
+              "subject": 0.72,
+              "compared_to": 0.66,
+              "delta": 0.06
+            }
+          },
+          {
+            "id": "E005",
+            "code": "RIVAL_RESOLUTION_ADVANTAGE",
+            "source": "files.width*files.height",
+            "subject_file_id": 102,
+            "compared_to_file_id": 101,
+            "value": {
+              "subject_pixels": 24000000,
+              "compared_to_pixels": 6000000,
+              "ratio": 4.0
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            101
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "byte-identical",
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_EXISTING_KEEPERS",
+          "text": "建议人工优先复核并暂按现有选择保留：copy-a.jpg。",
+          "evidence_codes": [
+            "E001"
+          ]
+        },
+        "support": [
+          {
+            "code": "BYTE_IDENTICAL_PEERS",
+            "text": "1 个未保留成员被既有决策层记录为字节完全相同；理由层不新增删除权限。",
+            "evidence_codes": [
+              "E002"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "RIVAL_ADVANTAGE_ABSTAIN",
+            "text": "现有结构化字段不足以确认对手优势；这不等于对手没有优势。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_HIGH",
+          "text": "解释证据置信度：high（0.90）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E002"
+          ],
+          "level": "high",
+          "score": 0.9
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 201,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "BYTE_IDENTICAL_DECISION_EVIDENCE",
+            "source": "group_members.reason",
+            "subject_file_id": 202,
+            "compared_to_file_id": 201,
+            "value": "BYTE_IDENTICAL"
+          },
+          {
+            "id": "E003",
+            "code": "NO_VERIFIABLE_RIVAL_ADVANTAGE",
+            "source": "derived.comparable_rival_metrics",
+            "value": {
+              "rival_count": 1
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            201
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "protected-extra-keeper",
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "explained",
+        "recommendation": {
+          "code": "REVIEW_EXISTING_KEEPERS",
+          "text": "建议人工优先复核并暂按现有选择保留：phase-a.jpg、phase-b.jpg。",
+          "evidence_codes": [
+            "E001",
+            "E002"
+          ]
+        },
+        "support": [
+          {
+            "code": "POSE_VARIANT_PROTECTION",
+            "text": "phase-b.jpg 是已记录的姿态变化保护项；姿态证据没有语义阶段或删除权限。",
+            "evidence_codes": [
+              "E003"
+            ]
+          },
+          {
+            "code": "UTILITY_MARGIN",
+            "text": "相对所选未保留对手 other.jpg，持久化效用差为 0.150。",
+            "evidence_codes": [
+              "E004"
+            ]
+          },
+          {
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "text": "主保留项的缓存质量分比 other.jpg 高 8.000。",
+            "evidence_codes": [
+              "E005"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "RIVAL_ADVANTAGE_ABSTAIN",
+            "text": "现有结构化字段不足以确认对手优势；这不等于对手没有优势。",
+            "evidence_codes": [
+              "E006"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_MEDIUM",
+          "text": "解释证据置信度：medium（0.72）；它不是审美正确率或删除安全概率。",
+          "evidence_codes": [
+            "E004",
+            "E005"
+          ],
+          "level": "medium",
+          "score": 0.72
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 301,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 302,
+            "value": true
+          },
+          {
+            "id": "E003",
+            "code": "POSE_VARIANT_PROTECTION",
+            "source": "group_members.reason",
+            "subject_file_id": 302,
+            "value": "POSE_VARIANT_KEEPER"
+          },
+          {
+            "id": "E004",
+            "code": "PERSISTED_PAIR_MARGIN",
+            "source": "group_members.evidence_json.pair_margin",
+            "subject_file_id": 303,
+            "compared_to_file_id": 301,
+            "value": 0.15
+          },
+          {
+            "id": "E005",
+            "code": "QUALITY_SCORE_ADVANTAGE",
+            "source": "features.quality_score",
+            "subject_file_id": 301,
+            "compared_to_file_id": 303,
+            "value": {
+              "subject": 80.0,
+              "compared_to": 72.0,
+              "delta": 8.0
+            }
+          },
+          {
+            "id": "E006",
+            "code": "NO_VERIFIABLE_RIVAL_ADVANTAGE",
+            "source": "derived.comparable_rival_metrics",
+            "value": {
+              "rival_count": 1
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            301,
+            302
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    },
+    {
+      "case_id": "insufficient-evidence",
+      "reason": {
+        "schema_version": 1,
+        "generator": "deterministic-selection-reason-v1",
+        "mode": "shadow_review_only",
+        "status": "abstained",
+        "recommendation": {
+          "code": "ABSTAIN_INSUFFICIENT_EVIDENCE",
+          "text": "结构化证据不足或相互矛盾，理由层弃权；请直接人工比较，不据此改变现有选择。",
+          "evidence_codes": [
+            "E003"
+          ]
+        },
+        "support": [
+          {
+            "code": "SUPPORT_ABSTAIN",
+            "text": "没有足够的可核验支持项可用于生成选片理由。",
+            "evidence_codes": [
+              "E003"
+            ]
+          }
+        ],
+        "tradeoffs": [
+          {
+            "code": "RIVAL_ADVANTAGE_ABSTAIN",
+            "text": "现有结构化字段不足以确认对手优势；这不等于对手没有优势。",
+            "evidence_codes": [
+              "E002"
+            ]
+          }
+        ],
+        "confidence": {
+          "code": "EXPLANATION_CONFIDENCE_UNKNOWN",
+          "text": "解释证据置信度：unknown；必须人工确认。",
+          "evidence_codes": [
+            "E003"
+          ],
+          "level": "unknown",
+          "score": null
+        },
+        "human_confirmation": {
+          "required": true,
+          "code": "HUMAN_CONFIRMATION_REQUIRED",
+          "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。"
+        },
+        "evidence": [
+          {
+            "id": "E001",
+            "code": "PERSISTED_KEEPER",
+            "source": "group_members.is_keep",
+            "subject_file_id": 401,
+            "value": true
+          },
+          {
+            "id": "E002",
+            "code": "NO_VERIFIABLE_RIVAL_ADVANTAGE",
+            "source": "derived.comparable_rival_metrics",
+            "value": {
+              "rival_count": 1
+            }
+          },
+          {
+            "id": "E003",
+            "code": "EXPLANATION_EVIDENCE_INSUFFICIENT",
+            "source": "derived.explanation_gate",
+            "value": {
+              "keeper_count": 1,
+              "primary_keeper_resolved": true,
+              "support_count": 0,
+              "contradiction": false
+            }
+          }
+        ],
+        "invariants": {
+          "keeper_file_ids": [
+            401
+          ],
+          "changes_keeper": false,
+          "changes_sorting": false,
+          "changes_routing": false,
+          "deletion_authority": "none",
+          "model_calls": 0
+        }
+      }
+    }
+  ]
+}

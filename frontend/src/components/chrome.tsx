@@ -186,8 +186,21 @@ export function Evidence({ state }: { state: State }) {
       </div>
     );
   }
+  const reason = group?.selection_reason;
   return (
     <div class="evidence open" id="evidence">
+      {reason && (
+        <section class="selection-reason" data-reason-status={reason.status}>
+          <h3>人类可读选片理由（shadow）</h3>
+          <p>{reason.recommendation.text}<span class="enum">{reason.recommendation.code} · {reason.recommendation.evidence_codes.join(', ')}</span></p>
+          <h4>支持理由</h4>
+          <ul>{reason.support.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
+          <h4>对手优势 / 取舍</h4>
+          <ul>{reason.tradeoffs.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
+          <p>{reason.confidence.text}<span class="enum">{reason.confidence.code}</span></p>
+          <p class="warning">{reason.human_confirmation.text}</p>
+        </section>
+      )}
       <table>
         <tr>
           <th>照片</th>
