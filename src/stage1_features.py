@@ -73,7 +73,7 @@ import numpy as np
 from PIL import Image
 
 from .config import Config, load_config
-from . import db, root_scope
+from . import db, root_scope, semantic_observer
 from . import quality as Q
 from . import exposure
 from . import decision
@@ -242,12 +242,20 @@ def _consume_batch(
             with phase("eye_detection"):
                 try:
                     meta["eye_detection"] = eye_detector.analyze(
-                        image, expected_face_count=len(faces)
+                        image, expected_face_count=len(faces), face_regions=faces
                     )
                 except Exception:
                     meta["eye_detection"] = eye_detection.unavailable_result(
                         "DETECTOR_INFERENCE_FAILED"
                     )
+        eye_result = meta.get("eye_detection") or eye_detection.unavailable_result()
+        meta["semantic_observer"] = semantic_observer.frame_observations(
+            frame_alias=str(row["id"]), image_size=image.size,
+            eye_result=eye_result, yunet_faces=faces,
+            face_quality=meta.get("face_quality"), sharpness=meta.get("sharpness"),
+            exposure_metrics=meta["exposure"],
+            exposure_class=exposure.classify(meta["exposure"]),
+        )
         # Shadow-only, additive metadata.  The provider is intentionally None
         # until SigLIP is implemented; SceneRouter then emits MODEL_UNAVAILABLE
         # without model loading, downloads, or network access.

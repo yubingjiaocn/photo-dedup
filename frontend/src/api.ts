@@ -61,6 +61,7 @@ export interface ActionPayload {
   action: string;
   group_id?: number;
   file_id?: number;
+  file_ids?: number[];
   context_file_id?: number;
 }
 

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "holdout-incidents-v1.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "holdout-incidents-v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+    },
+    "incidents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "const": "2026-04-04-G001"
+          },
+          "incident_type": {
+            "const": "bytes_copied_not_decoded"
+          },
+          "source_test": {
+            "const": "tests/test_cloud_review.py::test_changed_raw_batch_refuses_existing_action"
+          },
+          "read_operation": {
+            "const": "shutil.copytree: copy bytes only, before holdout skip"
+          },
+          "decoded": {
+            "const": false
+          },
+          "information_flow": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "const": false
+              },
+              "model": {
+                "const": false
+              },
+              "training": {
+                "const": false
+              },
+              "prompt": {
+                "const": false
+              },
+              "shadow": {
+                "const": false
+              }
+            },
+            "required": [
+              "label",
+              "model",
+              "training",
+              "prompt",
+              "shadow"
+            ],
+            "additionalProperties": false
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date"
+          },
+          "occurrence_time_precision": {
+            "const": "day; exact incident timestamp was not captured"
+          },
+          "fixture_fix_verified_by": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+          },
+          "fixture_fix_time_evidence": {
+            "const": "broad-final.log completion mtime; upper bound, not exact edit time"
+          },
+          "fixed_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+          },
+          "fix_scope": {
+            "const": "restore missing incident record and add existence/schema/index regression"
+          },
+          "residue": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "absent"
+              },
+              "checked_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+              },
+              "method": {
+                "const": "directory names only; no image or label content read"
+              },
+              "scope": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "const": "/tmp/pytest-of-ubuntu/**/test_changed_raw_batch*/batch/2026-04-04-G001"
+                  },
+                  {
+                    "const": "artifacts/**/test_changed_raw_batch*/batch/2026-04-04-G001"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "status",
+              "checked_at",
+              "method",
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          "disposition": {
+            "const": "retain_in_64_holdout_with_63-excluding sensitivity report"
+          },
+          "evaluation_policy": {
+            "type": "object",
+            "properties": {
+              "holdout_groups_retained": {
+                "const": 64
+              },
+              "training_allowed": {
+                "const": false
+              },
+              "shadow_allowed": {
+                "const": false
+              },
+              "required_reports": {
+                "const": [
+                  {
+                    "name": "all_holdout",
+                    "groups": 64,
+                    "excluded_groups": []
+                  },
+                  {
+                    "name": "exclude-G001_sensitivity",
+                    "groups": 63,
+                    "excluded_groups": [
+                      "2026-04-04-G001"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "holdout_groups_retained",
+              "training_allowed",
+              "shadow_allowed",
+              "required_reports"
+            ],
+            "additionalProperties": false
+          },
+          "audit_trail_ref": {
+            "const": "AUDIT_TRAIL.md#继承测试的-holdout-文件复制"
+          }
+        },
+        "required": [
+          "group",
+          "incident_type",
+          "source_test",
+          "read_operation",
+          "decoded",
+          "information_flow",
+          "occurred_at",
+          "occurrence_time_precision",
+          "fixture_fix_verified_by",
+          "fixture_fix_time_evidence",
+          "fixed_at",
+          "fix_scope",
+          "residue",
+          "disposition",
+          "evaluation_policy",
+          "audit_trail_ref"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 1
+    }
+  },
+  "required": [
+    "schema",
+    "version",
+    "recorded_at",
+    "incidents"
+  ],
+  "additionalProperties": false
+}

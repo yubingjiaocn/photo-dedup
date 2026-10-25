@@ -52,3 +52,8 @@ Thumbs.db
 # Local private calibration photos
 testdata/
 .worktrees/
+
+# Local evaluation/run outputs (contain photo-derived images and provider
+# responses) and packaged trial builds: never committed, repo is public.
+artifacts/
+work/

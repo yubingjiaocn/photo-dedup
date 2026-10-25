@@ -1,6 +1,10 @@
 # Photo Dedup
 
+> 产品定位、用户档位、核心流程和发布门禁见 [语义选片助手 PRD](docs/PRD.md)。当前产品是 review-first 选片助手，不是无人值守永久删除器。
+>
 > Instance recovery 的完整日期评估与当前边界见 [最终验收](docs/FINAL_ACCEPTANCE.md)：pose/dense 默认关闭、仅供审阅；尚未证明净收益或通过 Windows 真机与新增人标安全验收。
+
+> **本地试用从这里开始：**`git clone` 本仓库 → `.\setup_windows.ps1` → `.\start-local-review.ps1 -Root <日期文件夹> -Output <仓库外的输出目录>`。完整步骤（继续审阅、多选保存、导出、可选 VLM 建议）见 [LOCAL_TRIAL.md](LOCAL_TRIAL.md)。下方 Quick Start 是底层 `run_pipeline` 命令，调试时再用。
 
 ## 5-minute Quick Start (Windows)
 
@@ -62,6 +66,13 @@ never moves or deletes a photo**.
    error tracebacks. If something fails, send that file for diagnosis. The log
    includes local root/output paths and may include filenames from errors, but
    never image bytes or embeddings.
+
+Optional independent CV/VLM review judgments can be prepared or generated for
+arbitrary review group IDs without changing keeper or deletion state. The job
+uses a path-redacted sidecar cache and requires an explicitly supplied
+Sonnet/Terra-class model for hard groups. See
+[Offline CV/VLM review judgments](docs/VLM_REVIEW_WORKFLOW.md) for exact commands,
+bounds, cache behavior, and the safety boundary.
 
 The server uses only Python's standard library, listens on `127.0.0.1`, and
 serves the output folder plus a read-only paged API. To reopen an existing
@@ -782,3 +793,18 @@ git add frontend/src frontend/dist   # commit source and the rebuilt artifact to
 that touches focus, zoom gestures, request races or which URLs the page requests,
 run the real-browser pass: `python3 frontend/harness/run_all.py` (or
 `scripts/verification/album_viewer_browser.py`, which forwards to it).
+
+
+### Local learning loop
+
+Cloud-review saves feed an append-only journal and a local file-exchange workflow:
+review-only training bundle → manual cloud training → data-only learner import →
+shadow comparison. The current validated bundle is `output/learning-mvp/bundle-v3`
+(130 development groups / 336 review images); `output/learning-mvp/current.json`
+is the current pointer. The previously validated bundle-v2 remains unchanged.
+The 64 holdout groups are excluded by pinned registry and source identity. Default
+review automation rejects holdout manifests before image reads; explicit Willy
+manual review remains available with `--manual-holdout-review`, with sealed saves.
+See [LEARNING_LOOP.md](docs/LEARNING_LOOP.md) for recovery, import, rollback toggle,
+and the required 64/63 holdout sensitivity reporting. No automatic upload, model
+calls, original changes, or deletion authority are part of this workflow.

@@ -33,5 +33,9 @@ opencv-python>=4.9        # YuNet face detection (cv2.FaceDetectorYN) + I/O
 safetensors>=0.4          # transformers weight loading
 huggingface_hub>=0.24     # model download + snapshot cache
 
+# ---- Optional cloud review --------------------------------------------------
+boto3>=1.35               # explicit Bedrock VLM review adapter
+
 # ---- Dev / test -------------------------------------------------------------
 pytest>=8.0
+jsonschema>=4.23,<5      # validate published two-pass request/response schemas

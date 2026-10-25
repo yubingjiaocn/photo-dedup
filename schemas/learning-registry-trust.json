@@ -1,0 +1,9 @@
+{
+  "schema": "learning-registry-trust-v1",
+  "dataset_id": "willy-review-2026-09-30",
+  "frozen_sha256": "352ccfd0462ced7328ef6aa7bc84c447ad2702d9fc16767a1feb785a308968ed",
+  "split_sha256": [
+    "524261747c355bd72f18054a55950f278cdec8e6f4c59b76e73a94a57f0ad38c",
+    "3126c382adfc9a75fa1a8432da0924c9a3370e4249da11f8eedfa78515120637"
+  ]
+}

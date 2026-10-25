@@ -55,9 +55,15 @@ def _name(member: Mapping[str, Any]) -> str:
     return f"照片 #{file_id}" if file_id is not None else "未知照片"
 
 
-def _metrics(member: Mapping[str, Any]) -> dict[str, float | None]:
+def _metrics(member: Mapping[str, Any]) -> dict[str, float | str | None]:
     meta = _object(member.get("quality_meta"))
     evidence = _object(member.get("evidence_json"))
+    eye = _object(meta.get("eye_detection"))
+    eye_status = eye.get("status")
+    if eye_status not in {
+        "NO_FACE", "ALL_OPEN", "HAS_CLOSED_EYES", "HAS_MAYBE", "UNKNOWN",
+    }:
+        eye_status = None
     width, height = _id(member.get("width")), _id(member.get("height"))
     return {
         "quality_score": _finite(member.get("quality_score"), 0, 100),
@@ -66,6 +72,7 @@ def _metrics(member: Mapping[str, Any]) -> dict[str, float | None]:
         "resolution_pixels": float(width * height) if width and height else None,
         "utility_score": _finite(evidence.get("utility_score")),
         "pair_margin": _finite(evidence.get("pair_margin")),
+        "eye_status": eye_status,
     }
 
 
@@ -91,15 +98,82 @@ def _claim(code: str, text: str, refs: Sequence[str]) -> dict[str, Any]:
     return {"code": code, "text": text, "evidence_codes": list(refs)}
 
 
+_FOCUS_PRIORITY = {
+    "RIVAL_EYE_STATE_ADVANTAGE": 100,
+    "EYE_STATE_ADVANTAGE": 98,
+    "RIVAL_CLOSED_EYES_FLAG": 96,
+    "RIVAL_FACE_QUALITY_ADVANTAGE": 90,
+    "FACE_QUALITY_ADVANTAGE": 88,
+    "RIVAL_QUALITY_SCORE_ADVANTAGE": 72,
+    "QUALITY_SCORE_ADVANTAGE": 70,
+    "RIVAL_CLIPIQA_ADVANTAGE": 68,
+    "CLIPIQA_ADVANTAGE": 66,
+    "RIVAL_RESOLUTION_ADVANTAGE": 45,
+}
+
+
+def _review_focus(support: Sequence[Mapping[str, Any]],
+                  tradeoffs: Sequence[Mapping[str, Any]],
+                  evidence_items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return at most three concrete places to inspect, not another metric dump."""
+    registry = {
+        item.get("id"): item for item in evidence_items
+        if isinstance(item.get("id"), str)
+    }
+    candidates: list[dict[str, Any]] = []
+    for kind, claims in (("support", support), ("tradeoff", tradeoffs)):
+        for claim in claims:
+            code = str(claim.get("code") or "")
+            priority = _FOCUS_PRIORITY.get(code)
+            if priority is None:
+                continue
+            refs = [registry[ref] for ref in claim.get("evidence_codes", [])
+                    if ref in registry]
+            if not refs:
+                continue
+            subjects = sorted({int(item["subject_file_id"]) for item in refs
+                               if _id(item.get("subject_file_id")) is not None})
+            compared = sorted({int(item["compared_to_file_id"]) for item in refs
+                               if _id(item.get("compared_to_file_id")) is not None})
+            region = "face" if ("EYE" in code or "FACE" in code) else "full_frame"
+            candidates.append({
+                "code": code,
+                "text": claim["text"],
+                "kind": kind,
+                "priority": priority,
+                "inspect": {
+                    "file_ids": subjects,
+                    "compare_to_file_ids": compared,
+                    "region": region,
+                },
+                "evidence_codes": list(claim.get("evidence_codes", [])),
+            })
+    candidates.sort(key=lambda item: (-item["priority"], item["code"],
+                                      item["inspect"]["file_ids"]))
+    highlights = candidates[:3]
+    return {
+        "status": "focused" if highlights else "no_clear_difference",
+        "summary": (
+            "先看下面标出的局部差异；通常无需重新无重点地扫完整组图。"
+            if highlights else
+            "现有可靠证据没有给出明确区分点；请按整体偏好选择，不必逐项寻找不存在的差异。"
+        ),
+        "highlights": highlights,
+        "max_highlights": 3,
+    }
+
+
 def _base_result(status: str, recommendation: dict[str, Any],
                  support: list[dict[str, Any]], tradeoffs: list[dict[str, Any]],
                  confidence: dict[str, Any], evidence: _Evidence,
                  keeper_ids: list[int]) -> dict[str, Any]:
+    focus = _review_focus(support, tradeoffs, evidence.items)
     return {
         "schema_version": SCHEMA_VERSION,
         "generator": GENERATOR,
         "mode": "shadow_review_only",
         "status": status,
+        "review_focus": focus,
         "recommendation": recommendation,
         "support": support,
         "tradeoffs": tradeoffs,
@@ -107,7 +181,7 @@ def _base_result(status: str, recommendation: dict[str, Any],
         "human_confirmation": {
             "required": True,
             "code": "HUMAN_CONFIRMATION_REQUIRED",
-            "text": "请查看原图确认表情、闭眼、遮挡、构图与叙事取舍；这些语义未由本理由层推断。",
+            "text": "请查看原图复核闭眼检测，并确认表情、遮挡、构图与叙事取舍。",
         },
         "evidence": evidence.items,
         "invariants": {
@@ -312,6 +386,49 @@ def explain_group(group: Mapping[str, Any],
             f"{len(exact)} 个未保留成员被既有决策层记录为字节完全相同；理由层不新增删除权限。",
             refs,
         ))
+
+    if primary is not None:
+        primary_id = int(primary["file_id"])
+        primary_eye = primary_metrics.get("eye_status")
+        closed_rivals = [
+            row for row, metrics in ranked_rivals
+            if metrics.get("eye_status") == "HAS_CLOSED_EYES"
+        ]
+        open_rivals = [
+            row for row, metrics in ranked_rivals
+            if metrics.get("eye_status") == "ALL_OPEN"
+        ]
+        if closed_rivals and primary_eye in {"ALL_OPEN", "HAS_MAYBE"}:
+            rival = closed_rivals[0]
+            rival_id = int(rival["file_id"])
+            code = ("EYE_STATE_ADVANTAGE" if primary_eye == "ALL_OPEN"
+                    else "RIVAL_CLOSED_EYES_FLAG")
+            ref = evidence.add(
+                code, "features.quality_meta.eye_detection.status",
+                subject=primary_id, compared_to=rival_id,
+                value={"subject": primary_eye, "compared_to": "HAS_CLOSED_EYES"},
+            )
+            support.append(_claim(
+                code,
+                f"本地闭眼检测器将 {_name(rival)} 标为疑似双眼闭合；"
+                f"主保留项状态为 {primary_eye}，仍需查看原图确认。",
+                [ref],
+            ))
+        elif primary_eye == "HAS_CLOSED_EYES" and open_rivals:
+            rival = open_rivals[0]
+            rival_id = int(rival["file_id"])
+            ref = evidence.add(
+                "RIVAL_EYE_STATE_ADVANTAGE",
+                "features.quality_meta.eye_detection.status",
+                subject=rival_id, compared_to=primary_id,
+                value={"subject": "ALL_OPEN", "compared_to": primary_eye},
+            )
+            tradeoffs.append(_claim(
+                "RIVAL_EYE_STATE_ADVANTAGE",
+                f"本地闭眼检测器将主保留项标为疑似双眼闭合，"
+                f"而 {_name(rival)} 为 ALL_OPEN；这是必须人工复核的反向证据。",
+                [ref],
+            ))
 
     if not tradeoffs:
         ref = evidence.add(

@@ -48,16 +48,46 @@ def test_unavailable_without_model(tmp_path):
     assert result["reasons"] == ["MODEL_NOT_FOUND"]
 
 
+def test_yunet_face_regions_are_tiled_and_mapped_back(monkeypatch):
+    detector = object.__new__(eyes.MediaPipeEyeDetector)
+    detector._landmarker = object()
+    detector.model_id = "test"
+    detector.unavailable_reason = None
+    detector.settings = {}
+    seen = []
+
+    def fake_infer(image):
+        seen.append(image.size)
+        return [{"face_index": 0, "bbox_xywh": [10, 12, 120, 130],
+                 "face_width_px": 120, "iod_px": 40,
+                 "blink_left": .05, "blink_right": .05,
+                 "squint_left": .1, "squint_right": .1,
+                 "smile_left": .1, "smile_right": .1}]
+
+    monkeypatch.setattr(detector, "_infer", fake_infer)
+    result = detector.analyze(
+        Image.new("RGB", (1000, 800)), expected_face_count=1,
+        face_regions=[{"bbox": [300, 200, 160, 180]}],
+    )
+    assert seen and seen[0][0] < 1000 and seen[0][1] < 800
+    assert result["status"] == "ALL_OPEN"
+    assert result["faces"][0]["bbox_xywh"][0] > 10
+    assert result["faces"][0]["source_region_index"] == 0
+
+
 def test_stage1_metadata_integration(tmp_path):
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (32, 32), "white").save(image_path)
 
     class Detector:
-        def analyze(self, image, expected_face_count=None):
+        def analyze(self, image, expected_face_count=None, face_regions=None):
             assert image.size == (32, 32)
+            assert face_regions == []
             return eyes.aggregate_faces([face()], model_id="test")
 
     rows = [{"id": 1, "path": str(image_path)}]
     result = stage1._process_batch(stage1.StubBackend(), rows, load_config(), eye_detector=Detector())
     metadata = json.loads(result[0]["quality_meta"])
     assert metadata["eye_detection"]["status"] == "ALL_OPEN"
+    assert metadata["semantic_observer"]["mode"] == "shadow_review_only"
+    assert metadata["semantic_observer"]["invariants"]["deletion_authority"] == "none"

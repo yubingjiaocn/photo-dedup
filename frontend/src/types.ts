@@ -10,7 +10,7 @@
 export type Queue = 'PENDING' | 'LATER' | 'DONE';
 export type BrowseView = 'ALL' | 'MAYBE' | 'UNKNOWN';
 export type View = 'GROUPS' | BrowseView;
-export type ActionName = 'accept' | 'pick' | 'mark' | 'undo' | 'clear';
+export type ActionName = 'accept' | 'pick' | 'mark' | 'keep' | 'undo' | 'clear';
 
 /** One photo, exactly as the server exposes it (no path, ever). */
 export interface Item {
@@ -35,6 +35,64 @@ export interface Group {
   member_count: number;
   members: Item[];
   selection_reason?: SelectionReason;
+  review_judgment?: ReviewJudgment;
+  local_vlm?: LocalVlm;
+}
+
+/** Local-trial VLM sidecar projection (`local-trial-vlm-v1`). A suggestion only:
+ *  nothing is saved unless the reviewer presses “接受VLM建议”. */
+export interface LocalVlm {
+  schema: 'local-trial-vlm-v1';
+  status: 'ok' | 'failed' | 'manual_too_large' | 'cv_only_identical';
+  model: string | null;
+  served_model?: string | null;
+  verdict?: 'recommend' | 'abstain';
+  confidence?: 'high' | 'medium' | 'low';
+  keep_file_ids?: number[];
+  reasons?: Array<{ text: string; file_ids: number[] }>;
+  error?: string | null;
+  detail?: string | null;
+  human_confirmation: string;
+}
+
+export interface ReviewJudgmentDistinction {
+  code: string;
+  text: string;
+  confidence: 'high' | 'medium';
+  targets: Array<{
+    file_id: number;
+    region: string;
+  }>;
+  compare_to_file_ids: number[];
+  cv_refs: string[];
+}
+
+export interface ReviewJudgmentAttentionPointer extends Omit<ReviewJudgmentDistinction, 'confidence'> {
+  confidence: 'low';
+  authority: 'optional_attention_pointer_only';
+}
+
+export interface ReviewJudgment {
+  schema_version: number;
+  mode: 'shadow_review_only';
+  source: 'vlm' | 'cv_only';
+  model_id: string | null;
+  status: 'grounded' | 'abstained';
+  recommended_file_ids: number[];
+  confidence: 'high' | 'medium' | 'unknown';
+  distinctions: ReviewJudgmentDistinction[];
+  max_distinctions: 3;
+  attention_pointers: ReviewJudgmentAttentionPointer[];
+  max_attention_pointers: 3;
+  human_confirmation: string;
+  invariants: {
+    changes_keeper: false;
+    changes_sorting: false;
+    changes_routing: false;
+    changes_decision_tables: false;
+    deletion_authority: 'none';
+    model_calls: number;
+  };
 }
 
 export interface ReasonStatement {
@@ -43,11 +101,27 @@ export interface ReasonStatement {
   evidence_codes: string[];
 }
 
+export interface ReviewFocusHighlight extends ReasonStatement {
+  kind: 'support' | 'tradeoff';
+  priority: number;
+  inspect: {
+    file_ids: number[];
+    compare_to_file_ids: number[];
+    region: 'face' | 'full_frame';
+  };
+}
+
 export interface SelectionReason {
   schema_version: number;
   generator: string;
   mode: 'shadow_review_only';
   status: 'explained' | 'abstained';
+  review_focus?: {
+    status: 'focused' | 'no_clear_difference';
+    summary: string;
+    highlights: ReviewFocusHighlight[];
+    max_highlights: 3;
+  };
   recommendation: ReasonStatement;
   support: ReasonStatement[];
   tradeoffs: ReasonStatement[];
@@ -78,6 +152,9 @@ export interface SelectionReason {
 export interface GroupState {
   action?: string;
   file_id?: number;
+  /** `keep` only: every photo the reviewer kept (multi-select / keep all). */
+  file_ids?: number[];
+  keep_all?: boolean;
 }
 
 export type QueueCounts = Record<Queue, number>;

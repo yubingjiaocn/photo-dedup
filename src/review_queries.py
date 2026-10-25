@@ -241,17 +241,25 @@ def group_page(conn: sqlite3.Connection, offset: int, limit: int,
     counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id, g.created_at AS group_created_at,
                g.decision_state, g.confidence AS group_confidence, g.policy_version,
+               g.decision_json,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
-               gm.confidence AS member_confidence, gm.evidence_json,
-               f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               fe.quality_score, fe.quality_meta, fe.face_count,
-               t.status AS thumb_status, t.error AS thumb_error
+               gm.confidence AS member_confidence, gm.evidence_json, gm.user_override,
+               f.basename, f.width, f.height, f.size_bytes, f.mtime_ns,
+               f.exif_datetime, f.exif_timestamp, f.file_kind, f.motion_partner_id,
+               f.scan_status, f.scan_error, f.last_run_id,
+               fe.phash, fe.content_sha256, fe.dinov2_embedding,
+               fe.local_quality_embedding, fe.quality_score, fe.quality_meta,
+               fe.face_count, fe.faces_json, fe.status AS feature_status,
+               t.status AS thumb_status, t.max_px AS thumb_max_px,
+               t.bytes AS thumb_bytes, t.source_size_bytes AS thumb_source_size_bytes,
+               t.source_mtime_ns AS thumb_source_mtime_ns, t.error AS thumb_error,
+               t.created_at AS thumb_created_at
         FROM (
             SELECT g2.id FROM groups g2
             WHERE EXISTS (
@@ -286,17 +294,25 @@ def group_page_by_id(conn: sqlite3.Connection, group_id: int,
     counted, count_params = _scope_sql(scope, "cf")
     return conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id, g.created_at AS group_created_at,
                g.decision_state, g.confidence AS group_confidence, g.policy_version,
+               g.decision_json,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
-               gm.confidence AS member_confidence, gm.evidence_json,
-               f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               f.file_kind, fe.quality_score, fe.quality_meta, fe.face_count,
-               t.status AS thumb_status, t.error AS thumb_error
+               gm.confidence AS member_confidence, gm.evidence_json, gm.user_override,
+               f.basename, f.width, f.height, f.size_bytes, f.mtime_ns,
+               f.exif_datetime, f.exif_timestamp, f.file_kind, f.motion_partner_id,
+               f.scan_status, f.scan_error, f.last_run_id,
+               fe.phash, fe.content_sha256, fe.dinov2_embedding,
+               fe.local_quality_embedding, fe.quality_score, fe.quality_meta,
+               fe.face_count, fe.faces_json, fe.status AS feature_status,
+               t.status AS thumb_status, t.max_px AS thumb_max_px,
+               t.bytes AS thumb_bytes, t.source_size_bytes AS thumb_source_size_bytes,
+               t.source_mtime_ns AS thumb_source_mtime_ns, t.error AS thumb_error,
+               t.created_at AS thumb_created_at
         FROM groups g
         JOIN group_members gm ON gm.group_id = g.id
         JOIN files f ON f.id = gm.file_id AND {member_predicate}
@@ -348,17 +364,25 @@ def group_page_by_ids(conn: sqlite3.Connection, group_ids: Sequence[int],
     predicate, params = _scope_sql(scope, "sf")
     rows = conn.execute(
         f"""
-        SELECT g.id AS group_id, g.group_type, g.keep_file_id,
+        SELECT g.id AS group_id, g.group_type, g.keep_file_id, g.created_at AS group_created_at,
                g.decision_state, g.confidence AS group_confidence, g.policy_version,
+               g.decision_json,
                (SELECT COUNT(*) FROM group_members cgm
                   JOIN files cf ON cf.id = cgm.file_id
                  WHERE cgm.group_id = g.id AND {counted}) AS member_count,
                g.member_count AS clustered_member_count,
                gm.file_id, gm.is_keep, gm.decision, gm.reason,
-               gm.confidence AS member_confidence, gm.evidence_json,
-               f.basename, f.width, f.height, f.size_bytes, f.exif_datetime,
-               f.file_kind, fe.quality_score, fe.quality_meta, fe.face_count,
-               t.status AS thumb_status, t.error AS thumb_error
+               gm.confidence AS member_confidence, gm.evidence_json, gm.user_override,
+               f.basename, f.width, f.height, f.size_bytes, f.mtime_ns,
+               f.exif_datetime, f.exif_timestamp, f.file_kind, f.motion_partner_id,
+               f.scan_status, f.scan_error, f.last_run_id,
+               fe.phash, fe.content_sha256, fe.dinov2_embedding,
+               fe.local_quality_embedding, fe.quality_score, fe.quality_meta,
+               fe.face_count, fe.faces_json, fe.status AS feature_status,
+               t.status AS thumb_status, t.max_px AS thumb_max_px,
+               t.bytes AS thumb_bytes, t.source_size_bytes AS thumb_source_size_bytes,
+               t.source_mtime_ns AS thumb_source_mtime_ns, t.error AS thumb_error,
+               t.created_at AS thumb_created_at
         FROM groups g
         JOIN group_members gm ON gm.group_id = g.id
         JOIN files f ON f.id = gm.file_id AND {member_predicate}

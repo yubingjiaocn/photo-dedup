@@ -14,6 +14,7 @@ import {
   type BrowseView,
   type Group,
   type Item,
+  type LocalVlm,
   type Queue,
   type View,
 } from '../types';
@@ -22,21 +23,22 @@ import {
   currentGroup,
   currentItem,
   groupStateOf,
-  humanKeeperId,
+  humanKeptIds,
   mode,
   positionInQueue,
   stageItems,
   type State,
 } from '../store';
 
-function badges(item: Item, aiId: number | null, humanId: number | null, short = false) {
+function badges(item: Item, aiId: number | null, humanId: number | number[] | null, short = false) {
   const fid = Number(item.file_id);
+  const kept = humanId == null ? [] : Array.isArray(humanId) ? humanId : [humanId];
   return (
     <>
       {aiId != null && Number(aiId) === fid && (
         <span class="badge ai">🤖AI{short ? '' : '推荐'}</span>
       )}
-      {humanId != null && Number(humanId) === fid && (
+      {kept.some((id) => Number(id) === fid) && (
         <span class="badge human">👤已选{short ? '' : '保留'}</span>
       )}
     </>
@@ -132,7 +134,7 @@ export function Header({ state, onPrev, onNext, onClose }: {
   const gstate = groupStateOf(state, gid);
   const isQueue = mode(state) === 'queue';
   const headClass =
-    gstate && (gstate.action === 'accept' || gstate.action === 'pick')
+    gstate && (gstate.action === 'accept' || gstate.action === 'pick' || gstate.action === 'keep')
       ? 'wbhead done'
       : gstate && gstate.action === 'mark'
         ? 'wbhead later'
@@ -144,7 +146,9 @@ export function Header({ state, onPrev, onNext, onClose }: {
         ? '已完成 · 保留AI推荐'
         : gstate.action === 'pick'
           ? '已完成 · 保留人工所选'
-          : '稍后处理';
+          : gstate.action === 'keep'
+            ? `已完成 · ${gstate.keep_all ? '全部保留' : '保留多张'}（${(gstate.file_ids || []).length} 张）`
+            : '稍后处理';
   const aiId = aiKeeperId(items);
   return (
     <div class={headClass} id="wbHead">
@@ -174,6 +178,24 @@ export function Header({ state, onPrev, onNext, onClose }: {
   );
 }
 
+export function ReviewText({ text }: { text: string }) {
+  const chars = Array.from(text);
+  if (chars.length <= 240) return <span>{text}</span>;
+  return (
+    <details class="review-text">
+      <summary>{chars.slice(0, 180).join('')}…（展开完整观察）</summary>
+      <p>{text}</p>
+    </details>
+  );
+}
+
+export function ReviewObservation({ text, confidence }: { text: string; confidence: 'low' | 'medium' | 'high' }) {
+  return <span data-confidence={confidence}>
+    {confidence === 'low' && <span class="warning">弱观察（不支持推荐）：</span>}
+    <ReviewText text={text} />
+  </span>;
+}
+
 export function Evidence({ state }: { state: State }) {
   if (!state.evidenceOpen) return null;
   const group = currentGroup(state);
@@ -187,17 +209,83 @@ export function Evidence({ state }: { state: State }) {
     );
   }
   const reason = group?.selection_reason;
+  const judgment = group?.review_judgment;
+  const regionText = (region: string) => ({
+    face: '脸部', subject: '主体', background: '背景', full_frame: '整图',
+  }[region] || region);
+  const reviewFocus = reason?.review_focus || {
+    status: 'no_clear_difference' as const,
+    summary: '暂无重点化区分提示；可展开查看完整算法依据。',
+    highlights: [],
+    max_highlights: 3 as const,
+  };
   return (
     <div class="evidence open" id="evidence">
+      {judgment && (
+        <section class="review-judgment" data-judgment-source={judgment.source}>
+          <h3>{judgment.source === 'vlm' ? '独立 VLM 审阅建议' : '决定性 CV 结论'}</h3>
+          {judgment.status === 'grounded' && judgment.recommended_file_ids.length > 0 ? (
+            <p>优先查看照片 {judgment.recommended_file_ids.join('、')}；这不是对既有 keeper 的事后解释。</p>
+          ) : (
+            <p>模型没有给出通过证据门槛的独立推荐，请直接人工比较。</p>
+          )}
+          {judgment.distinctions.length > 0 && (
+            <ol class="review-focus-list">
+              {judgment.distinctions.slice(0, 3).map((item) => (
+                <li key={item.code + item.cv_refs.join(',')}>
+                  <strong>
+                    {item.targets.map((target) => `照片 ${target.file_id} · ${regionText(target.region)}`).join('；')}
+                    {item.compare_to_file_ids.length ? ` ↔ 照片 ${item.compare_to_file_ids.join('、')}` : ''}：
+                  </strong>
+                  <ReviewObservation text={item.text} confidence={item.confidence} />
+                  {item.cv_refs.length > 0 && <span class="enum">CV {item.cv_refs.join(', ')}</span>}
+                </li>
+              ))}
+            </ol>
+          )}
+          {judgment.attention_pointers?.length > 0 && (
+            <>
+              <h4>低置信度注意点（不支持推荐）</h4>
+              <ul>
+                {judgment.attention_pointers.slice(0, 3).map((item) => (
+                  <li key={'attention-' + item.code + item.cv_refs.join(',')}>
+                    {item.targets.map((target) => `照片 ${target.file_id} · ${regionText(target.region)}`).join('；')}：
+                    <ReviewObservation text={item.text} confidence={item.confidence} />
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          <p class="warning">{judgment.human_confirmation}</p>
+        </section>
+      )}
       {reason && (
         <section class="selection-reason" data-reason-status={reason.status}>
-          <h3>人类可读选片理由（shadow）</h3>
-          <p>{reason.recommendation.text}<span class="enum">{reason.recommendation.code} · {reason.recommendation.evidence_codes.join(', ')}</span></p>
-          <h4>支持理由</h4>
-          <ul>{reason.support.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
-          <h4>对手优势 / 取舍</h4>
-          <ul>{reason.tradeoffs.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
-          <p>{reason.confidence.text}<span class="enum">{reason.confidence.code}</span></p>
+          <h3>人类可读选片理由（shadow）：先看区分点</h3>
+          <p>{reviewFocus.summary}</p>
+          {reviewFocus.highlights.length > 0 && (
+            <ol class="review-focus-list">
+              {reviewFocus.highlights.map((item) => (
+                <li key={item.code + item.evidence_codes.join(",")}>
+                  <strong>{item.inspect.region === 'face' ? '看人物/脸部：' : '看整图：'}</strong>
+                  {item.text}
+                  <span class="enum">
+                    照片 {item.inspect.file_ids.join(', ') || '—'}
+                    {item.inspect.compare_to_file_ids.length ? ` ↔ ${item.inspect.compare_to_file_ids.join(', ')}` : ''}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+          <details>
+            <summary>展开完整算法依据</summary>
+            <p>{reason.recommendation.text}<span class="enum">{reason.recommendation.code} · {reason.recommendation.evidence_codes.join(', ')}</span></p>
+            <h4>支持理由</h4>
+            <ul>{reason.support.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
+            <h4>对手优势 / 取舍</h4>
+            <ul>{reason.tradeoffs.map((item) => <li key={item.code + item.evidence_codes.join(",")}>{item.text}<span class="enum">{item.code} · {item.evidence_codes.join(', ')}</span></li>)}</ul>
+            <p>{reason.confidence.text}<span class="enum">{reason.confidence.code}</span></p>
+          </details>
           <p class="warning">{reason.human_confirmation.text}</p>
         </section>
       )}
@@ -241,13 +329,93 @@ export function Evidence({ state }: { state: State }) {
   );
 }
 
-export function Filmstrip({ state, onShowIndex }: { state: State; onShowIndex: (i: number) => void }) {
+const VLM_ERROR_TEXT: Record<string, string> = {
+  offline: '连不上 VLM 接口（端口转发/LiteLLM 未启动？）',
+  auth: 'VLM 接口认证失败（检查 PHOTO_VLM_API_KEY）',
+  model_or_request_rejected: 'VLM 接口拒绝请求（模型别名或图片/格式不受支持）',
+  timeout: 'VLM 接口超时',
+  invalid_answer: '模型回复不符合格式',
+  source_changed: '原图与扫描时不一致',
+  payload_too_large: '本组图片太大，未发送',
+};
+
+/** VLM suggestion for the current group, kept apart from the CV hint and the
+ *  human decision. Text only (never HTML); accepting it is an explicit click. */
+export function LocalVlmPanel({ vlm, items, busy, onAccept }: {
+  vlm: LocalVlm | undefined;
+  items: Item[];
+  busy: boolean;
+  onAccept: (fileIds: number[]) => void;
+}) {
+  if (!vlm) return null;
+  const label = (fid: number) => {
+    const i = items.findIndex((m) => Number(m.file_id) === fid);
+    return i >= 0 ? `第${i + 1}张` : `#${fid}`;
+  };
+  const keep = vlm.keep_file_ids || [];
+  let body;
+  if (vlm.status === 'ok' && vlm.verdict === 'recommend' && keep.length > 0) {
+    body = (
+      <>
+        <p class="vlm-keep">
+          建议保留：{keep.map(label).join('、')}
+          {vlm.confidence && <span class="vlm-conf">（把握：{{ high: '高', medium: '中', low: '低' }[vlm.confidence]}）</span>}
+        </p>
+        {vlm.reasons && vlm.reasons.length > 0 && (
+          <ul class="vlm-reasons">
+            {vlm.reasons.slice(0, 3).map((r, i) => (
+              <li key={i}>
+                {r.text}
+                {r.file_ids.length > 0 && <span class="vlm-ref">（{r.file_ids.map(label).join('、')}）</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        <button id="bVlmAccept" type="button" disabled={busy} onClick={() => onAccept(keep)}>
+          接受VLM建议（保留 {keep.length} 张）
+        </button>
+      </>
+    );
+  } else if (vlm.status === 'ok') {
+    body = <p>模型不确定（弃权），请人工判断。</p>;
+  } else if (vlm.status === 'manual_too_large') {
+    body = <p>本组超过 20 张，未请求 VLM，请人工审阅。</p>;
+  } else if (vlm.status === 'cv_only_identical') {
+    body = <p>完全相同的文件，未请求 VLM。</p>;
+  } else {
+    body = (
+      <p class="vlm-error">
+        VLM 建议失败：{VLM_ERROR_TEXT[vlm.error || ''] || vlm.error || '未知错误'}
+        {vlm.detail ? `（${vlm.detail}）` : ''}。请人工判断，可用 S/G 正常保存。
+      </p>
+    );
+  }
+  return (
+    <section class="local-vlm" data-vlm-status={vlm.status}>
+      <h3>
+        VLM 建议（仅供参考）
+        {vlm.model && <span class="vlm-model"> · 模型 {vlm.model}{vlm.served_model && vlm.served_model !== vlm.model ? `（接口返回 ${vlm.served_model}）` : ''}</span>}
+      </h3>
+      {body}
+      <p class="vlm-note">{vlm.human_confirmation}</p>
+    </section>
+  );
+}
+
+export function Filmstrip({ state, onShowIndex, selected = [] }: {
+  state: State;
+  onShowIndex: (i: number) => void;
+  /** Photos ticked for a pending multi-keep (X), not yet saved. */
+  selected?: number[];
+}) {
   const items = stageItems(state);
   const item = currentItem(state);
   const aiId = aiKeeperId(items);
   const gid = currentGroup(state) ? Number(currentGroup(state)!.group_id) : null;
-  const humanId = humanKeeperId(state, gid);
+  const humanId = humanKeptIds(state, gid);
   const currentId = item ? Number(item.file_id) : null;
+  const vlm = currentGroup(state)?.local_vlm;
+  const vlmKeep = vlm && vlm.status === 'ok' && vlm.verdict === 'recommend' ? vlm.keep_file_ids || [] : [];
   return (
     <div class="filmstrip" id="strip" aria-label="组内照片">
       {items.map((m, i) => {
@@ -273,6 +441,8 @@ export function Filmstrip({ state, onShowIndex }: { state: State; onShowIndex: (
               </span>
               {badges(m, aiId, humanId, true)}
               {cur && <span class="badge cur">当前</span>}
+              {selected.includes(fid) && <span class="badge human">☑勾选</span>}
+              {vlmKeep.includes(fid) && <span class="badge vlm">VLM建议</span>}
             </div>
           </div>
         );
@@ -300,21 +470,31 @@ export function ZoomBar({ zoomText, onCompare, onFit, onHundred }: {
   );
 }
 
-export function ActionBar({ state, onAccept, onPick, onMark, onUndo }: {
+export function ActionBar({ state, onAccept, onPick, onMark, onUndo, onToggle, onKeep, selectedCount = 0 }: {
   state: State;
   onAccept: () => void;
   onPick: () => void;
   onMark: () => void;
   onUndo: () => void;
+  onToggle?: () => void;
+  onKeep?: (all: boolean) => void;
+  selectedCount?: number;
 }) {
   const items = stageItems(state);
   const noAi = aiKeeperId(items) == null;
   const busy = state.mutationBusy;
   return (
     <div class="actionbar" id="actionbar">
-      <button id="bAccept" type="button" disabled={busy || noAi} onClick={onAccept}>A 保留 AI 推荐</button>
+      <button id="bAccept" type="button" disabled={busy || noAi} onClick={onAccept}>A 保留 CV 推荐</button>
       <button id="bPick" type="button" disabled={busy} onClick={onPick}>P 保留当前照片</button>
       <button id="bMark" type="button" disabled={busy} onClick={onMark}>M 稍后处理</button>
+      {onToggle && <button id="bToggle" type="button" disabled={busy} onClick={onToggle}>X 勾选/取消当前</button>}
+      {onKeep && (
+        <button id="bKeepSel" type="button" disabled={busy || selectedCount === 0} onClick={() => onKeep(false)}>
+          S 保留已勾选（{selectedCount}）
+        </button>
+      )}
+      {onKeep && <button id="bKeepAll" type="button" disabled={busy} onClick={() => onKeep(true)}>G 全部保留</button>}
       <button id="bUndo" type="button" disabled={busy || state.undoDepth <= 0} onClick={onUndo}>U 撤销上一步</button>
       <span class="hint">
         <kbd>J</kbd>/<kbd>K</kbd> 换组 · <kbd>H</kbd>/<kbd>L</kbd> 换照片 · 按住 <kbd>C</kbd> 闪切 AI 推荐 ·{' '}
@@ -418,7 +598,7 @@ export function Help({ open, onClose }: { open: boolean; onClose: () => void }) 
         <table>
           <tr><td>? 或 F1</td><td>显示/隐藏此帮助</td></tr>
           <tr><td colspan={2} class="grouphead">审阅动作</td></tr>
-          <tr><td>A</td><td>保留 AI 推荐，本组完成并进入下一组</td></tr>
+          <tr><td>A</td><td>保留 CV（算法）推荐，本组完成并进入下一组</td></tr>
           <tr><td>P</td><td>保留当前照片，本组完成并进入下一组</td></tr>
           <tr><td>M</td><td>稍后处理，本组移入「稍后」队列</td></tr>
           <tr><td>U</td><td>撤销上一步，回到刚才操作的那一组与那张照片</td></tr>
@@ -491,7 +671,7 @@ export function Toast({ text, show }: { text: string; show: boolean }) {
   );
 }
 
-export function itemLabel(item: Item | null, aiId: number | null, humanId: number | null) {
+export function itemLabel(item: Item | null, aiId: number | null, humanId: number | number[] | null) {
   if (!item) return null;
   return (
     <>

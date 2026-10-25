@@ -37,7 +37,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import db, review_assets, review_state, root_scope, selection_reason, thumbnails
+from . import (
+    db,
+    local_vlm,
+    review_assets,
+    review_state,
+    root_scope,
+    selection_reason,
+    thumbnails,
+    vlm_review,
+)
 
 DEFAULT_PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
@@ -92,8 +101,8 @@ def _public_item(row: Any) -> Dict[str, Any]:
     }
 
 
-def _group_items(rows: List[Any]) -> List[Dict[str, Any]]:
-    """Fold rows into groups and add a read-only shadow explanation."""
+def _group_items(rows: List[Any], output: Path | None = None) -> List[Dict[str, Any]]:
+    """Fold rows into groups and add read-only deterministic/VLM review evidence."""
     groups: List[Dict[str, Any]] = []
     index: Dict[int, Dict[str, Any]] = {}
     reason_rows: Dict[int, List[Dict[str, Any]]] = {}
@@ -119,6 +128,13 @@ def _group_items(rows: List[Any]) -> List[Dict[str, Any]]:
         group_id = int(entry["group_id"])
         entry["selection_reason"] = selection_reason.explain_group(
             reason_groups[group_id], reason_rows[group_id])
+        if output is not None:
+            cached = vlm_review.load_cached(output, reason_rows[group_id])
+            if cached is not None:
+                entry["review_judgment"] = cached
+            local = local_vlm.load_for_group(output, reason_rows[group_id])
+            if local is not None:
+                entry["local_vlm"] = local
     return groups
 
 
@@ -305,7 +321,7 @@ class ReviewData:
         window = ids[offset:offset + page_size]
         with self._lock:
             items = _group_items(
-                db.group_page_by_ids(self._conn, window, scope=self.scope))
+                db.group_page_by_ids(self._conn, window, scope=self.scope), self.output)
         group_ids = [group["group_id"] for group in items]
         return {
             "view": "GROUPS", "queue": queue, "page": page, "pages": pages,
@@ -328,7 +344,7 @@ class ReviewData:
             rows = db.group_page_by_id(self._conn, int(group_id), scope=self.scope)
         if not rows:
             return None
-        return _group_items(rows)[0]
+        return _group_items(rows, self.output)[0]
 
     def thumb_bytes(self, file_id: int) -> Optional[bytes]:
         """Read a cached JPEG from the SSD only. No source fallback, ever.
@@ -430,6 +446,7 @@ class ReviewData:
 
         group_id = payload.get("group_id")
         file_id = payload.get("file_id")
+        file_ids = payload.get("file_ids")
         context_file_id = payload.get("context_file_id")
 
         if not isinstance(group_id, int) or not isinstance(action, str):
@@ -437,7 +454,7 @@ class ReviewData:
 
         error = review_state.validate_action(
             self._conn, group_id, file_id, action, self.scope, self._lock,
-            context_file_id=context_file_id,
+            context_file_id=context_file_id, file_ids=file_ids,
         )
         if error:
             return {"error": error}
@@ -463,6 +480,15 @@ class ReviewData:
             }
             if file_id is not None:
                 decision["file_id"] = int(file_id)
+            if action == "keep":
+                # Multi-select / keep-all: pin each kept photo to its byte
+                # identity so a later export can detect a changed original.
+                sha_by_id = {int(row["file_id"]): row["content_sha256"]
+                             for row in member_rows}
+                kept = sorted(int(i) for i in file_ids)
+                decision["file_ids"] = kept
+                decision["file_sha256"] = [sha_by_id.get(i) for i in kept]
+                decision["keep_all"] = set(kept) == set(sha_by_id)
             self.state.apply_decision(group_id, decision, member_fingerprint,
                                       focus_file_id=focus)
 
@@ -492,11 +518,31 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
 
     class ReviewHandler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, directory=str(data.output), **kwargs)
+            super().__init__(*args, directory=str(getattr(data, "static_root", data.output)), **kwargs)
 
         # -- routing --------------------------------------------------------
         def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
             parsed = urlparse(self.path)
+            if hasattr(data, "image_bytes"):
+                image = re.fullmatch(r"/api/cloud-image/(\d+)/(\d+)/([0-9a-f]{64})\.jpg", parsed.path)
+                if image:
+                    try:
+                        payload = data.image_bytes(int(image[1]), int(image[2]), image[3])
+                        if payload is None:
+                            self.send_error(404)
+                        else:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "image/jpeg")
+                            self.send_header("Content-Length", str(len(payload)))
+                            self.send_header("Cache-Control", "no-store")
+                            self.end_headers()
+                            self.wfile.write(payload)
+                    except (ValueError, OSError):
+                        self.send_error(409, "cloud image changed")
+                    return
+                if parsed.path.startswith(("/api/original/", "/api/thumb/", "/api/next", "/api/locate")):
+                    self.send_error(404)
+                    return
             if parsed.path == "/api/page":
                 self._serve_page(parsed.query)
                 return
@@ -641,7 +687,7 @@ def create_handler(data: ReviewData) -> type[http.server.SimpleHTTPRequestHandle
             params = parse_qs(query)
             try:
                 view = params.get("view", ["GROUPS"])[0].upper()
-                queue = params.get("queue", [DEFAULT_QUEUE])[0].upper()
+                queue = params.get("queue", ["ALL" if hasattr(data, "batch_id") else DEFAULT_QUEUE])[0].upper()
                 page = int(params.get("page", ["1"])[0])
                 size = int(params.get("page_size", [str(DEFAULT_PAGE_SIZE)])[0])
                 self._send_json(data.page(view, page, size, queue))

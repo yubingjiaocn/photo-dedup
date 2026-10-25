@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Single-cloud-judge batch report",
+  "type": "object",
+  "required": [
+    "version",
+    "mode",
+    "totals",
+    "routes",
+    "states",
+    "external_calls_total",
+    "external_calls_this_run",
+    "usage",
+    "estimated_cost_usd_known",
+    "cost_unknown_groups",
+    "decision_table_writes",
+    "groups",
+    "scene_routes"
+  ],
+  "properties": {
+    "version": {
+      "const": "cloud-judge-batch-v1"
+    },
+    "mode": {
+      "enum": [
+        "prepare",
+        "fixture",
+        "execute"
+      ]
+    },
+    "totals": {
+      "const": {
+        "dates": 6,
+        "files": 2065,
+        "groups": 194
+      }
+    },
+    "routes": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "select",
+          "attention_only",
+          "abstain"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "external_calls_total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 194
+    },
+    "external_calls_this_run": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 194
+    },
+    "usage": {
+      "type": "object"
+    },
+    "estimated_cost_usd_known": {
+      "type": "number",
+      "minimum": 0
+    },
+    "cost_unknown_groups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision_table_writes": {
+      "const": 0
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 194,
+      "maxItems": 194,
+      "items": {
+        "type": "object",
+        "required": [
+          "group",
+          "route",
+          "state",
+          "reserved",
+          "usage",
+          "decision_table_writes"
+        ],
+        "properties": {
+          "route": {
+            "enum": [
+              "select",
+              "attention_only",
+              "abstain"
+            ]
+          },
+          "state": {
+            "enum": [
+              "attention",
+              "prepared",
+              "reserved",
+              "failed_no_retry",
+              "validated"
+            ]
+          },
+          "decision_table_writes": {
+            "const": 0
+          },
+          "reserved": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "scene_routes": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "action",
+          "stage",
+          "group",
+          "interaction",
+          "ordinary",
+          "unknown"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  }
+}

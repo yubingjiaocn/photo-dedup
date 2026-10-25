@@ -15,13 +15,12 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 from . import review_assets
 from .run_pipeline import serve_review
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Open an existing photo-dedup review without re-running the pipeline."
     )
@@ -34,7 +33,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="local review port (default: automatic)")
     parser.add_argument("--no-open", action="store_true",
                         help="do not open the browser automatically")
+    parser.add_argument("--cloud-batch", type=Path, help="explicit read-only cloud batch directory")
+    parser.add_argument("--cloud-manifest", type=Path, help="frozen.json binding the batch to source inventories")
+    parser.add_argument("--manual-holdout-review", action="store_true", help="Willy manual review only; holdout saves stay sealed")
     args = parser.parse_args(argv)
+
+    if args.cloud_batch:
+        if not args.cloud_manifest:
+            parser.error("--cloud-batch requires --cloud-manifest")
+        try:
+            serve_cloud_review(Path(args.output), args.cloud_batch, args.cloud_manifest,
+                               args.port, not args.no_open, allow_holdout=args.manual_holdout_review)
+            return 0
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            print(f"[serve_review][ERROR] {exc}", file=sys.stderr)
+            return 1
 
     output = Path(args.output).expanduser().resolve()
     db_path = output / "inventory.sqlite"
@@ -53,6 +66,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[serve_review][ERROR] {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def serve_cloud_review(output, batch, manifest, port=0, open_browser=True, *, allow_holdout=False):
+    """Serve bundled UI without installing files into source or output trees."""
+    import http.server
+    import webbrowser
+
+    from .cloud_review import CloudReviewData
+    from .review_server import create_handler
+
+    data = CloudReviewData(output, batch, manifest, allow_holdout=allow_holdout)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), create_handler(data))
+    url = f"http://127.0.0.1:{server.server_port}/review.html?mode=cloud"
+    print(f"[review] private cloud review: {url}", flush=True)
+    print(f"[review] {data.status()['total']} groups; only output/review-state is writable", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        data.close()
 
 
 if __name__ == "__main__":

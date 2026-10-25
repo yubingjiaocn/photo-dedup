@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "two-pass-deep-judge-v1.schema.json",
+  "title": "Pass B review-only evidence-bound judgment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "confidence",
+    "recommended",
+    "multi_select_reason",
+    "irreplaceable",
+    "discriminators"
+  ],
+  "properties": {
+    "decision": {
+      "enum": [
+        "select",
+        "attention_only",
+        "abstain"
+      ]
+    },
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "recommended": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "evidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "multi_select_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/discriminator"
+        }
+      ]
+    },
+    "irreplaceable": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "subject",
+          "phase",
+          "evidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "subject": {
+            "type": "string",
+            "pattern": "^R[0-9]{1,2}$"
+          },
+          "phase": {
+            "enum": [
+              null,
+              "interaction",
+              "gesture",
+              "formation",
+              "lighting",
+              "appearance"
+            ]
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "discriminators": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/discriminator"
+      }
+    }
+  },
+  "$defs": {
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_id",
+        "content_sha256"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "region",
+          "confidence"
+        ],
+        "properties": {
+          "region": {
+            "type": "string",
+            "pattern": "^R[0-9]{1,2}$"
+          },
+          "confidence": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      },
+      "description": "Each region ID resolves uniquely to a validated scene_map region with a file_id+SHA frame binding. key_subject/supporting can support select. bystander/unknown may only support attention_only occlusion, interference or composition observations, never recommendations or irreplaceability."
+    },
+    "discriminator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        }
+      }
+    }
+  },
+  "description": "Obey request decision_ceiling. attention_only forbids select and any recommendations, multi-select reasons or irreplaceability claims. Evidence may bind key_subject or supporting regions including stage_area. Never infer individual-performer completeness from stage_area.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "attention_only",
+              "abstain"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "recommended": {
+            "maxItems": 0
+          },
+          "irreplaceable": {
+            "maxItems": 0
+          },
+          "multi_select_reason": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

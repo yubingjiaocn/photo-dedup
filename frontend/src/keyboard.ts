@@ -20,6 +20,8 @@ export type Intent =
   | { kind: 'group'; delta: number }
   | { kind: 'decide'; action: 'accept' | 'pick' | 'mark' }
   | { kind: 'undo' }
+  | { kind: 'toggleSelect' }
+  | { kind: 'keep'; all: boolean }
   | { kind: 'none' };
 
 export interface KeyContext {
@@ -76,6 +78,9 @@ export function keyIntent(key: string, ctx: KeyContext): Intent {
     return ctx.repeat ? NONE : { kind: 'decide', action };
   }
   if (lower === 'u') return ctx.repeat ? NONE : { kind: 'undo' };
+  if (lower === 'x') return ctx.repeat ? NONE : { kind: 'toggleSelect' };
+  if (lower === 's') return ctx.repeat ? NONE : { kind: 'keep', all: false };
+  if (lower === 'g') return ctx.repeat ? NONE : { kind: 'keep', all: true };
   return NONE;
 }
 
@@ -84,5 +89,5 @@ export function isHandledKey(key: string): boolean {
   const k = String(key || '');
   if (['?', 'F1', 'Escape', '1'].includes(k)) return true;
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(k)) return true;
-  return /^[aApPmMuUeEdDfFcChHlLjJkK]$/.test(k);
+  return /^[aApPmMuUeEdDfFcChHlLjJkKxXsSgG]$/.test(k);
 }

@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional
 from . import db
 
 _SCHEMA_VERSION = 1
-ACTIONS = ("accept", "pick", "mark")
+ACTIONS = ("accept", "pick", "mark", "keep")
 QUEUES = ("PENDING", "LATER", "DONE")
 HISTORY_LIMIT = 200
 
@@ -54,11 +54,31 @@ def compute_member_fingerprint(member_file_ids: list[int]) -> str:
 def queue_of(decision: Optional[Dict[str, Any]]) -> str:
     """Queue a group with ``decision`` belongs to (``None`` -> PENDING)."""
     action = (decision or {}).get("action")
-    if action in ("accept", "pick"):
+    if action in ("accept", "pick", "keep"):
         return "DONE"
     if action == "mark":
         return "LATER"
     return "PENDING"
+
+
+def _valid_keep_fields(value: Dict[str, Any]) -> bool:
+    """``keep`` (multi-select / keep-all) carries sorted unique ids and their SHAs.
+
+    Every other action must not carry these fields, so a legacy ``pick`` can
+    never be read as a multi-selection and vice versa.
+    """
+    ids, shas = value.get("file_ids"), value.get("file_sha256")
+    if value.get("action") != "keep":
+        return ids is None and shas is None and value.get("keep_all") is None
+    if not isinstance(ids, list) or not ids or not all(_positive_int(i) for i in ids):
+        return False
+    if ids != sorted(set(ids)):
+        return False
+    if not isinstance(shas, list) or len(shas) != len(ids):
+        return False
+    if not all(sha is None or (isinstance(sha, str) and len(sha) == 64) for sha in shas):
+        return False
+    return isinstance(value.get("keep_all", False), bool)
 
 
 def _valid_decision(value: Any) -> bool:
@@ -66,6 +86,8 @@ def _valid_decision(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     if value.get("action") not in ACTIONS:
+        return False
+    if not _valid_keep_fields(value):
         return False
     timestamp = value.get("timestamp")
     if timestamp is not None and (not isinstance(timestamp, int)
@@ -201,6 +223,8 @@ class ReviewState:
                 member_fp = value.get("member_fingerprint")
                 if member_fp is not None and not isinstance(member_fp, str):
                     continue
+                if not _valid_keep_fields(value):
+                    continue
                 validated_groups[gid_str] = value
             self._data["groups"] = validated_groups
             self._data["history"] = _validated_history(raw.get("history"))
@@ -321,7 +345,7 @@ class ReviewState:
             raise ValueError("decision must be dict")
         action = decision.get("action")
         if action not in ACTIONS:
-            raise ValueError(f"action must be accept/pick/mark, got {action}")
+            raise ValueError(f"action must be accept/pick/mark/keep, got {action}")
         timestamp = decision.get("timestamp")
         if timestamp is not None and (not isinstance(timestamp, int) or isinstance(timestamp, bool)):
             raise ValueError("timestamp must be int if present")
@@ -331,6 +355,9 @@ class ReviewState:
                 raise ValueError("pick requires int file_id")
         elif file_id is not None:
             raise ValueError(f"{action} must not have file_id")
+        if not _valid_keep_fields(decision):
+            raise ValueError("keep requires sorted unique file_ids with matching "
+                             "file_sha256; other actions must not carry them")
 
         record = dict(decision)
         if member_fingerprint is not None:
@@ -486,7 +513,8 @@ class ReviewState:
         """Return counts for display. Returns immutable copy."""
         with self._lock:
             groups = self._data["groups"]
-            reviewed = sum(1 for g in groups.values() if g.get("action") in ("accept", "pick"))
+            reviewed = sum(1 for g in groups.values()
+                           if g.get("action") in ("accept", "pick", "keep"))
             marked = sum(1 for g in groups.values() if g.get("action") == "mark")
             return {"total": len(groups), "reviewed": reviewed, "marked": marked}
 
@@ -511,7 +539,7 @@ class ReviewState:
             groups = self._data["groups"]
             for group_id in group_ids:
                 action = (groups.get(str(group_id)) or {}).get("action")
-                name = ("DONE" if action in ("accept", "pick")
+                name = ("DONE" if action in ("accept", "pick", "keep")
                         else "LATER" if action == "mark" else "PENDING")
                 counts[name] += 1
                 placement[int(group_id)] = name
@@ -665,6 +693,7 @@ def validate_action(
     scope: Any,
     _lock: Optional[threading.Lock] = None,
     context_file_id: Any = None,
+    file_ids: Any = None,
 ) -> Optional[str]:
     """Validate that group/file_id belong to scope and group.
 
@@ -678,13 +707,25 @@ def validate_action(
     # Strict payload validation
     if not isinstance(group_id, int) or isinstance(group_id, bool):
         return "group_id must be int"
-    if action not in ("accept", "pick", "mark", "clear"):
+    if action not in ("accept", "pick", "mark", "clear", "keep"):
         return f"invalid action: {action}"
 
-    # accept/mark/clear must not have file_id
-    if action in ("accept", "mark", "clear"):
+    # accept/mark/clear/keep must not have file_id
+    if action in ("accept", "mark", "clear", "keep"):
         if file_id is not None:
             return f"{action} action must not include file_id"
+
+    # keep (multi-select) requires a non-empty list of unique member ids
+    if action == "keep":
+        if (not isinstance(file_ids, list) or not file_ids
+                or not all(_positive_int(i) for i in file_ids)):
+            return "keep action requires non-empty file_ids (list of int)"
+        if len(set(file_ids)) != len(file_ids):
+            return "file_ids must be unique"
+        if len(file_ids) > 500:
+            return "too many file_ids"
+    elif file_ids is not None:
+        return f"{action} action must not include file_ids"
 
     # pick requires file_id that is a real int
     if action == "pick":
@@ -728,6 +769,10 @@ def validate_action(
     if action == "pick" and not _is_member(conn, group_id, file_id, predicate,
                                            params, _lock):
         return "file_id not a member of this group"
+    if action == "keep":
+        for member_id in file_ids:
+            if not _is_member(conn, group_id, member_id, predicate, params, _lock):
+                return f"file_id {member_id} not a member of this group"
 
     # The on-screen photo gets the same membership check, on its own, so a crafted
     # id can never be stored as "where the reviewer was".

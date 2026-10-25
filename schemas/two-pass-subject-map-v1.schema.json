@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "two-pass-subject-map-v1.schema.json",
+  "title": "Pass A anonymous subject map, structural validation only",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scene",
+    "regime",
+    "confidence",
+    "coverage",
+    "regions",
+    "correspondence"
+  ],
+  "properties": {
+    "scene": {
+      "enum": [
+        "stage",
+        "multi_person",
+        "interaction",
+        "unknown"
+      ]
+    },
+    "regime": {
+      "enum": [
+        "stage",
+        "group",
+        "unknown"
+      ]
+    },
+    "confidence": {
+      "$ref": "#/$defs/confidence"
+    },
+    "coverage": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "state",
+          "uncertainty",
+          "confidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "state": {
+            "enum": [
+              "candidate_complete",
+              "missing",
+              "uncertain"
+            ]
+          },
+          "uncertainty": {
+            "enum": [
+              "none_reported",
+              "missing_key",
+              "occlusion",
+              "reflection",
+              "unresolved_roles",
+              "resolution"
+            ]
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          }
+        }
+      }
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "frame",
+          "box",
+          "role",
+          "kind",
+          "confidence",
+          "grounding"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^R[0-9]{1,2}$"
+          },
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "box": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "role": {
+            "enum": [
+              "key_subject",
+              "supporting",
+              "bystander",
+              "unknown"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "subject",
+              "interaction",
+              "stage_area"
+            ]
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          },
+          "grounding": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "page",
+              "visible"
+            ],
+            "properties": {
+              "page": {
+                "type": "string",
+                "pattern": "^I[1-9][0-9]*@[0-9a-f]{64}$"
+              },
+              "visible": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "correspondence": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "regions",
+          "confidence",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^T[0-9]{1,2}$"
+          },
+          "regions": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^R[0-9]{1,2}$"
+            }
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          },
+          "state": {
+            "enum": [
+              "candidate",
+              "ambiguous"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_id",
+        "content_sha256"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "description": "Finite in-bounds grounded boxes are mandatory. Main key_subject/supporting regions need area 0.005..0.85. Legal bystander/unknown boxes are ledger-only, never strips. Tracks must have consistent role and kind. Only non-ambiguous medium/high key_subject or supporting tracks (including stage_area kind) enter strips. Uncertain resolution/occlusion coverage permits attention-only review, never select."
+}

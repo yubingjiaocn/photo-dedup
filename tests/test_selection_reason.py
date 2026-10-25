@@ -10,10 +10,13 @@ from src.selection_reason import explain_group, faithfulness
 
 
 def member(file_id, *, keep=False, reason="RELATIVE_ONLY", quality=None,
-           clipiqa=None, width=4000, height=3000, utility=None, margin=None):
+           clipiqa=None, eye_status=None, width=4000, height=3000,
+           utility=None, margin=None):
     meta = {"backend": "torch"}
     if clipiqa is not None:
         meta["clipiqa"] = clipiqa
+    if eye_status is not None:
+        meta["eye_detection"] = {"status": eye_status}
     evidence = {}
     if utility is not None:
         evidence["utility_score"] = utility
@@ -145,6 +148,56 @@ def test_rival_advantage_evidence_points_from_winner_to_compared_member():
                       if item["code"] == "RIVAL_RESOLUTION_ADVANTAGE")
     assert resolution["subject_file_id"] == 2
     assert resolution["compared_to_file_id"] == 1
+
+
+def test_closed_eye_cv_flag_can_support_but_never_remove():
+    result = explain_group({"keep_file_id": 1}, [
+        member(1, keep=True, reason="GROUP_KEEPER", eye_status="HAS_MAYBE",
+               utility=.8, margin=0),
+        member(2, eye_status="HAS_CLOSED_EYES", utility=.6, margin=.2),
+    ])
+    claim = next(item for item in result["support"]
+                 if item["code"] == "RIVAL_CLOSED_EYES_FLAG")
+    assert "仍需查看原图确认" in claim["text"]
+    assert result["invariants"]["deletion_authority"] == "none"
+
+
+def test_closed_eye_primary_surfaces_rival_open_tradeoff():
+    result = explain_group({"keep_file_id": 1}, [
+        member(1, keep=True, reason="GROUP_KEEPER",
+               eye_status="HAS_CLOSED_EYES", utility=.8, margin=0),
+        member(2, eye_status="ALL_OPEN", utility=.6, margin=.2),
+    ])
+    assert any(item["code"] == "RIVAL_EYE_STATE_ADVANTAGE"
+               for item in result["tradeoffs"])
+
+
+def test_review_focus_prioritizes_concrete_face_difference_and_is_bounded():
+    result = explain_group({"keep_file_id": 1}, [
+        member(1, keep=True, reason="GROUP_KEEPER", quality=80,
+               clipiqa=.8, eye_status="HAS_MAYBE", width=2000, height=1500,
+               utility=.8, margin=0),
+        member(2, quality=70, clipiqa=.6, eye_status="HAS_CLOSED_EYES",
+               width=5000, height=4000, utility=.6, margin=.2),
+    ])
+    focus = result["review_focus"]
+    assert focus["status"] == "focused"
+    assert len(focus["highlights"]) <= 3
+    assert focus["highlights"][0]["code"] == "RIVAL_CLOSED_EYES_FLAG"
+    assert focus["highlights"][0]["inspect"] == {
+        "file_ids": [1], "compare_to_file_ids": [2], "region": "face",
+    }
+    assert all(item["code"] != "UTILITY_MARGIN" for item in focus["highlights"])
+
+
+def test_review_focus_says_no_clear_difference_instead_of_inventing_one():
+    result = explain_group({"keep_file_id": 1}, [
+        member(1, keep=True, reason="GROUP_KEEPER"), member(2),
+    ])
+    focus = result["review_focus"]
+    assert focus["status"] == "no_clear_difference"
+    assert focus["highlights"] == []
+    assert "没有给出明确区分点" in focus["summary"]
 
 
 def test_sqlite_projection_is_read_only_for_decision_tables(tmp_path):

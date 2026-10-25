@@ -5,6 +5,7 @@
  * page still renders and works if that dynamic chunk is absent.
  */
 import { render } from 'preact';
+import { CloudReview } from './cloud-review';
 import './review.css';
 import { App, type AppDeps } from './app';
 import { PanzoomZoom, retainImages } from './viewer/panzoom-adapter';
@@ -32,5 +33,6 @@ async function makeDeps(): Promise<AppDeps> {
 
 const root = document.getElementById('app');
 if (root) {
-  makeDeps().then((deps) => render(<App deps={deps} />, root));
+  if (new URLSearchParams(location.search).get('mode') === 'cloud') render(<CloudReview />, root);
+  else makeDeps().then((deps) => render(<App deps={deps} />, root));
 }

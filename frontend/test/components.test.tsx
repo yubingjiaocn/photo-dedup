@@ -98,7 +98,7 @@ describe('ActionBar', () => {
 
   it('uses the agreed Chinese wording', () => {
     const host = mount(<ActionBar state={loaded} onAccept={noop} onPick={noop} onMark={noop} onUndo={noop} />);
-    expect(host.querySelector('#bAccept')!.textContent).toContain('保留 AI 推荐');
+    expect(host.querySelector('#bAccept')!.textContent).toContain('保留 CV 推荐');
     expect(host.querySelector('#bPick')!.textContent).toContain('保留当前照片');
     expect(host.querySelector('#bMark')!.textContent).toContain('稍后处理');
     expect(host.querySelector('#bUndo')!.textContent).toContain('撤销上一步');

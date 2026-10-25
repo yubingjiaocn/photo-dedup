@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "learner-artifact-v1.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "learner-artifact-v1"
+    },
+    "dataset_bundle_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "trainer": {
+      "type": "object",
+      "properties": {
+        "code_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fixture": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code_sha256",
+        "model",
+        "version",
+        "fixture"
+      ],
+      "additionalProperties": false
+    },
+    "feature_schema": {
+      "const": "full-db-features-v1"
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "null"
+        ]
+      }
+    },
+    "gates": {
+      "type": "object",
+      "properties": {
+        "holdout_excluded": {
+          "const": true
+        },
+        "shadow_only": {
+          "const": true
+        }
+      },
+      "required": [
+        "holdout_excluded",
+        "shadow_only"
+      ],
+      "additionalProperties": false
+    },
+    "preference_profile": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preferences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "criterion": {
+                "enum": [
+                  "distinct_moments",
+                  "expressions",
+                  "interaction",
+                  "composition",
+                  "technical_quality",
+                  "uncertainty"
+                ]
+              },
+              "weight": {
+                "type": "number",
+                "minimum": -1,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "criterion",
+              "weight"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 12
+        }
+      },
+      "required": [
+        "version",
+        "preferences"
+      ],
+      "additionalProperties": false
+    },
+    "retrieval_exemplars": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "group": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "event_id",
+          "group"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "original_request": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "dataset_bundle_sha256",
+    "trainer",
+    "feature_schema",
+    "metrics",
+    "gates",
+    "preference_profile",
+    "retrieval_exemplars",
+    "files",
+    "original_request"
+  ],
+  "additionalProperties": false
+}

@@ -41,7 +41,8 @@ def test_stage1_motion_photo_uses_metadata_gate_and_preserves_existing_quality_m
     row = _image_row(tmp_path, file_kind="jpg_motion", motion_partner_id=99)
 
     class Detector:
-        def analyze(self, image, expected_face_count=None):
+        def analyze(self, image, expected_face_count=None, face_regions=None):
+            assert face_regions == []
             return {"status": "ALL_OPEN", "sentinel": True}
 
     result = stage1._process_batch(

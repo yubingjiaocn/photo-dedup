@@ -18,6 +18,7 @@ import {
   Filmstrip,
   Header,
   Help,
+  LocalVlmPanel,
   QueueTabs,
   Stage,
   StateWarning,
@@ -32,7 +33,7 @@ import {
   aiKeeperId,
   currentGroup,
   currentItem,
-  humanKeeperId,
+  humanKeptIds,
   initialState,
   mode,
   paneAItem,
@@ -58,6 +59,11 @@ export function App({ deps }: { deps: AppDeps }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [zoomText, setZoomText] = useState('适应窗口');
   const [toast, setToast] = useState<{ text: string; show: boolean }>({ text: '', show: false });
+  // Photos ticked with X for a multi-keep; scoped to one group, never persisted
+  // until S/G posts a `keep` decision.
+  const [selection, setSelection] = useState<{ gid: number | null; ids: number[] }>({ gid: null, ids: [] });
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
 
   // Latest state, so async callbacks and the keyboard listener never close over
   // a stale snapshot (they are registered once).
@@ -270,6 +276,58 @@ export function App({ deps }: { deps: AppDeps }) {
     [advanceAfter, showToast],
   );
 
+  const toggleSelect = useCallback(() => {
+    const s = stateRef.current;
+    if (mode(s) !== 'queue') return;
+    const group = currentGroup(s);
+    const item = currentItem(s);
+    if (!group || !item) return;
+    const gid = Number(group.group_id);
+    const fid = Number(item.file_id);
+    const prev = selectionRef.current.gid === gid ? selectionRef.current.ids : [];
+    const ids = prev.includes(fid) ? prev.filter((id) => id !== fid) : [...prev, fid].sort((a, b) => a - b);
+    setSelection({ gid, ids });
+  }, []);
+
+  const keepMany = useCallback(
+    async (all: boolean, explicitIds?: number[]) => {
+      const s = stateRef.current;
+      if (mode(s) !== 'queue' || s.mutationBusy) return;
+      const group = currentGroup(s);
+      if (!group) return;
+      const gid = Number(group.group_id);
+      const ids = explicitIds
+        ? explicitIds.filter((id) => stageItems(s).some((m) => Number(m.file_id) === id))
+        : all
+        ? stageItems(s).map((m) => Number(m.file_id))
+        : selectionRef.current.gid === gid
+          ? selectionRef.current.ids
+          : [];
+      if (!ids.length) {
+        showToast('请先用 X 勾选要保留的照片');
+        return;
+      }
+      const payload: api.ActionPayload = { group_id: gid, action: 'keep', file_ids: ids };
+      const item = currentItem(s);
+      if (item) payload.context_file_id = Number(item.file_id);
+      dispatch({ type: 'setBusy', on: true });
+      try {
+        const data = await api.postAction(payload);
+        if (data.queues) dispatch({ type: 'setQueueCounts', queueCounts: data.queues, undoDepth: Number(data.undo_depth || 0) });
+        setSelection({ gid: null, ids: [] });
+        await advanceAfter(gid);
+        showToast(explicitIds
+          ? `已按 VLM 建议保留 ${ids.length} 张，进入下一组`
+          : all ? '已全部保留，进入下一组' : `已保留 ${ids.length} 张，进入下一组`);
+      } catch (error) {
+        showToast('操作失败：' + (error as Error).message);
+      } finally {
+        dispatch({ type: 'setBusy', on: false });
+      }
+    },
+    [advanceAfter, showToast],
+  );
+
   const undoLast = useCallback(async () => {
     const s = stateRef.current;
     if (mode(s) !== 'queue' || s.mutationBusy) return;
@@ -431,6 +489,12 @@ export function App({ deps }: { deps: AppDeps }) {
         case 'undo':
           if (!s.mutationBusy) void undoLast();
           break;
+        case 'toggleSelect':
+          toggleSelect();
+          break;
+        case 'keep':
+          if (!s.mutationBusy) void keepMany(intent.all);
+          break;
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -453,7 +517,7 @@ export function App({ deps }: { deps: AppDeps }) {
       document.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [closeBrowse, decide, setBlink, stepGroup, toggleCompare, undoLast]);
+  }, [closeBrowse, decide, keepMany, setBlink, stepGroup, toggleCompare, toggleSelect, undoLast]);
 
   // --- boot ----------------------------------------------------------------
   useEffect(() => {
@@ -503,7 +567,8 @@ export function App({ deps }: { deps: AppDeps }) {
   const items = stageItems(state);
   const gid = currentGroup(state) ? Number(currentGroup(state)!.group_id) : null;
   const aiId = aiKeeperId(items);
-  const humanId = humanKeeperId(state, gid);
+  const humanId = humanKeptIds(state, gid);
+  const selectedIds = selection.gid === gid ? selection.ids : [];
   const paneA = paneAItem(state);
   const paneB = paneBItem(state);
 
@@ -538,6 +603,14 @@ export function App({ deps }: { deps: AppDeps }) {
             onClose={closeBrowse}
           />
           <Evidence state={state} />
+          {inQueue && (
+            <LocalVlmPanel
+              vlm={currentGroup(state)?.local_vlm}
+              items={stageItems(state)}
+              busy={state.mutationBusy}
+              onAccept={(ids) => void keepMany(false, ids)}
+            />
+          )}
           <Stage
             osd={deps.osd}
             labelA={labelA}
@@ -551,6 +624,7 @@ export function App({ deps }: { deps: AppDeps }) {
           />
           <Filmstrip
             state={state}
+            selected={selectedIds}
             onShowIndex={(i) => {
               dispatch({ type: 'showIndex', index: i });
               controllerRef.current!.reset();
@@ -569,6 +643,9 @@ export function App({ deps }: { deps: AppDeps }) {
               onPick={() => void decide('pick')}
               onMark={() => void decide('mark')}
               onUndo={() => void undoLast()}
+              onToggle={toggleSelect}
+              onKeep={(all) => void keepMany(all)}
+              selectedCount={selectedIds.length}
             />
           )}
         </div>

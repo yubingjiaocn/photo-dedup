@@ -109,6 +109,14 @@ export function humanKeeperId(s: State, gid: number | null): number | null {
   return st && st.action === 'pick' && st.file_id != null ? Number(st.file_id) : null;
 }
 
+/** Every photo the human kept: one for `pick`, any number for `keep` (multi / all). */
+export function humanKeptIds(s: State, gid: number | null): number[] {
+  const st = (gid == null ? null : s.reviewState[String(gid)]) || null;
+  if (st && st.action === 'keep' && Array.isArray(st.file_ids)) return st.file_ids.map(Number);
+  const one = humanKeeperId(s, gid);
+  return one == null ? [] : [one];
+}
+
 export function groupStateOf(s: State, gid: number | null): GroupState | null {
   return (gid == null ? null : s.reviewState[String(gid)]) || null;
 }

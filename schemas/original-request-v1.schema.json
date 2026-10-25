@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "original-request-v1.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "original-request-v1"
+    },
+    "dataset_bundle_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "provider": {
+            "enum": [
+              "local",
+              "google_photos"
+            ]
+          },
+          "asset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "date",
+          "file_id",
+          "content_sha256",
+          "provider",
+          "asset_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 32
+    }
+  },
+  "required": [
+    "schema",
+    "dataset_bundle_sha256",
+    "items"
+  ],
+  "additionalProperties": false
+}

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Self
 
 import numpy as np
 from PIL import Image
@@ -119,20 +120,62 @@ class MediaPipeEyeDetector:
             self._landmarker = vision.FaceLandmarker.create_from_options(options)
         except (ImportError, ModuleNotFoundError):
             self.unavailable_reason = "MEDIAPIPE_NOT_INSTALLED"
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional detector must fail closed
             self.unavailable_reason = "DETECTOR_INIT_FAILED"
 
-    def analyze(self, image: Image.Image, expected_face_count: int | None = None) -> dict[str, Any]:
+    def analyze(self, image: Image.Image, expected_face_count: int | None = None,
+                face_regions: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
         if self._landmarker is None:
             return unavailable_result(self.unavailable_reason or "DETECTOR_UNAVAILABLE")
         try:
-            raw_faces = self._infer(image)
+            raw_faces = (self._infer_regions(image, face_regions)
+                         if face_regions else self._infer(image))
             defaults = asdict(EyeThresholds())
             thresholds = EyeThresholds(**{key: self.settings[key] for key in defaults if key in self.settings})
             faces = [classify_face(face, thresholds) for face in raw_faces]
             return aggregate_faces(faces, expected_face_count=expected_face_count, model_id=self.model_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed inference must fail closed
             return unavailable_result("DETECTOR_INFERENCE_FAILED")
+
+    def _infer_regions(self, image: Image.Image,
+                       face_regions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Run the landmarker on YuNet-proposed face tiles for small subjects."""
+        output = []
+        for region_index, region in enumerate(face_regions):
+            box = region.get("bbox") or []
+            if len(box) < 4:
+                continue
+            x, y, width, height = map(float, box[:4])
+            pad = 0.45 * max(width, height)
+            left, top = max(0, int(x - pad)), max(0, int(y - pad))
+            right = min(image.width, int(x + width + pad))
+            bottom = min(image.height, int(y + height + pad))
+            if right <= left or bottom <= top:
+                continue
+            detected = self._infer(image.crop((left, top, right, bottom)))
+            if not detected:
+                continue
+            face = max(detected, key=lambda item: float(item.get("face_width_px") or 0))
+            translated = dict(face)
+            bbox = list(translated.get("bbox_xywh") or [])
+            if len(bbox) == 4:
+                bbox[0] += left
+                bbox[1] += top
+                translated["bbox_xywh"] = bbox
+            translated["source_region_index"] = region_index
+            output.append(translated)
+        return output
+
+    def close(self) -> None:
+        landmarker, self._landmarker = self._landmarker, None
+        if landmarker is not None:
+            landmarker.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
     def _infer(self, image: Image.Image) -> list[dict[str, Any]]:
         """Translate MediaPipe output into evidence; policy does not live here."""

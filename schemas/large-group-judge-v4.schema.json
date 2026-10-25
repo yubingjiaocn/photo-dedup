@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "large-group-judge-v4.schema.json",
+  "title": "Offline large-group v4 phase coverage candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "confidence",
+    "recommended",
+    "multi_select_reason",
+    "irreplaceable",
+    "discriminators",
+    "contract",
+    "phase_census",
+    "clusters"
+  ],
+  "properties": {
+    "decision": {
+      "enum": [
+        "select",
+        "attention_only",
+        "abstain"
+      ]
+    },
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "recommended": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "evidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "multi_select_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/multiReason"
+        }
+      ]
+    },
+    "irreplaceable": {
+      "type": "array",
+      "maxItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "subject",
+          "phase",
+          "evidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "subject": {
+            "type": "string",
+            "pattern": "^R[0-9]{1,2}$"
+          },
+          "phase": {
+            "enum": [
+              null,
+              "interaction",
+              "gesture",
+              "formation",
+              "lighting",
+              "appearance"
+            ]
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "discriminators": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/discriminator"
+      }
+    },
+    "contract": {
+      "const": "large-group-v4-candidate-1"
+    },
+    "phase_census": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "frame",
+          "cluster",
+          "state",
+          "readability",
+          "evidence"
+        ],
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/frame"
+          },
+          "cluster": {
+            "type": "string",
+            "pattern": "^P[1-9][0-9]?$"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "readability": {
+            "enum": [
+              "usable",
+              "unreadable",
+              "uncertain"
+            ]
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "clusters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "members",
+          "relation",
+          "representative",
+          "reason",
+          "omissions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^P[1-9][0-9]?$"
+          },
+          "members": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/$defs/frame"
+            }
+          },
+          "relation": {
+            "enum": [
+              "distinct",
+              "uncertain_distinct",
+              "unassessable"
+            ]
+          },
+          "representative": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/frame"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "omissions": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "frame",
+                "reason"
+              ],
+              "properties": {
+                "frame": {
+                  "$ref": "#/$defs/frame"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_id",
+        "content_sha256"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "region",
+          "confidence"
+        ],
+        "properties": {
+          "region": {
+            "type": "string",
+            "pattern": "^R[0-9]{1,2}$"
+          },
+          "confidence": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      },
+      "description": "Every region is a supplied deterministic view with exact frame+box binding. Local attention hints are not referenceable evidence. No subject completeness is implied by a full frame or grid."
+    },
+    "discriminator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        }
+      }
+    },
+    "multiReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "region",
+              "confidence"
+            ],
+            "properties": {
+              "region": {
+                "type": "string",
+                "pattern": "^R[0-9]{1,2}$"
+              },
+              "confidence": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            }
+          },
+          "description": "Every region is a supplied deterministic view with exact frame+box binding. Local attention hints are not referenceable evidence. No subject completeness is implied by a full frame or grid."
+        }
+      }
+    }
+  },
+  "description": "Single judge, complete per-frame census and substitutability partition; 3-16 frames.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "attention_only",
+              "abstain"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "recommended": {
+            "maxItems": 0
+          },
+          "irreplaceable": {
+            "maxItems": 0
+          },
+          "multi_select_reason": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

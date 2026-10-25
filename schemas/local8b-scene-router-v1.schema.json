@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Local scene router; no subject-map authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "snapshot_sha256",
+    "groups"
+  ],
+  "properties": {
+    "version": {
+      "const": "local8b-scene-router-v1"
+    },
+    "snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "groups": {
+      "type": "array",
+      "maxItems": 194,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "group",
+          "status"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "pattern": "^2026-\\d{2}-\\d{2}-G\\d{3}$"
+          },
+          "status": {
+            "enum": [
+              "routed",
+              "failed",
+              "pending"
+            ]
+          },
+          "scene": {
+            "enum": [
+              "action",
+              "stage",
+              "group",
+              "interaction",
+              "ordinary",
+              "unknown"
+            ]
+          },
+          "origin": {
+            "enum": [
+              "local8b",
+              "fixture"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "attention_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "routed"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "scene",
+                "origin",
+                "model"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
