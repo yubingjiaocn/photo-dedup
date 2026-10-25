@@ -4,7 +4,7 @@
 >
 > Instance recovery 的完整日期评估与当前边界见 [最终验收](docs/FINAL_ACCEPTANCE.md)：pose/dense 默认关闭、仅供审阅；尚未证明净收益或通过 Windows 真机与新增人标安全验收。
 
-> **本地试用从这里开始：**`git clone` 本仓库 → `.\setup_windows.ps1` → `.\start-local-review.ps1 -Root <日期文件夹> -Output <仓库外的输出目录>`。完整步骤（继续审阅、多选保存、导出、可选 VLM 建议）见 [LOCAL_TRIAL.md](LOCAL_TRIAL.md)。下方 Quick Start 是底层 `run_pipeline` 命令，调试时再用。
+> **本地试用从这里开始：**`git clone` 本仓库 → `.\setup_windows.ps1` → `.\start-local-review.ps1 -Root <日期文件夹> -Output <仓库外的输出目录>`。完整步骤（继续审阅、多选保存、导出、可选 VLM 建议、试用后如何反馈）见 [LOCAL_TRIAL.md](LOCAL_TRIAL.md)。下方 Quick Start 是底层 `run_pipeline` 命令，调试时再用。
 
 ## 5-minute Quick Start (Windows)
 
